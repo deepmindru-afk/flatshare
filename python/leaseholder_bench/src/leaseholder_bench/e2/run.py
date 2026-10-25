@@ -157,6 +157,9 @@ class Host:
     profile: str = BOX_PROFILE
     """The GPU nodes' hardware profile (deploy/profiles/NAME.toml), whose engine settings the engine
     check expects."""
+    preflight: str = ""
+    """A single host's preflight.json (deploy/a100/host.py preflight), whose degraded and refused checks
+    each point's run.json keeps; cyan has none."""
 
     @classmethod
     def load(cls, home: Path | None = None) -> Host:
@@ -894,6 +897,8 @@ def _measure(
         _start_tunnels(nodes, systemd, record)
     base = profile_flags(host.profile)
     record["profile"] = host.profile
+    if host.preflight:
+        record["preflight"] = preflight_summary(Path(host.preflight))
     servers = _check_engines(arm, engines, out, record, base)
     record.say(f"configuring cyan for {arm.name}")
     record["cyan"] = configure_cyan(arm, host, systemd)
@@ -1322,6 +1327,26 @@ def _stale_install(pyproject: Path = PYPROJECT) -> str | None:
             "the venv (deploy/cyan/bootstrap.sh) so that run.json names the version that runs"
         )
     return None
+
+
+def preflight_summary(path: Path) -> dict[str, Any]:
+    """What a point keeps of its host's preflight: when it ran and each check that was not ok, with
+    its reason and what it changes in what the results mean (DESIGN: a degraded check is recorded in
+    every point)."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"path": str(path), "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "path": str(path),
+        "time": data.get("time"),
+        "counts": data.get("counts"),
+        "not_ok": [
+            {key: check.get(key) for key in ("check", "status", "value", "reason", "effect")}
+            for check in data.get("checks", [])
+            if check.get("status") != "ok"
+        ],
+    }
 
 
 def _versions(host: Host, gpu_source: Mapping[str, str | None] | None) -> dict[str, Any]:

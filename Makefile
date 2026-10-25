@@ -10,7 +10,7 @@ PY_PACKAGES := $(filter-out python/leaseholder_vllm,$(patsubst %/pyproject.toml,
 # single host's supervisor and forwarder among them, which have no suffix) and the engine variants (not the recorded
 # runs' own scripts under benchmarks/results).
 PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py benchmarks/a100/*.py deploy/*.py deploy/bin/*.py \
-  deploy/phastform/variants/*/*.py) deploy/bin/lh-forward deploy/bin/lh-svc
+  deploy/a100/*.py deploy/phastform/variants/*/*.py) deploy/bin/lh-forward deploy/bin/lh-svc
 # E2's committed records (lh-bench e2 export), one directory per point under its campaign, and where
 # reproduce-e2 writes their report.
 E2_RESULTS := benchmarks/results/2026-10-23-e2
