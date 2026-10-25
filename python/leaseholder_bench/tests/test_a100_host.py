@@ -13,6 +13,7 @@ import json
 import os
 import socketserver
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -467,7 +468,8 @@ def test_the_preflight_refuses_what_would_fail_the_smoke_tests_listener_audit(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:
     # Under systemd, with user namespaces refused, the voice plane's units would listen in the host's namespace,
-    # which smoke.sh's audit refuses; and the audit needs ss.
+    # which smoke.sh's audit refuses, and the refusal names the way out; and the audit needs ss.
+    monkeypatch.delenv("LH_SUPERVISOR", raising=False)
     node = ready_host(tmp_path, venv, engine, monkeypatch, facts(userns=False))
     (tmp_path / "bin" / "ss").unlink()
     which = host_py.shutil.which
@@ -479,10 +481,86 @@ def test_the_preflight_refuses_what_would_fail_the_smoke_tests_listener_audit(
     checks = {c.check: c for c in host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)}
     assert checks["User namespaces"].status == "refused"
     assert "kernel.apparmor_restrict_unprivileged_userns=0" in checks["User namespaces"].reason
+    assert "LH_SUPERVISOR=lh-svc" in checks["User namespaces"].reason
     assert (
         checks["Listener audit"].status == "refused"
         and "iproute2" in checks["Listener audit"].reason
     )
+
+
+def test_the_override_runs_the_units_under_lh_svc_where_systemd_could(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # A host with a user manager and lingering but no user namespaces and no sudo: LH_SUPERVISOR=lh-svc runs the
+    # units under lh-svc, and the voice plane in the host's namespace is the degraded path, not a refusal.
+    monkeypatch.setenv("LH_SUPERVISOR", "lh-svc")
+    monkeypatch.setattr(host_py, "_public_addresses", lambda: ["203.0.113.7"])
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts(userns=False))
+    checks = {c.check: c for c in host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)}
+    assert not [c.check for c in checks.values() if c.status == "refused"]
+    userns = checks["User namespaces"]
+    assert userns.status == "degraded"
+    assert "203.0.113.7 must drop inbound UDP" in userns.reason
+    # Under lh-svc the audit cannot tell the units' listeners: the named addresses are the check.
+    assert "cannot attribute" in userns.reason
+    supervisor = checks["systemd --user and linger"]
+    assert supervisor.status == "degraded" and "LH_SUPERVISOR=lh-svc" in supervisor.value
+    # %t is lh-svc's, not systemd's /run/user/UID.
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    run = tmp_path / "state" / "lh-svc" / "run"
+    assert host_py.runtime_dir(node.host) == run
+    assert host_py.engine_address(node.host) == f"unix:{run}/lh/engine.sock"
+    monkeypatch.setenv("LH_SUPERVISOR", "systemd")
+    with pytest.raises(host_py.HostError, match="auto or lh-svc"):
+        host_py.supervisor(node.host)
+
+
+def test_env_sh_is_written_for_lh_svc_with_the_override(tmp_path: Path, monkeypatch) -> None:
+    out, _ = render(tmp_path, facts())  # systemd --user and lingering
+    node = host_py.Node.load(out)
+    home = tmp_path / "home"
+    monkeypatch.delenv("LH_SUPERVISOR", raising=False)
+    assert "shims" not in host_py.write_env(node, home).read_text()  # systemd runs the units
+    monkeypatch.setenv("LH_SUPERVISOR", "lh-svc")
+    env_sh = host_py.write_env(node, home)
+    text = env_sh.read_text()
+    assert f"export PATH={REPO}/deploy/bin/shims:$PATH\n" in text
+    assert (
+        "export LH_SUPERVISOR=lh-svc\n" in text
+    )  # kept for the later stages and the scripts that source it
+    # Sourced as the scripts source it, with no runtime directory of the session's: the shims first, lh-svc's %t.
+    run = home / ".local" / "state" / "lh-svc" / "run"
+    sourced = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source {env_sh} && echo "$PATH" && echo "$XDG_RUNTIME_DIR" && echo "$LH_SUPERVISOR"',
+        ],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+    path, runtime, chosen = sourced.stdout.splitlines()
+    assert path.split(":")[0] == str(REPO / "deploy" / "bin" / "shims")
+    assert (runtime, chosen) == (str(run), "lh-svc")
+    assert stat.S_IMODE(run.stat().st_mode) == 0o700
+    # A host without a user manager runs lh-svc without the override, which env.sh then does not name.
+    out, _ = render(tmp_path / "container", facts(systemd_user=False, linger=None))
+    monkeypatch.delenv("LH_SUPERVISOR")
+    text = host_py.write_env(host_py.Node.load(out), home).read_text()
+    assert "deploy/bin/shims" in text and "LH_SUPERVISOR" not in text
+
+
+def test_bootstrap_refuses_an_unknown_supervisor_before_it_writes_anything(tmp_path: Path) -> None:
+    done = subprocess.run(
+        ["bash", str(DEPLOY / "a100" / "bootstrap.sh"), "stage"],
+        env=os.environ | {"HOME": str(tmp_path), "LH_SUPERVISOR": "systemd"},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 2 and "LH_SUPERVISOR is auto or lh-svc" in done.stderr
+    assert not (tmp_path / "leaseholder").exists()
 
 
 def test_the_preflight_names_what_a_bare_container_lacks(

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """host.py: one host that is both the GPU node and the control host (single-host mode, docs/HARDWARE.md).
 
+    host.py env NODE                  write NODE/env.sh, which every command on this host sources (the supervisor)
     host.py units NODE                link the node's units and cyan's into the user manager, with this host's drop-ins
     host.py config NODE               write the control plane's configuration, keeping what exists
     host.py jit-check NODE [--arch X.Y]   build FlashInfer's sampling module as the engine's first start would
@@ -11,18 +12,23 @@
 NODE is the node's directory as deploy/a100/bootstrap.sh makes it: profile.py's rendering (node.json, the engine and
 STT configs, the GPU units) and host.json, the host's facts (profile.py detect).
 
-`units` links the node's GPU units and cyan's control-plane units (deploy/cyan/systemd: the gateway and its socket
-unit, LiveKit, the voice-plane namespace and the voice worker; no tunnel, lh-tunnel@, since the GPU servers are this
-host's) into ~/.config/systemd/user, with drop-ins it writes into NODE/single-host: the cores of the node's core
-plan for the gateway and the voice plane; the voice worker's STT and TTS on this host's own sockets
-($XDG_RUNTIME_DIR/lh/stt.sock and tts.sock, where cyan has the tunnel's phastform-stt.sock and -tts.sock); the voice
-plane in the host's network namespace where unprivileged user namespaces are refused; and the vad-turns worker
-variant, which E2 points need. `config` writes ~/.config/leaseholder: gateway.toml from
+`env` writes NODE/env.sh: nothing where systemd's user manager, outliving the session (lingering), runs the units; else
+deploy/bin/lh-svc runs them, and env.sh puts its systemctl and journalctl shims first on PATH and gives XDG_RUNTIME_DIR
+lh-svc's own directory where the session has none. LH_SUPERVISOR=lh-svc makes lh-svc run them where systemd could (a
+host whose kernel refuses the voice plane's namespace, with no sudo to allow it: the voice plane then runs in the host's
+namespace, degraded, where under systemd the preflight refuses), and env.sh keeps the choice; LH_SUPERVISOR=auto (or
+unset) lets the host's facts decide. `units` links the node's GPU units and cyan's control-plane units
+(deploy/cyan/systemd: the gateway and its socket unit, LiveKit, the voice-plane namespace and the voice worker; no
+tunnel, lh-tunnel@, since the GPU servers are this host's) into ~/.config/systemd/user, with drop-ins it writes into
+NODE/single-host: the cores of the node's core plan for the gateway and the voice plane; the voice worker's STT and TTS
+on this host's own sockets ($XDG_RUNTIME_DIR/lh/stt.sock and tts.sock, where cyan has the tunnel's phastform-stt.sock
+and -tts.sock); the voice plane in the host's network namespace where unprivileged user namespaces are refused; and the
+vad-turns worker variant, which E2 points need. `config` writes ~/.config/leaseholder: gateway.toml from
 deploy/cyan/gateway.example.toml with the upstream on the engine's own socket, the voice plane's socket under this
 host's runtime directory and the digests of new tenant keys (kept in gateway-keys.env), livekit.env, the cache-salt
-secret, the metrics key, and e2-host.toml, which points lh-bench e2 run at the engine's and the gateway's sockets,
-the core plan's load-generator cores, the node's profile and its preflight. Secrets are written once, mode 600, and
-never replaced.
+secret, the metrics key, and e2-host.toml, which points lh-bench e2 run at the engine's and the gateway's sockets, the
+core plan's load-generator cores, the node's profile and its preflight. Secrets are written once, mode 600, and never
+replaced.
 
 `jit-check` builds FlashInfer's top-k/top-p sampler, the kernel the engine JIT-compiles at its first start on this
 card (vLLM 0.32.0 samples with FlashInfer on CUDA cards of more than 16 SMs), with the engine unit's environment and
@@ -90,6 +96,8 @@ CONTROL = (
 since the control plane reaches this host's GPU servers on their own sockets."""
 WORKER_VARIANTS = ("vad-turns",)
 """cyan's worker variants linked for good: every E2 point runs with fixed endpointing (ops/RUNBOOK.md)."""
+SUPERVISORS = ("auto", "lh-svc")
+"""LH_SUPERVISOR's values: the host's facts decide, or deploy/bin/lh-svc runs the units where systemd could."""
 GATEWAY_URL = "http://127.0.0.1:18080"
 """The gateway's TCP listener, AIPerf's way in (gateway.toml's first [[listen]])."""
 WARM = (
@@ -182,14 +190,68 @@ def engine_address(host: dict) -> str:
     return f"unix:{runtime_dir(host) / 'lh' / 'engine.sock'}"
 
 
+def overridden() -> bool:
+    """Whether the operator chose lh-svc (LH_SUPERVISOR=lh-svc); auto or unset lets the facts decide."""
+    chosen = os.environ.get("LH_SUPERVISOR") or "auto"
+    if chosen not in SUPERVISORS:
+        raise HostError(f"LH_SUPERVISOR is auto or lh-svc, not {chosen!r}")
+    return chosen == "lh-svc"
+
+
+def supervisor(host: dict) -> str:
+    """What runs the units: systemd's user manager where the host has one that outlives the session (systemd
+    --user and lingering), unless LH_SUPERVISOR=lh-svc; else deploy/bin/lh-svc."""
+    if overridden() or not (host.get("systemd_user") and host.get("linger")):
+        return "lh-svc"
+    return "systemd"
+
+
+def lh_svc_runtime() -> Path:
+    """deploy/bin/lh-svc's runtime directory where the session has no XDG_RUNTIME_DIR."""
+    state = os.environ.get("XDG_STATE_HOME") or str(_home() / ".local" / "state")
+    return Path(state) / "lh-svc" / "run"
+
+
 def runtime_dir(host: dict) -> Path:
     """%t as the units will see it: XDG_RUNTIME_DIR; else systemd's /run/user/UID, or deploy/bin/lh-svc's own."""
     if value := os.environ.get("XDG_RUNTIME_DIR"):
         return Path(value)
-    if host.get("systemd_user"):
+    if supervisor(host) == "systemd":
         return Path(f"/run/user/{os.getuid()}")
-    state = os.environ.get("XDG_STATE_HOME") or str(_home() / ".local" / "state")
-    return Path(state) / "lh-svc" / "run"
+    return lh_svc_runtime()
+
+
+def write_env(node: Node, home: Path | None = None) -> Path:
+    """NODE/env.sh, which every command on this host sources: under lh-svc its shims and runtime directory."""
+    home = home or _home()
+    path = node.dir / "env.sh"
+    if supervisor(node.host) == "systemd":
+        _write(
+            path,
+            "# Sourced before any command on this host (deploy/a100/host.py env writes it): systemd runs the units.\n",
+        )
+        return path
+    state = os.environ.get("XDG_STATE_HOME") or str(home / ".local" / "state")
+    run = Path(state) / "lh-svc" / "run"
+    run.mkdir(mode=0o700, parents=True, exist_ok=True)
+    run.chmod(0o700)
+    why = (
+        "LH_SUPERVISOR=lh-svc chose deploy/bin/lh-svc over the user manager"
+        if overridden() and node.host.get("systemd_user") and node.host.get("linger")
+        else "no systemd user manager that outlives the session here, so deploy/bin/lh-svc runs the units"
+    )
+    lines = [
+        "# Sourced before any command on this host (deploy/a100/host.py env writes it): "
+        + why
+        + ",",
+        "# through the systemctl and journalctl shims.",
+        f"export XDG_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-{run}}}",
+        f"export PATH={DEPLOY / 'bin' / 'shims'}:$PATH",
+    ]
+    if overridden():
+        lines.append("export LH_SUPERVISOR=lh-svc")
+    _write(path, "\n".join(lines) + "\n")
+    return path
 
 
 # units
@@ -1037,19 +1099,20 @@ def preflight(
         )
 
     # The host's services.
-    if host.get("systemd_user") and host.get("linger"):
+    if supervisor(host) == "systemd":
         add("systemd --user and linger", "ok", "systemd --user, lingering")
     else:
         add(
             "systemd --user and linger",
             "degraded",
-            f"systemd --user {bool(host.get('systemd_user'))}, linger {host.get('linger')}",
+            f"systemd --user {bool(host.get('systemd_user'))}, linger {host.get('linger')}"
+            + ("; LH_SUPERVISOR=lh-svc" if overridden() else ""),
             "supervisor instead of systemd (deploy/bin/lh-svc with the systemctl and journalctl shims)",
             "none on the measurements",
         )
     if host.get("userns") is True:
         add("User namespaces", "ok", "the voice plane in its own network namespace")
-    elif host.get("systemd_user") and host.get("linger"):
+    elif supervisor(host) == "systemd":
         # Under systemd the voice plane's processes are lh-*.service units', whose listeners in the host's namespace
         # smoke.sh's listener audit (deploy/bin/audit-listeners) refuses, and block 0 with it.
         add(
@@ -1058,7 +1121,9 @@ def preflight(
             "refused" if host.get("userns") is False else "not checked (no unshare or ip)",
             "the voice plane would run in the host's network namespace, where smoke.sh's listener audit refuses "
             "LiveKit's and the voice worker's listeners: allow unprivileged user namespaces (Ubuntu 24.04: sudo sysctl "
-            "-w kernel.apparmor_restrict_unprivileged_userns=0, then bootstrap.sh stage again)",
+            "-w kernel.apparmor_restrict_unprivileged_userns=0, then bootstrap.sh stage again), or, with no sudo, run "
+            "the units under deploy/bin/lh-svc with the voice plane in the host's namespace, degraded: "
+            "LH_SUPERVISOR=lh-svc bootstrap.sh stage",
         )
     else:
         public = _public_addresses()
@@ -1071,7 +1136,9 @@ def preflight(
                 f"; the host's public addresses {', '.join(public)} must drop inbound UDP"
                 if public
                 else ""
-            ),
+            )
+            + "; the listener audit cannot attribute listeners to units under lh-svc (their processes' cgroups "
+            "are the session's), so the check here is the named addresses, not the audit",
             "none on latency; isolation differs",
         )
     # smoke.sh (block 0) audits the listening sockets with ss on the GPU node.
@@ -1194,6 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="host.py", description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (
+        ("env", "write NODE/env.sh, with the supervisor's shims where lh-svc runs the units"),
         ("units", "link the units and this host's drop-ins"),
         ("config", "write the control plane's configuration"),
     ):
@@ -1228,7 +1296,9 @@ def main(argv: list[str] | None = None) -> int:
         os.execvpe(args.cmd[0], args.cmd, env)
     try:
         node = Node.load(args.node)
-        if args.command == "units":
+        if args.command == "env":
+            print(f"host: wrote {write_env(node)} ({supervisor(node.host)} runs the units)")
+        elif args.command == "units":
             for link in install_units(node):
                 print(f"host: linked {link}")
         elif args.command == "config":

@@ -12,7 +12,9 @@
 #          vLLM's own parse of the node's configs, and the preflight with the GPU's checks
 #   warm   one engine start for each compile configuration (cache/warm.json), so that the campaign starts warm
 # LH_PROFILE names another profile; LH_MODELS adds MODEL@REVISION words to download (the 14B, for C'); LH_WARM is a
-# file of the configurations to warm (host.py warm --configs).
+# file of the configurations to warm (host.py warm --configs). LH_SUPERVISOR=lh-svc runs the units under
+# deploy/bin/lh-svc even where systemd's user manager could (docs/HARDWARE.md, single-host mode): env.sh keeps the
+# choice for the later stages and every script that sources it, and LH_SUPERVISOR=auto gives it back to the facts.
 set -euo pipefail
 stage=${1:-}
 [[ $stage == stage || $stage == gpu || $stage == warm ]] || { echo "usage: bootstrap.sh stage|gpu|warm" >&2; exit 2; }
@@ -20,6 +22,13 @@ src=$(cd "$(dirname "$0")/../.." && pwd)
 root=$HOME/leaseholder
 node=$root/node
 profile=${LH_PROFILE:-a100-40gb}
+if [[ -z ${LH_SUPERVISOR:-} && -f $node/env.sh ]]; then # an earlier stage's choice
+  LH_SUPERVISOR=$(sed -n 's/^export LH_SUPERVISOR=//p' "$node/env.sh")
+fi
+case ${LH_SUPERVISOR:=auto} in
+  auto | lh-svc) export LH_SUPERVISOR ;;
+  *) echo "bootstrap: LH_SUPERVISOR is auto or lh-svc, not '$LH_SUPERVISOR'" >&2; exit 2 ;;
+esac
 mkdir -p "$root"/{bin,venvs,vendor,data,runs,results,cache} "$node"
 exec > >(tee -a "$node/bootstrap.log") 2>&1
 log() { echo "[$(date -u +%FT%TZ)] bootstrap $stage: $*"; }
@@ -87,19 +96,15 @@ render() {
   log "install path: $(field "$node/node.json" install path): $(field "$node/node.json" install reason)"
 }
 
-shell_env() { # env.sh, which every command on this host sources: the systemctl and journalctl shims without systemd
-  if [[ $(field "$node/host.json" systemd_user) == True && $(field "$node/host.json" linger) == True ]]; then
-    printf '# Sourced before any command on this host (deploy/a100/bootstrap.sh writes it): systemd runs the units.\n' \
-      >"$node/env.sh"
-  else
-    mkdir -p -m 700 "$HOME/.local/state/lh-svc/run"
-    cat >"$node/env.sh" <<EOF
-# Sourced before any command on this host (deploy/a100/bootstrap.sh writes it): no systemd user manager that
-# outlives the session here, so deploy/bin/lh-svc runs the units through the systemctl and journalctl shims.
-export XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-$HOME/.local/state/lh-svc/run}
-export PATH=$src/deploy/bin/shims:\$PATH
-EOF
+shell_env() { # env.sh, which every command on this host sources: lh-svc's shims where it runs the units
+  if [[ $LH_SUPERVISOR == lh-svc && $(field "$node/host.json" systemd_user) == True ]]; then
+    # The user manager may run the units of an earlier stage: they stop, so that lh-svc's take their sockets.
+    local manager
+    manager=$(PATH=${PATH//"$src"\/deploy\/bin\/shims:/} command -v systemctl || true)
+    [[ -z $manager ]] || "$manager" --user stop leaseholder.target lh-engine lh-stt lh-tts lh-voice-worker \
+      lh-gateway.service lh-gateway.socket lh-livekit lh-voicenet 2>/dev/null || true
   fi
+  host_py env "$node"
   # shellcheck source=/dev/null
   source "$node/env.sh"
 }
