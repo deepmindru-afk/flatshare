@@ -576,7 +576,7 @@ def test_a_stop_signals_the_main_process_when_exec_stop_cannot_run(host: dict) -
     (home / "gateway.py").write_text(DRAINING)
     (units / "drains.service").write_text(
         f"[Service]\nType=notify\nExecStart={py} %h/gateway.py %h/gateway.pid %h/gateway.drained\n"
-        "ExecStop=%h/no-such-command $MAINPID\n"
+        "ExecStop=%h/no-such-command $MAINPID\nExecStopPost=/usr/bin/touch %h/post.ran\n"
     )
     try:
         assert ctl(host, "--user", "start", "drains.service").returncode == 0
@@ -588,10 +588,38 @@ def test_a_stop_signals_the_main_process_when_exec_stop_cannot_run(host: dict) -
         drained = (home / "gateway.drained").exists()
         assert drained and gone(pid), (drained, took)
         assert took < 4, took
+        # ExecStopPost runs all the same, as systemd runs it.
+        assert (home / "post.ran").exists()
         # The unit ends failed, as systemd's does when its ExecStop cannot run, with the cause in its journal.
         assert ctl(host, "--user", "is-active", "drains.service").stdout.strip() == "failed"
         journal = ctl(host, "-u", "drains", "-o", "cat", tool="journalctl").stdout
         assert f"lh-svc: {home}/no-such-command: " in journal, journal
+    finally:
+        ctl(host, "--user", "stop", "drains.service")
+
+
+def test_a_failed_exec_stop_leaves_the_unit_failed(host: dict) -> None:
+    # An ExecStop that runs and fails, as lh-gateway-stop does when it kills a gateway still running at the end of
+    # its wait, leaves the unit failed, as systemd's does, so that is-failed shows the stop that did not drain; the
+    # main process still gets its KillSignal and ExecStopPost runs.
+    units, home, py = host["units"], host["home"], sys.executable
+    (home / "gateway.py").write_text(DRAINING)
+    (units / "drains.service").write_text(
+        f"[Service]\nType=notify\nExecStart={py} %h/gateway.py %h/gateway.pid %h/gateway.drained\n"
+        f"ExecStop={py} -c 'raise SystemExit(1)'\nExecStopPost=/usr/bin/touch %h/post.ran\n"
+    )
+    try:
+        assert ctl(host, "--user", "start", "drains.service").returncode == 0
+        pid = int((home / "gateway.pid").read_text())
+        done = ctl(host, "--user", "stop", "drains.service")
+        assert done.returncode == 0, done.stderr
+        assert (home / "gateway.drained").exists() and gone(pid)
+        assert (home / "post.ran").exists()
+        assert ctl(host, "--user", "is-active", "drains.service").stdout.strip() == "failed"
+        assert ctl(host, "--user", "is-failed", "drains.service").returncode == 0
+        # A start clears it.
+        assert ctl(host, "--user", "start", "drains.service").returncode == 0
+        assert ctl(host, "--user", "is-active", "drains.service").stdout.strip() == "active"
     finally:
         ctl(host, "--user", "stop", "drains.service")
 

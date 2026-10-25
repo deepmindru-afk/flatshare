@@ -30,9 +30,9 @@ LH_SVC_UNIT=UNIT in their environment where systemd would put them in the unit's
 the unit's journal with UTC times, restarts it as Restart says and stops it on SIGTERM. `start` returns
 once a unit's ExecStartPost commands have succeeded, as systemd's does, and fails as systemd's does when it cannot;
 `stop` returns only once every process it stops has exited: the unit's own (ExecStop, then KillSignal, then SIGKILL
-after TimeoutStopSec, the signals also when ExecStop fails or cannot run), those of the units bound to it or part of
-it, and a target's units with the target. The state is in $XDG_STATE_HOME/lh-svc (default ~/.local/state/lh-svc):
-UNIT.json and the journals, log/UNIT.log.
+after TimeoutStopSec, the signals and ExecStopPost also when ExecStop fails or cannot run, the unit then ending
+failed), those of the units bound to it or part of it, and a target's units with the target. The state is in
+$XDG_STATE_HOME/lh-svc (default ~/.local/state/lh-svc): UNIT.json and the journals, log/UNIT.log.
 
 Standard library only, for a bare host, and the host's own python3, 3.10 (Ubuntu 22.04's) or newer: the shims run
 it before any venv exists. Linux applies CPUAffinity; elsewhere (the tests' hosts) it is recorded only.
@@ -433,6 +433,8 @@ class Runner:
         self.journal = Journal(self.name)
         self.stopping = threading.Event()
         self.main: subprocess.Popen | None = None
+        self.stop_failed = False
+        """Whether the last stop's ExecStop failed: the unit then ends failed, not inactive."""
 
     def say(self, message: str) -> None:
         self.journal.write(os.getpid(), f"lh-svc: {message}")
@@ -505,7 +507,8 @@ class Runner:
                 return 1
             outcome = self.once(unit)
             if self.stopping.is_set() or outcome is None:
-                write_state(self.name, state="inactive", runner=None, main=None)
+                if not self.stop_failed:  # once() recorded a failed stop itself
+                    write_state(self.name, state="inactive", runner=None, main=None)
                 return 0
             restart = unit.last("Restart", "no")
             if restart == "always" or (restart == "on-failure" and outcome != 0):
@@ -564,17 +567,25 @@ class Runner:
         if self.stopping.is_set():
             write_state(self.name, state="deactivating")
             self.say(f"Stopping {self.name}")
+            stopped = False
             try:
-                self.control(
+                stopped = self.control(
                     unit, "ExecStop", env, time.time() + unit.seconds("TimeoutStopSec", 90.0)
                 )
             finally:
                 # Whatever became of ExecStop (it failed, or could not run), the main process gets its
-                # KillSignal and TimeoutStopSec, as under systemd, rather than the client's SIGKILL 5 s on.
+                # KillSignal and TimeoutStopSec and ExecStopPost runs, as under systemd, rather than the
+                # client's SIGKILL 5 s on.
+                self.stop_failed = not stopped
                 self.terminate(unit)
-            self.control(unit, "ExecStopPost", env, time.time() + 30)
+                self.control(unit, "ExecStopPost", env, time.time() + 30)
             self.say(f"Stopped {self.name}")
-            write_state(self.name, state="inactive", runner=None, main=None)
+            # A failed ExecStop (lh-gateway-stop killing a gateway still running at the end of its wait) leaves
+            # the unit failed, as systemd's does, so that is-failed shows a stop that did not drain.
+            if stopped:
+                write_state(self.name, state="inactive", runner=None, main=None)
+            else:
+                write_state(self.name, state="failed", result="exit-code", runner=None, main=None)
             return None
         status = self.main.returncode
         self.say(f"Main process exited, status={status}")
