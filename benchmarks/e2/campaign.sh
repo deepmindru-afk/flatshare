@@ -24,8 +24,10 @@
 # runs here (deploy/bin/lh-local in place of ssh), the node is localhost, and the results go to ~/leaseholder/results/e2
 # unless LH_E2_RESULTS says otherwise. --until HH:MM (UTC; tomorrow's when today's has passed) starts no point that
 # cannot end before then, by W5's durations: 13 minutes for a point with agents, 7 without, and 2 more for an engine
-# switch. --until-epoch SECONDS does the same at an absolute time, which has no tomorrow: benchmarks/a100/run.sh
-# hands its one deadline to every campaign of a run so.
+# switch, until this host has measured its own: each point and engine switch campaign.sh runs goes to durations.tsv
+# beside the campaigns' results (KIND SECONDS a line: switch, voice, or agents:SESSIONS), and a kind measured here
+# is budgeted by its longest. --until-epoch SECONDS does the same at an absolute time, which has no tomorrow:
+# benchmarks/a100/run.sh hands its one deadline to every campaign of a run so.
 set -euo pipefail
 usage() {
   echo "usage: campaign.sh [--dry-run] [--pause] [--local] [--until HH:MM | --until-epoch SECONDS] CAMPAIGN" >&2
@@ -186,13 +188,32 @@ stop_gpus() { # stop_gpus POINT: end the sampling and put the samples into the p
     fi
   done
 }
-# A point's budget for --until: W5's longest agent point (11 min 34 s) and voice-alone point (5 min 54 s), rounded up,
-# and an engine switch (1 min 41 s at most).
+# A point's budget for --until: the longest of its kind measured on this host (durations.tsv), and of an engine
+# switch, in whole minutes rounded up; before one is, W5's on cyan: its longest agent point (11 min 34 s) and
+# voice-alone point (5 min 54 s), rounded up, and an engine switch (1 min 41 s at most).
+durations=$(dirname "$results")/durations.tsv
+kind() { # kind ARM: agents:SESSIONS for a point with agents, else voice
+  local sessions
+  sessions=$(awk '/^\[/ { table = $0 } table == "[agents]" && /^sessions *= *[0-9]+/ {
+    sub(/^sessions *= */, ""); sub(/[^0-9].*/, ""); print; exit }' "$1")
+  if [[ -n $sessions && $sessions != 0 ]]; then echo "agents:$sessions"; else echo voice; fi
+}
+measured() { # measured KIND: the longest duration of KIND measured here, in whole minutes rounded up; none before one
+  [[ -f $durations ]] || return 0
+  awk -v kind="$1" '$1 == kind && $2 + 0 > longest { longest = $2 + 0 }
+    END { if (longest) printf "%d\n", int((longest + 59) / 60) }' "$durations"
+}
 minutes() { # minutes ARM ENGINE PREVIOUS
-  local m=7
-  awk '/^\[/ { table = $0 } table == "[agents]" && /^sessions *= *[1-9]/ { found = 1 } END { exit !found }' "$1" &&
-    m=13
-  [[ $2 == "$3" ]] || m=$((m + 2))
+  local m switch
+  m=$(measured "$(kind "$1")")
+  if [[ -z $m ]]; then
+    m=7
+    [[ $(kind "$1") == voice ]] || m=13
+  fi
+  if [[ $2 != "$3" ]]; then
+    switch=$(measured switch)
+    m=$((m + ${switch:-2}))
+  fi
   echo "$m"
 }
 previous=""
@@ -210,10 +231,13 @@ for i in "${!points[@]}"; do
       break
     fi
   fi
+  switching=false
+  [[ ${engines[$i]} == "$previous" ]] || switching=true
   previous=${engines[$i]}
   # A point whose ssh session dropped may still be running on cyan; switching the engine would spoil it.
   $ssh "$cyan" flock -n leaseholder/runs/.lh-bench-e2.lock true ||
     die "a point is still running on cyan (its pid is in leaseholder/runs/.lh-bench-e2.lock); run again once it ends"
+  switched=$(date -u +%s)
   sources=""
   for gpu in "${gpus[@]}"; do
     log "$point: ${gpu%%.*} runs ${engines[$i]}"
@@ -227,7 +251,9 @@ for i in "${!points[@]}"; do
     log "$point: ${gpu%%.*} has ${deployed:-no DEPLOYED}"
     sources+=" --gpu-source ${gpu%%.*}=$deployed"
   done
+  if $switching; then echo "switch $(($(date -u +%s) - switched))" >>"$durations"; fi
   log "$point: measuring"
+  measuring=$(date -u +%s)
   sample_gpus "$point"
   status=0
   $ssh "$cyan" "$bench e2 run $runs/arms/$point.toml --out $runs/$point${seed:+ --agents-seed $seed}${sampling:+ --kv-sample-s $sampling}$sources$profile" 2>&1 |
@@ -240,6 +266,7 @@ for i in "${!points[@]}"; do
     die "$point failed (exit status $status); its run directory is $results/$point"
   fi
   fetch "$point"
+  echo "$(kind "${arms[$i]}") $(($(date -u +%s) - measuring))" >>"$durations"
 done
 
 dirs=""

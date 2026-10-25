@@ -309,6 +309,27 @@ def test_until_starts_no_point_that_would_end_after_it(hosts: Hosts) -> None:
     assert hosts.run(campaign, "--until", "25:00").returncode == 2
 
 
+def test_until_budgets_a_point_by_this_hosts_own_durations_once_one_has_run(hosts: Hosts) -> None:
+    # W5's durations are cyan's: a host with fewer cores for AIPerf builds its dataset slower. Each point and engine
+    # switch measured here goes to the results' durations.tsv, by kind, and --until budgets by the longest of a kind.
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c11", ["arms/a1.toml"], {"a1": VOICE})
+    done = hosts.run(campaign)
+    assert done.returncode == 0, done.stdout + done.stderr
+    measured = [line.split() for line in (hosts.results / "durations.tsv").read_text().splitlines()]
+    assert [kind for kind, _ in measured] == ["switch", "voice"]
+    assert all(seconds.isdigit() for _, seconds in measured)
+    # A voice point here took 25 minutes: one 20 minutes before the deadline is not started, where W5's 7 minutes
+    # and a switch's 2 would have let it.
+    (hosts.results / "durations.tsv").write_text("switch 60\nvoice 1500\n")
+    second = hosts.campaign("c12", ["arms/a1.toml"], {"a1": VOICE})
+    deadline = int(datetime.now(UTC).timestamp()) + 20 * 60
+    done = hosts.run(second, "--until-epoch", str(deadline))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(runs(hosts)) == 1  # c11's alone
+    assert "a1: 26 minutes would end after" in (hosts.results / "c12" / "campaign.log").read_text()
+
+
 def test_until_epoch_is_one_deadline_that_has_no_tomorrow(hosts: Hosts) -> None:
     # The A100 run hands every campaign its one deadline as an epoch: one that has passed stops every point, where
     # --until HH:MM would take tomorrow's; one far off runs them all.
