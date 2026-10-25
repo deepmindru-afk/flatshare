@@ -63,7 +63,7 @@ from leaseholder_bench.e2.report import (
     voice_slo,
     write_report,
 )
-from leaseholder_bench.e2.run import SCHEDULER, SECRETS, variant_flags
+from leaseholder_bench.e2.run import BUSY, SCHEDULER, SECRETS, variant_flags
 from leaseholder_stats import metric_samples
 
 T0 = 1_800_000_000.0  # the calls run from T0 to T0 + 100 s
@@ -1300,6 +1300,13 @@ def test_the_report_reads_the_lines_the_voice_worker_writes() -> None:
     # The sessions' end lines come from the module's own logger.
     assert SESSIONS_LOGGER == "leaseholder_voice.events" and "logging.getLogger(__name__)" in source
     assert '"session ended"' in source
+
+
+def test_a_point_waits_for_the_gateway_by_series_it_exports() -> None:
+    # e2 run counts the requests the gateway ended by their outcomes and waits for it to go idle by
+    # its gauges: a gauge it read under a name the gateway does not export would read as idle at once.
+    exported = {name for name, _, _ in metric_samples(GATEWAY_METRICS.read_text())}
+    assert {OUTCOMES, *BUSY} <= exported
 
 
 def test_the_record_and_the_report_read_series_the_gateway_exports() -> None:

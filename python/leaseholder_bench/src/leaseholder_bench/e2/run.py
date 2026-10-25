@@ -112,6 +112,9 @@ NO_EVENTS = "no-events"
 """Drop-ins under deploy/cyan/variants/ that e2 run links into cyan's units as ``variant-NAME.conf``."""
 GATEWAY_IDLE_S = 30.0
 """How long the gateway may take to end its requests once a point's tools have stopped."""
+BUSY = ("lh_gateway_streams_active", "lh_gateway_admission_waiting")
+"""The gateway's gauges of the responses it is relaying and of the requests waiting at its admission
+point: it is idle when both are at zero (:func:`_ended`)."""
 KV_SAMPLE_S = 0.5
 """How often an agent point samples the engine's KV use and its running and waiting requests from its
 ``/metrics`` while the calls run (P-1's sampler; record.KV_GAUGES), from which the summary takes the
@@ -1044,14 +1047,14 @@ def _gateway_log(systemd: Systemd, out: Path, start: float, end: float) -> None:
 
 
 def _ended(host: Host) -> tuple[float, float]:
-    """From the gateway's metrics: the requests it has ended (``lh_gateway_request_outcomes_total``, every
-    class and outcome), and those it is relaying or holding at its admission point."""
+    """From the gateway's metrics: the requests it has ended (OUTCOMES, every class and outcome), and
+    those it is relaying or holding at its admission point (BUSY)."""
     exposition = fetch(host.gateway_socket)
     ended = busy = 0.0
     for name, _, value in metric_samples(exposition):
         if name == OUTCOMES:
             ended += value
-        elif name in ("lh_gateway_streams_active", "lh_gateway_admission_waiting"):
+        elif name in BUSY:
             busy += value
     return ended, busy
 
