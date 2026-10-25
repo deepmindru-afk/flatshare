@@ -174,7 +174,7 @@ def cpulist(cpus: list[int]) -> str:
 
 GPU_QUERY = (
     "index,uuid,name,memory.total,compute_cap,driver_version,pcie.link.gen.current,pcie.link.width.current,"
-    "mig.mode.current,power.limit,pci.bus_id,ecc.mode.current"
+    "mig.mode.current,power.limit,pci.bus_id,ecc.mode.current,compute_mode"
 )
 
 
@@ -204,7 +204,7 @@ def _gpu(sysfs: Path) -> dict | None:
         matches = [row for row in rows if wanted in (row[0], row[1])]
     else:
         matches = rows if len(rows) == 1 else []
-    index, uuid, name, memory, cap, driver, gen, width, mig, power, bus, ecc = (
+    index, uuid, name, memory, cap, driver, gen, width, mig, power, bus, ecc, mode = (
         matches[0] if matches else rows[0]
     )
     number = lambda x: float(x) if re.fullmatch(r"[0-9.]+", x) else None  # noqa: E731
@@ -228,6 +228,8 @@ def _gpu(sysfs: Path) -> dict | None:
         "mig_devices": _mig_devices(uuid) if mig.lower() == "enabled" else [],
         "power_limit_w": number(power),
         "ecc": ecc,
+        # Default lets the STT, the TTS and the engine each hold a CUDA context; Exclusive_Process one at a time.
+        "compute_mode": mode,
         "bus_id": bus,
         "numa_node": int(node) if node is not None and node.strip().lstrip("-").isdigit() else None,
     }

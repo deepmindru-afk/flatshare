@@ -65,6 +65,7 @@ The profile's "auto" values, in `deploy/profile.py`:
 | Engine starts | | a start failed (warm.json keeps its log lines) |
 | GPU | | several GPUs and none named, or `LH_GPU_ID` naming none of them: the GPU units run on the lent GPU alone, by its UUID (`CUDA_VISIBLE_DEVICES`, with `CUDA_DEVICE_ORDER=PCI_BUS_ID`), and `gpu-guard` and the GPU sampler read it alone, so it must be named (`LH_GPU_ID=INDEX\|UUID bootstrap.sh stage`; `env.sh` keeps its UUID) |
 | GPU exclusive (`--gpu`) | | another process holds the lent GPU (`deploy/bin/gpu-guard`) |
+| Compute mode | | anything but Default: under `Exclusive_Process`, common on shared HPC nodes, one CUDA context exists at a time, so the STT, the TTS and the engine cannot all run (`nvidia-smi -c DEFAULT` with root, or the `mps` variant, which is not the core's configuration) |
 | MIG | one slice with `LH_ALLOW_MIG=1`: a smaller card, on which the forecast does not hold | MIG on: one slice (the profile's budgets and the forecast are the whole card's), none or several |
 | systemd `--user` and lingering | none, or `LH_SUPERVISOR=lh-svc`: `deploy/bin/lh-svc` runs the units; nothing changes in the measurements | `env.sh` keeps systemd from an earlier stage, but lingering is off now: the units would stop with the last session |
 | One supervisor | | units under the other supervisor too, an earlier stage's (a split control plane: the gateway's port held by one, its journal read from the other) |
@@ -111,7 +112,7 @@ On a host with several GPUs, `LH_GPU_ID=INDEX|UUID bash leaseholder/src/deploy/a
 
 The preflight finds the host's facts, but these decide the plan, and some need the provider:
 
-1. The card and its form factor (A100 40 GB SXM4 or PCIe), how many the host has and which one is ours (its index or UUID in `nvidia-smi -L`, for `LH_GPU_ID`), and whether MIG is off.
+1. The card and its form factor (A100 40 GB SXM4 or PCIe), how many the host has and which one is ours (its index or UUID in `nvidia-smi -L`, for `LH_GPU_ID`), whether MIG is off, and its compute mode (Default; `Exclusive_Process` lets one process at a time use it).
 2. The driver version (R580 or newer runs the box's lock as it is; R535 or R570 on a data-center card with `cuda-compat-13-0` installed, or sudo to install it; else the cu129 lock), and any CUDA toolkit installed (13.0 or 12.9 saves the toolkit download).
 3. Whether the host is reachable before the billed clock, for `stage` and `warm` (block 0 is 40 minutes without them, about 15 fewer with them [estimate]).
 4. Whether the home directory is on a volume that outlives the host's restarts: the compile caches and every record live there until `pull.sh` copies them.

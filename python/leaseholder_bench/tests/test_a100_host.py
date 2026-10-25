@@ -67,6 +67,7 @@ def gpu(**fields) -> dict:
         "mig": "Disabled",
         "power_limit_w": 400.0,
         "ecc": "Enabled",
+        "compute_mode": "Default",
         "numa_node": None,
     } | fields
 
@@ -575,6 +576,26 @@ def test_a_cpu_tier_other_than_the_staged_one_is_refused(
     assert "bootstrap.sh gpu" in row.reason
     (node.dir / "staged.json").unlink()  # a node rendered before stages kept theirs: as before
     assert tier().status == "ok"
+
+
+def test_a_compute_mode_other_than_default_is_refused(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # EXCLUSIVE_PROCESS, common on shared HPC nodes, lets one CUDA context exist at a time: the STT, the TTS and the
+    # engine cannot all run, and warm's first start would fail.
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts())
+
+    def mode() -> host_py.Check:
+        checks = host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)
+        return next(c for c in checks if c.check == "Compute mode")
+
+    assert mode().status == "ok" and mode().value == "Default"
+    node.host["gpu"] = gpu(compute_mode="Exclusive_Process")
+    row = mode()
+    assert row.status == "refused" and row.value == "Exclusive_Process"
+    assert "nvidia-smi -i GPU-1 -c DEFAULT" in row.reason and "mps" in row.reason
+    node.host["gpu"] = gpu(compute_mode=None)  # facts from before the mode was read
+    assert mode().status == "pending"
 
 
 def test_a_mig_slice_is_refused_unless_allowed(

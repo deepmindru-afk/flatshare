@@ -1246,6 +1246,27 @@ def preflight(
             f"{len(processes or [])} compute processes",
             "" if guard.returncode == 0 else guard.stderr.strip(),
         )
+    if card:
+        mode = card.get("compute_mode")
+        if mode is None:
+            add(
+                "Compute mode",
+                "pending",
+                "not read",
+                "bootstrap.sh gpu reads it with the card's other facts",
+            )
+        elif mode.lower() == "default":
+            add("Compute mode", "ok", mode)
+        else:
+            add(
+                "Compute mode",
+                "refused",
+                mode,
+                "the STT, the TTS and the engine each hold a CUDA context, which only the Default mode allows at once "
+                f"(Exclusive_Process: one at a time; warm's first start would fail): nvidia-smi -i {lent or 0} -c "
+                "DEFAULT (root), or the mps variant, whose one MPS server holds the context (not the core's "
+                "configuration)",
+            )
     mig = card.get("mig")
     if mig and mig.lower() == "enabled":
         # A slice is one GPU to the host, but the profile's budgets and the forecast are the whole card's.

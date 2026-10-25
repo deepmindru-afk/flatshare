@@ -620,7 +620,7 @@ case "$*" in
   -L) printf 'GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaaa)\\nGPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-bbbb)\\n' ;;
   --query-gpu=*)
     for row in "0, GPU-aaaa" "1, GPU-bbbb"; do
-      echo "$row, NVIDIA A100-SXM4-40GB, 40960, 8.0, 580.65.06, 4, 16, Disabled, 400.00, 00000000:3B:00.0, Enabled"
+      echo "$row, NVIDIA A100-SXM4-40GB, 40960, 8.0, 580.65.06, 4, 16, Disabled, 400.00, 00000000:3B:00.0, Enabled, Default"
     done ;;
   *) exit 1 ;;
 esac

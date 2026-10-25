@@ -394,7 +394,7 @@ def test_placeholders_fill_and_an_empty_one_takes_its_line() -> None:
         profile.resolve(profile.load("a100-40gb"), None)
 
 
-A100_ROW = "NVIDIA A100-SXM4-40GB, 40960, 8.0, 580.65.06, 4, 16, Disabled, 400.00, 00000000:3B:00.0, Enabled"
+A100_ROW = "NVIDIA A100-SXM4-40GB, 40960, 8.0, 580.65.06, 4, 16, Disabled, 400.00, 00000000:3B:00.0, Enabled, Default"
 FAKES = {
     # nvidia-smi --query-gpu=index,uuid,name,...: the card's row; -L its line.
     "nvidia-smi": f"""case "$*" in
@@ -497,7 +497,7 @@ TWO_GPUS = f"""case "$*" in
     echo "  MIG 3g.20gb     Device  0: (UUID: MIG-bbbb-0)" ;;
   *)
     echo "0, GPU-aaaa, {A100_ROW}"
-    echo "1, GPU-bbbb, {A100_ROW.replace("Disabled", "Enabled").replace("3B:00.0", "AF:00.0")}" ;;
+    echo "1, GPU-bbbb, {A100_ROW.replace("Disabled", "Enabled").replace("3B:00.0", "AF:00.0").replace("Default", "Exclusive_Process")}" ;;
 esac"""
 """nvidia-smi on a host with two A100s, the second in MIG mode with one slice."""
 
@@ -544,6 +544,7 @@ def test_detect_takes_the_lent_gpu_of_several_by_index_or_uuid(tmp_path: Path, m
             1,
         )
         assert gpu["bus_id"] == "00000000:AF:00.0" and gpu["mig"] == "Enabled"
+        assert gpu["compute_mode"] == "Exclusive_Process"
         assert gpu["mig_devices"] == [{"profile": "3g.20gb", "uuid": "MIG-bbbb-0"}]
     monkeypatch.setenv("LH_GPU_ID", "GPU-aaaa")
     gpu = profile.detect()["gpu"]
