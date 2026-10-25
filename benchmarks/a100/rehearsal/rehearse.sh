@@ -318,6 +318,7 @@ step_cleanup() {
   for name in $HOST_STEPS; do
     rehearsal_sh stop "$name" | { grep -Ev ': (none|done [0-9]+)$' || true; } || status=1
   done
+  rehearsal_sh kill-tools || status=1
   rehearsal_sh stop-units || status=1
   host_sh leftovers "$rhome" --kill || status=1
   host_sh verify-box "$rhome" || status=1

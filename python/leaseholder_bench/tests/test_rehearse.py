@@ -2,19 +2,22 @@
 ssh runs commands in, with the real rsync between them), the box's user manager, nvidia-smi and ss, and a stub of the
 kit's bootstrap.sh, run.sh and lh-svc shims; deploy/a100/push.sh and pull.sh are the repository's own. What it holds:
 the checks refuse a box that runs, a busy GPU or a held port; nothing of the rehearsal reaches the box's deployment
-(its source, its units, its user manager), and cleanup finds it as it was, or says what changed; the environment the
-kit runs in is the rehearsal's (its home, runtime directory, lh-svc, the box's hub cache offline, no sudo); a command
-that fails ends its step, and a check that gets no answer fails; a step on the host is detached and waited for, and a
-step done is not run again but under --redo (--purge runs cleanup again to remove the home); block 0's listener audit
-must pass with each GPU server in a network namespace of its own (deploy/bin/in-private-net); block 4 is run for one
-point and its deadline's stop; pull copies the rehearsal's records, not the box's; reproduce runs make on peacock over
-them.
+(its source, its units, its user manager), and cleanup finds it as it was, or says what changed, once it has ended
+what of the rehearsal runs, titled or not; the environment the kit runs in is the rehearsal's (its home, runtime
+directory, lh-svc, the box's hub cache offline, no sudo); a command that fails ends its step, and a check that gets no
+answer fails; a step on the host is detached, waited for and stopped with its whole group, and a step done is not run
+again but under --redo (--purge runs cleanup again to remove the home); block 0's listener audit must pass with each
+GPU server in a network namespace of its own (deploy/bin/in-private-net); block 4 is run for one point and its
+deadline's stop; pull copies the rehearsal's records, not the box's; reproduce runs make on peacock over them.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -158,6 +161,7 @@ done
 STUB_SYSTEMCTL = """\
 #!/usr/bin/env bash
 # deploy/bin/shims/systemctl in the rehearsal's test: lh-svc's units, their states in the rehearsal's state directory.
+# FAKE_UNSTOPPABLE names a unit that its stop leaves deactivating, as lh-svc shows one while it ends its group's rest.
 dir=${XDG_STATE_HOME:?}/fake-lh-svc
 mkdir -p "$dir"
 echo "systemctl $*" >>"$dir/calls"
@@ -170,13 +174,35 @@ for unit in "${words[@]:1}"; do
     start)
       echo active >"$dir/$unit"
       if [[ $unit == lh-voice-worker ]]; then for u in lh-voicenet lh-livekit lh-gateway; do echo active >"$dir/$u"; done; fi ;;
-    stop) echo inactive >"$dir/$unit" ;;
+    stop) if [[ $unit == "${FAKE_UNSTOPPABLE:-}" ]]; then echo deactivating; else echo inactive; fi >"$dir/$unit" ;;
     is-active) cat "$dir/$unit" 2>/dev/null || echo inactive ;;
   esac
 done
 """
 
 STUB_JOURNALCTL = '#!/usr/bin/env bash\necho "1761400000.000000 phastform lh-engine[42]: a line of the engine\'s"\n'
+
+# titled.py TITLE PIDS [HOME]: a process that sets TITLE, as AIPerf's controller and vLLM's engine core set theirs
+# (setproctitle, which blanks /proc/PID/environ), and starts in its process group a child that sets one too and,
+# given HOME, another whose environment names that home; the children's pids go to the file PIDS.
+TITLED = """\
+import os, subprocess, sys, time
+import setproctitle
+
+if sys.argv[1]:
+    setproctitle.setproctitle(sys.argv[1])
+title = "import setproctitle, time; setproctitle.setproctitle('aiperf worker_manager'); time.sleep(120)"
+children = [subprocess.Popen([sys.executable, "-c", title])]
+if len(sys.argv) > 3:
+    env = os.environ | {"HOME": sys.argv[3]}
+    children.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], env=env))
+with open(sys.argv[2] + ".new", "w") as pids:
+    pids.write(" ".join(str(child.pid) for child in children))
+os.rename(sys.argv[2] + ".new", sys.argv[2])
+time.sleep(120)
+"""
+
+PROC = pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="reads /proc (Linux)")
 
 
 def write(path: Path, text: str, mode: int = 0o644) -> Path:
@@ -297,6 +323,26 @@ def rehearse(world: dict, *args: str, **env: str) -> subprocess.CompletedProcess
         text=True,
         timeout=300,
     )
+
+
+def wait_for(path: Path, timeout: float = 10.0) -> Path:
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        assert time.monotonic() < deadline, f"{path} never appeared"
+        time.sleep(0.02)
+    return path
+
+
+def gone(pid: int, timeout: float = 10.0) -> bool:
+    """Whether ``pid`` exits within ``timeout``: a killed orphan lasts until init reaps it."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def box_snapshot(box: Path) -> dict[str, str]:
@@ -463,6 +509,10 @@ def test_the_rehearsal_runs_every_step_in_its_own_home_and_leaves_the_box_as_it_
         )
     ), stops
     assert box_snapshot(box) == before
+    # A unit that its stop leaves deactivating is not stopped: cleanup fails, naming it.
+    done = rehearse(world, "--redo", "cleanup", "cleanup", FAKE_UNSTOPPABLE="lh-engine")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "stop-units: not stopped: lh-engine.service (deactivating)" in done.stdout
     deployed = box / "leaseholder" / "src" / "DEPLOYED"
     found = deployed.stat()
     deployed.write_text("changed\n")
@@ -514,6 +564,56 @@ def test_a_failed_command_ends_its_step_and_init_wants_its_probe_answered(world:
     assert not (state / "cleanup.done").exists()
 
 
+@PROC
+def test_cleanup_ends_the_rehearsals_processes_whatever_their_titles(world: dict) -> None:
+    # AIPerf's and vLLM's processes set their titles, which blanks the HOME=~/a100-rehearsal that leftovers finds the
+    # rehearsal's processes by. AIPerf runs in a session of its own, so a step killed before lh-bench stopped it leaves
+    # it running: cleanup ends the process groups lh-bench names for its tools, by lh-bench's own kill_left. A unit's
+    # engine core is in its server's group: leftovers ends the groups and sessions of the processes it finds.
+    pytest.importorskip("setproctitle")
+    from leaseholder_bench.e2 import run as e2
+
+    for step in ("check", "init"):
+        assert rehearse(world, step).returncode == 0
+    tmp, home = world["tmp"], world["box"] / "a100-rehearsal"
+    # The rehearsal's bench venv: this test's Python, which has lh-bench.
+    bench = home / "leaseholder" / "venvs" / "bench" / "bin" / "python"
+    write(bench, f'#!/bin/sh\nexec {sys.executable} "$@"\n', 0o755)
+    (tmp / "titled.py").write_text(TITLED)
+    env = os.environ | {"HOME": str(home)}
+    titled = [sys.executable, str(tmp / "titled.py")]
+    # AIPerf as lh-bench starts it, its group named in the tools' directory, and the run then killed.
+    command = [*titled, "aiperf system_controller", str(tmp / "aiperf.pids")]
+    aiperf = e2.Process("AIPerf", command, tmp / "aiperf.log", env, str(home / "leaseholder"))
+    # A unit's server in a session of its own, with its engine core, and a process whose environment names another
+    # home: not the rehearsal's, whatever its session.
+    command = [*titled, "", str(tmp / "server.pids"), str(tmp)]
+    server = subprocess.Popen(command, env=env, start_new_session=True)
+    (worker,) = map(int, wait_for(tmp / "aiperf.pids").read_text().split())
+    core, other = map(int, wait_for(tmp / "server.pids").read_text().split())
+    try:
+        for pid in (aiperf.popen.pid, worker, core):
+            deadline = time.monotonic() + 10
+            while b"=" in Path(f"/proc/{pid}/environ").read_bytes():
+                assert time.monotonic() < deadline, f"{pid} set no title"
+                time.sleep(0.05)
+        done = rehearse(world, "cleanup")
+        assert done.returncode == 0, done.stdout + done.stderr
+        killed = " ".join(map(str, sorted([aiperf.popen.pid, worker])))
+        assert f"kill-tools: lh-bench's kill_left ended {killed}\n" in done.stdout, done.stdout
+        assert aiperf.popen.wait(timeout=10) == -signal.SIGKILL
+        assert server.wait(timeout=10) == -signal.SIGTERM
+        assert gone(worker) and gone(core), done.stdout
+        assert "leftovers: none left after TERM and KILL" in done.stdout
+        assert Path(f"/proc/{other}/stat").read_text().rsplit(") ", 1)[1][0] != "Z"
+    finally:
+        for pid in (aiperf.popen.pid, worker, server.pid, core, other):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        aiperf.popen.wait()
+        server.wait()
+
+
 def test_a_step_on_the_host_outlives_its_session_and_is_waited_for_once(tmp_path: Path) -> None:
     # host.sh's detached steps, on this host: a step started runs on after its starter returns, a second start while
     # it runs starts nothing, wait returns its exit status, and stop ends one that runs.
@@ -544,6 +644,38 @@ def test_a_step_on_the_host_outlives_its_session_and_is_waited_for_once(tmp_path
     assert done.returncode == 0
     assert host_sh("wait", "ok").returncode == 0
     assert "ok is done" in host_sh("start", "ok", "false").stdout
+
+
+def test_a_stopped_step_is_given_the_time_its_tools_take_to_stop(tmp_path: Path) -> None:
+    # stop's TERM reaches the step's process group, and stop waits for all of the group, not its leader alone: the
+    # step's bash ends at once, while lh-bench, on TERM, stops its callers and AIPerf before it exits; here 2 s.
+    home = tmp_path / "home"
+    home.mkdir()
+    flag = tmp_path / "point"
+    (tmp_path / "member.py").write_text(
+        "import signal, sys, time\n"
+        "def stop(*_):\n"
+        "    time.sleep(2)\n"
+        "    open(sys.argv[1] + '.stopped', 'w').close()\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "open(sys.argv[1] + '.ready', 'w').close()\n"
+        "time.sleep(60)\n"
+    )
+    env = os.environ | {"HOME": str(home)}
+
+    def host_sh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(HOST_SH), *args], env=env, capture_output=True, text=True, timeout=60
+        )
+
+    command = shlex.join([sys.executable, str(tmp_path / "member.py"), str(flag)])
+    assert host_sh("start", "point", command).returncode == 0
+    wait_for(Path(f"{flag}.ready"))
+    stopped = host_sh("stop", "point")
+    assert "point stopped" in stopped.stdout, stopped.stdout + stopped.stderr
+    assert Path(f"{flag}.stopped").exists(), "the step's group was killed before its member stopped"
+    assert host_sh("state", "point").stdout.strip() == "done 143"
 
 
 if __name__ == "__main__":

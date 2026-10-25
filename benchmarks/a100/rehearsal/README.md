@@ -133,6 +133,11 @@ The environment it sets:
 
 `cleanup` records the same again and fails on any difference, naming the paths. It also fails on any process whose environment still names the rehearsal's home, a busy GPU, a held port, or a box unit that runs.
 
+Some of the rehearsal's processes set their titles: AIPerf's controller and services, and vLLM's engine cores. That blanks their environment and the home named in it, so `cleanup` ends them by what they belong to:
+
+- **lh-bench's tools.** AIPerf runs in a session of its own, which a step's stop does not reach. lh-bench names each tool's process group in `leaseholder/.lh-bench-e2-tools` until it stops the tool, and `cleanup` ends the groups named there with lh-bench's own `kill_left`, from the bench venv.
+- **The groups and sessions of what it finds.** A process whose environment names the home takes with it the processes of its process group and session whose environment is blank, as a unit's server takes its engine core. A process whose environment can be read and lacks the home is never ended.
+
 ## LH_DATA: where the data comes from
 
 The `data` step assembles `data/` (`LH_DATA`) on the workstation:
@@ -283,6 +288,7 @@ The checks:
 
 **cleanup.** It prints:
 
+- `kill-tools: lh-bench's kill_left found nothing left`;
 - `stop-units: inactive ...` for nine units;
 - `leftovers: none`;
 - `verify: the box's deployment as the rehearsal found it: <n> lines (units, files) alike`;
@@ -314,9 +320,10 @@ The audit counts them as the units' own: by their cgroups under systemd, and und
 
 ## Abort and restore
 
-1. **Abort.** `bash rehearse.sh abort` stops the step running on the host: its process group, TERM, then KILL after 30 s. It then runs `cleanup`:
-   - stops the rehearsal's units through its `env.sh` (lh-svc);
-   - ends any process whose environment still names `HOME=~/a100-rehearsal`;
+1. **Abort.** `bash rehearse.sh abort` stops the step running on the host: TERM to its process group, then KILL to what is left of the group after 180 s. That is lh-bench's own stop: on TERM it gives its callers 30 s and AIPerf 120 s to stop, and AIPerf, in a session of its own, would outlive a KILL of the group. It then runs `cleanup`:
+   - ends what lh-bench's tools left where a step was killed before lh-bench stopped them (above);
+   - stops the rehearsal's units through its `env.sh` (lh-svc), and fails on one that is not inactive or failed after its stop;
+   - ends any process whose environment still names `HOME=~/a100-rehearsal`, with the titled processes of its group and session;
    - compares the box's state with `init`'s;
    - checks the GPU and the ports.
 2. **When `cleanup` fails.** It names what remains (a process, a held port, a busy GPU), or each path of the box's that changed (`diff` of the two states, `<` as found and `>` now). Nothing of the rehearsal writes outside `~/a100-rehearsal`, so a changed path is either a finding or a write by something else; the diff shows which file. `.rehearsal/box-before.state` and `box-after.state` stay on the host for reading.
@@ -389,7 +396,7 @@ It holds:
   - `cleanup` fails where the host does not answer whether it has the rehearsal's home.
 - **Resuming:**
   - a step done is not run again;
-  - a step on the host outlives the call that started it, is not started twice, gives its exit status even when its command calls `exit`, and is ended by `stop`.
+  - a step on the host outlives the call that started it, is not started twice, gives its exit status even when its command calls `exit`, and is ended by `stop`, which waits for its whole process group, not its leader alone.
 - **Block 0:**
   - a refused audit stops the rehearsal;
   - the audit's degraded line fails block 0's check where the host allows user namespaces, and is the line expected where it refuses them;
@@ -399,7 +406,8 @@ It holds:
   - `pull` copies the rehearsal's records, not the box's;
   - `reproduce` runs `make reproduce-a100` on peacock over them;
 - **`cleanup`:**
-  - it stops lh-svc's units and passes on an untouched box;
+  - it stops lh-svc's units and passes on an untouched box, and fails on a unit left deactivating;
+  - it ends a tool whose group lh-bench named, and a process in the group of one it finds, both titled (Linux);
   - it fails, naming the path, on a box file changed after `init`;
   - `--purge cleanup` after a `cleanup` removes the rehearsal's home.
 

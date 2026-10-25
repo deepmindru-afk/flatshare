@@ -8,7 +8,8 @@
 #   init HOME HUB_CACHE   the rehearsal's home: rehearsal.env, its runtime and temporary directories, the sudo shim,
 #             Kokoro-FastAPI from the box's, and the box's state as found (.rehearsal/box-before.state)
 #   verify-box HOME       the box's state against the one init recorded, the GPU idle, the ports free again
-#   leftovers HOME [--kill]   the processes whose environment names HOME (the rehearsal's), and with --kill their end
+#   leftovers HOME [--kill]   the processes whose environment names HOME (the rehearsal's), and those in their
+#             process groups and sessions whose environment a title has blanked; with --kill their end
 #   purge HOME            the rehearsal's home removed
 # In the rehearsal's environment (bin/rehearsal-ssh sources rehearsal.env first), from its home:
 #   start [--again] NAME COMMAND   COMMAND detached from the SSH session (its own session, stdin /dev/null), its
@@ -16,9 +17,13 @@
 #             it is done and --again is not given
 #   wait NAME             follow the step's log until it ends; exit with its status (254 for a status of 255)
 #   state NAME            done STATUS, running PID, died PID (gone without a status) or none
-#   stop NAME             end a running step: its process group, TERM, then KILL after 30 s; status 143
+#   stop NAME             end a running step: TERM to its process group, then KILL to what is left of it after
+#             180 s (lh-bench's own stop of its tools); status 143
 #   verify STEP           the checks of rehearse.sh's STEP: env, stage, gpu, warm, block0, block1, block4
-#   stop-units            the rehearsal's units stopped, under lh-svc (its node's env.sh)
+#   kill-tools            the process groups of lh-bench's tools that a killed step left, ended by lh-bench's
+#             kill_left (the bench venv)
+#   stop-units            the rehearsal's units stopped, under lh-svc (its node's env.sh): fails on one not
+#             inactive or failed after its stop
 # Bash 3.2 (the CPU test's macOS) or newer, and python3 for what the shell has no portable way to do. REHEARSAL_POLL_S
 # is wait's interval (5 s; the test's shorter).
 set -euo pipefail
@@ -272,21 +277,35 @@ while pid > 1:
         pid = int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
     except (OSError, ValueError, IndexError):
         break
+# The process groups and sessions of the processes found, kept from one look to the next. A process that set its
+# title (setproctitle, as vLLM's engine core and AIPerf's processes do) has blanked its environment and the mark in
+# it, and is the rehearsal's by its group or session: one whose environment is blank there is ours. One whose
+# environment can be read and lacks the mark is never ours, whatever its group.
+groups, sessions = set(), set()
 
 
 def ours():
-    found = {}
+    found, blank = {}, {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit() or int(entry) in ancestors:
             continue
         try:
-            environ = open(f"/proc/{entry}/environ", "rb").read().split(b"\0")
+            environ = open(f"/proc/{entry}/environ", "rb").read()
+            state, _, group, session = open(f"/proc/{entry}/stat").read().rsplit(")", 1)[1].split()[:4]
             cmdline = open(f"/proc/{entry}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
-        except OSError:
+        except (OSError, ValueError, IndexError):
             continue
-        if mark in environ:
-            found[int(entry)] = cmdline.strip()[:160]
-    return found
+        if state == "Z":  # exited already
+            continue
+        process = (int(group), int(session), cmdline.strip()[:160])
+        if mark in environ.split(b"\0"):
+            found[int(entry)] = process
+        elif b"=" not in environ:  # no variable left: blank, or a title over it
+            blank[int(entry)] = process
+    groups.update(group for group, _, _ in found.values() if group > 1)
+    sessions.update(session for _, session, _ in found.values() if session > 1)
+    found.update((pid, p) for pid, p in blank.items() if p[0] in groups or p[1] in sessions)
+    return {pid: cmd for pid, (_, _, cmd) in found.items()}
 
 
 if not os.path.isdir("/proc"):
@@ -436,13 +455,19 @@ stop_step() {
     return 0
   fi
   pid=${s#running }
+  # TERM to the step's process group, then up to 180 s for all of the group to end, not its leader alone: the step's
+  # bash ends at once, while lh-bench, on TERM, stops its callers (30 s of grace) and AIPerf (120 s; e2/run.py)
+  # before it exits. AIPerf runs in a session of its own, out of this group's reach: a KILL sooner leaves it running.
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-  for i in $(seq 30); do
-    kill -0 "$pid" 2>/dev/null || break
+  for i in $(seq 180); do
+    kill -0 -- "-$pid" 2>/dev/null || break
     sleep 1
   done
   kill -KILL -- "-$pid" 2>/dev/null || true
-  echo 143 >"$steps/$name.status"
+  # A status once written is final: the step's own, where it ended before the TERM.
+  if [[ ! -f $steps/$name.status ]]; then
+    echo 143 >"$steps/$name.status.new" && mv "$steps/$name.status.new" "$steps/$name.status"
+  fi
   echo "rehearsal: $name stopped"
 }
 
@@ -545,6 +570,24 @@ EOF
   esac
 }
 
+# What lh-bench's tools left when a step was killed before lh-bench could stop them. AIPerf runs in a session of its
+# own, out of the step's group, and its processes set their titles, which blanks the environment leftovers reads; but
+# lh-bench names each tool's process group in leaseholder/.lh-bench-e2-tools until the tool is stopped. lh-bench's
+# own kill_left ends those groups, from the bench venv; no such directory is no tool started.
+kill_tools() {
+  local python=leaseholder/venvs/bench/bin/python
+  if [[ ! -d leaseholder/.lh-bench-e2-tools ]]; then
+    echo "kill-tools: lh-bench started no tool here"
+    return 0
+  fi
+  "$python" - <<'EOF'
+from leaseholder_bench.e2.run import Host, kill_left, tool_scope
+
+killed = sorted(kill_left(tool_scope(Host.load())))
+print(f"kill-tools: lh-bench's kill_left {'ended ' + ' '.join(map(str, killed)) if killed else 'found nothing left'}")
+EOF
+}
+
 stop_units() {
   if [[ ! -f leaseholder/node/env.sh ]]; then
     echo "stop-units: no node/env.sh: no unit was started"
@@ -553,9 +596,18 @@ stop_units() {
   # shellcheck source=/dev/null
   source leaseholder/node/env.sh
   local units=(leaseholder.target lh-engine.service lh-stt.service lh-tts.service lh-voice-worker.service
-    lh-gateway.service lh-gateway.socket lh-livekit.service lh-voicenet.service)
+    lh-gateway.service lh-gateway.socket lh-livekit.service lh-voicenet.service) states state i=0 left=""
   systemctl --user stop "${units[@]}" || echo "stop-units: systemctl --user stop failed (above)"
-  echo "stop-units: $(systemctl --user is-active "${units[@]}" | tr '\n' ' ' || true)"
+  # A unit is stopped once inactive, or failed; one deactivating (lh-svc's state while it ends what is left of a
+  # unit's group) is not yet. is-active fails unless a unit is active, so its answer is read, not its status.
+  states=$(systemctl --user is-active "${units[@]}" || true)
+  echo "stop-units: $(tr '\n' ' ' <<<"$states")"
+  while read -r state; do
+    case $state in inactive | failed) ;; *) left+=" ${units[i]:-?} (${state:-no state})" ;; esac
+    i=$((i + 1))
+  done <<<"$states"
+  ((i == ${#units[@]})) || left+=" (is-active gave $i states for ${#units[@]} units)"
+  [[ -z $left ]] || { echo "stop-units: not stopped:$left"; return 1; }
 }
 
 dispatch() {
@@ -572,9 +624,10 @@ dispatch() {
     state) state "$@" ;;
     stop) stop_step "$@" ;;
     verify) verify "$@" ;;
+    kill-tools) kill_tools ;;
     stop-units) stop_units ;;
     *)
-      echo "usage: host.sh check-box|init|verify-box|leftovers|purge|start|wait|state|stop|verify|stop-units ..." >&2
+      echo "usage: host.sh check-box|init|verify-box|leftovers|purge|start|wait|state|stop|verify|kill-tools|stop-units ..." >&2
       exit 2
       ;;
   esac
