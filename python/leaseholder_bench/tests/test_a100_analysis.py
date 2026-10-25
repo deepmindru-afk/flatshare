@@ -116,7 +116,7 @@ def test_the_probes_stand_beside_the_forecast_and_the_box(tmp_path: Path) -> Non
     assert "| KV case, stock at 2,048/0 | not measured |" in text
     assert (
         "The calls' first-token p95 beside the agents (tail.py): frozen, 512/256 1,850 ms "
-        f"(1,800{DASH}1,900, 2 runs); stock, 2,048/0 1,600 ms (1,500{DASH}1,700, 2 runs); stock, 1536 1,500 ms "
+        f"(1,800{DASH}1,900, 2 runs); stock, 2,048/0 1,600 ms (1,500{DASH}1,700, 2 runs); stock, 1,536/768 1,500 ms "
         f"(1,400{DASH}1,600, 2 runs); the PRs' values 320 ms (300{DASH}340, 2 runs)."
     ) in text
 

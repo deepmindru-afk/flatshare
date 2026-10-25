@@ -200,19 +200,16 @@ def probe_lines(runs: Path) -> list[str]:
         f"| Prefill case, the PRs' values: the token gap | {median_range(pf_pr)} | 6.6 ms (4.9{DASH}6.6) "
         f"| {BOX['prefill_pr_gap_ms']} |",
     ]
+    caps = sorted(
+        int(cap)
+        for p in (runs / "block2").glob("stock*-tail-1.txt")
+        if (cap := p.stem.split("-")[0].removeprefix("stock")).isdigit() and cap != "2048"
+    )
     tails = []
     for label, block, prefix in (
         ("frozen, 512/256", "block1", "frozen-tail"),
         ("stock, 2,048/0", "block2", "stock2048-tail"),
-        *(
-            (
-                f"stock, {p.stem.split('-')[0].removeprefix('stock')}",
-                "block2",
-                p.stem.rsplit("-", 1)[0],
-            )
-            for p in sorted((runs / "block2").glob("stock*-tail-1.txt"))
-            if not p.stem.startswith("stock2048")
-        ),
+        *((f"stock, {cap:,}/{cap // 2:,}", "block2", f"stock{cap}-tail") for cap in caps),
         ("the PRs' values", "block3", "pr-tail"),
     ):
         p95 = [
@@ -261,7 +258,12 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
     ]
     export, e0 = runs / "calibration-s16", runs / "block1" / "frozen-e0" / "summary.json"
     steps_path = None
-    if (export / "after.prom").exists() and e0.exists():
+    measured_point = (export / "after.prom").exists() and e0.exists()
+    if measured_point and not binary.exists():
+        lines.append(
+            f"Not computed: no lh-sim at {binary} (cargo build --release --locked -p lh-sim)."
+        )
+    elif measured_point:
         log = out / "calibration-s16-replay-log.csv"
         sim.replay_log("calibration-s16-replay-log", export)
         steps, fitted = fit(export, log, e0, out / "steps.json")
@@ -279,7 +281,7 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
         )
         lines += [*TABLE_HEAD, *rows]
     else:
-        lines.append("Not measured.")
+        lines.append("Not computed." if measured_point else "Not measured.")
     lines += ["", "## 3. The probes", ""]
     if any((runs / block).is_dir() for block in ("block1", "block2", "block3")):
         lines += probe_lines(runs)
@@ -304,7 +306,7 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
         lines += [
             f"- {label}: {', '.join(f'{100 * s:.0f}%' for s in values)}"
             for label, values in shares.items()
-        ]
+        ] or ["- Not measured: no point's summary.json has a running share (kv.running_share)."]
     else:
         lines.append("Not measured: no E2 point (results/e2/a100-r*).")
     lines += [
