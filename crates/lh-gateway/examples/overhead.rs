@@ -6,8 +6,8 @@
 //! runtime with 4 worker threads, over loopback TCP with pooled keep-alive connections. Every scenario runs three
 //! times: direct to the engine; through a bare reverse proxy on the same stack (axum server, hyper-util client,
 //! bodies passed through untouched), which is the cost of the HTTP hop itself; and through `lh-gateway`.
-//! "Added" is the gateway's quantile minus the direct one. The gateway formats its per-request log line, into
-//! a sink, as it does in production.
+//! "Added" is the gateway's quantile minus the direct one, as measured: negative where the gateway's came out
+//! lower. The gateway formats its per-request log line, into a sink, as it does in production.
 //! - Non-streaming: request sent to full response received, with a 2 KiB chat body and with a 64 KiB one.
 //! - Streaming, first byte: request sent to the first SSE chunk received.
 //! - Streaming, per chunk: the engine stamps each chunk as it writes it; the latency is stamp to receipt.
@@ -491,8 +491,8 @@ async fn price_policies(gateways: &[Priced]) {
             } else {
                 format!(
                     "{:.0} / {:.0}",
-                    (us(0.5) - base.0).max(0.0),
-                    (us(0.99) - base.1).max(0.0)
+                    measured(us(0.5) - base.0),
+                    measured(us(0.99) - base.1)
                 )
             };
             println!(
@@ -640,7 +640,7 @@ fn row(
     };
     let (direct, bare, gateway) = (&runs[0], &runs[1], &runs[2]);
     let added =
-        |q: f64| (us(quantile(samples(gateway), q)) - us(quantile(samples(direct), q))).max(0.0);
+        |q: f64| measured(us(quantile(samples(gateway), q)) - us(quantile(samples(direct), q)));
     let cpu = |s: &Samples| s.busy.as_secs_f64() * 1e6 / count as f64;
     println!(
         "| {scenario} | {concurrency} | {} | {} | {} | {} | {:.0} / {:.0} | {:.0} / {:.0} |",
@@ -653,6 +653,11 @@ fn row(
         cpu(bare),
         cpu(gateway),
     );
+}
+
+/// A difference in microseconds as measured, rounded to a whole one, without a negative zero.
+fn measured(us: f64) -> f64 {
+    us.round() + 0.0
 }
 
 fn quantile(sorted: &[u64], q: f64) -> u64 {
