@@ -1,6 +1,6 @@
 # Running Leaseholder on other hardware
 
-Every measurement so far ran on one RTX 5060 Ti 16 GB, the frozen box, with Gray, a second one, for the probes and the two-node points. This page says what the deployment needs from a GPU node, how a node's files come from a hardware profile, what changes on a card or a host that is not the box's, how one host runs both the GPU servers and the control plane, and how the A100 40 GB run is laid out. A number here is measured (on the box or Gray, with its source), modeled (lh-sim's forecast, [`benchmarks/a100/forecast.md`](../benchmarks/a100/forecast.md)) or an estimate, and says which.
+Every measurement so far ran on one RTX 5060 Ti 16 GB, the frozen box, with Gray, a second one, for the probes. This page says what the deployment needs from a GPU node, how a node's files come from a hardware profile, what changes on a card or a host that is not the box's, how one host runs both the GPU servers and the control plane, and how the A100 40 GB run is laid out. A number here is measured (on the box or Gray, with its source), modeled (lh-sim's forecast, [`benchmarks/a100/forecast.md`](../benchmarks/a100/forecast.md)) or an estimate, and says which.
 
 ## What runs where
 

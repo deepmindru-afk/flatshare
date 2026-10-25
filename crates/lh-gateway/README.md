@@ -225,7 +225,7 @@ What the numbers say:
 - the gateway's own time was 0.13 ms on average for voice requests;
 - paired against the engine's own socket, the gateway added 0.38 ms to a voice request's first token.
 
-**Admission policies.** The benchmark's second table prices each policy: background requests, which every policy holds, through one gateway per policy, with limits the runs never reach so that a policy adds its bookkeeping and never a wait, and through a gateway without a policy, which runs the same requests just before. Each gateway's own histogram follows the table. It has not run on cyan yet. On the M5 Max, the medians of eight runs on 2026-10-22, with the machine busy with other work, for the 2 KiB non-streaming rows:
+**Admission policies.** The benchmark's second table prices each policy: background requests, which every policy holds, through one gateway per policy, with limits the runs never reach so that a policy adds its bookkeeping and never a wait, and through a gateway without a policy, which runs the same requests just before. Each gateway's own histogram follows the table. On the M5 Max only (not on cyan), the medians of eight runs on 2026-10-22, with the machine busy with other work, for the 2 KiB non-streaming rows:
 
 | Policy | Own time, mean | CPU per request over `none`, 1 / 8 / 64 clients | p50 over `none`, 1 / 8 / 64 clients |
 |---|---:|---:|---:|

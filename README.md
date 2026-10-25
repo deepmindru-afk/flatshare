@@ -51,8 +51,8 @@ yours?](docs/PRODUCTION.md#is-your-deployment-in-this-regime)). Every run and ra
    48 tokens 2.24 s.
 4. **A control plane in front can make room only by aborting work.** A gateway can hold back new requests and abort
    admitted ones; only the engine can take KV from a request already decoding. Aborting and resubmitting agent requests
-   reaches 2.52 s at the agents' cost (TTFT p99 193 s against 106 s); the lifecycle policy (`leaseholder`), timed by the
-   conversation, never found its headroom and left tuned vLLM at 11.0 s (W4) ([what it could not
+   reaches 2.52 s at the agents' cost (TTFT p99 193 s against 106 s); the lifecycle policy, timed by the conversation,
+   never found its headroom and left tuned vLLM at 11.0 s (W4) ([what it could not
    do](docs/METHODS.md#what-lifecycle-timing-could-and-could-not-do)).
 
 ## Where it falls short, and what it costs
@@ -144,6 +144,7 @@ crates/lh-sim/            the KV cache simulator behind E1
 python/leaseholder_vllm/  the change on vLLM 0.32: the PRs as patches, the build, probes and tests
 python/leaseholder_bench/ the E2 harness, trace conversion, probes and drills
 python/leaseholder_voice/ the voice agent and the measurement callers
+python/leaseholder_stats/ the statistics the measurements publish, each defined once
 benchmarks/               E2's arm files and campaigns, the committed records, and the A100 run
 deploy/                   per-host bootstrap, hardware profiles, systemd units, the engine variants' drop-ins, tunnels,
                           single-host mode
