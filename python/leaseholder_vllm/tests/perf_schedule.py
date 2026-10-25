@@ -1,11 +1,12 @@
-"""make-room's cost per step: Scheduler.schedule()'s wall time on vLLM 0.32.0's real scheduler, on CPU, with its
-switches off and in the configuration to deploy, and the regression check of that cost against a measured baseline.
+"""make-room's cost per step: Scheduler.schedule()'s wall time on vLLM 0.32.0's real scheduler, on CPU, for stock vLLM
+and for make-room with its switches off and in the configuration to deploy, and the regression check of those costs
+against a measured baseline.
 
-The module is make-room's, as build.py generates it at engine start (``--module`` times another generated module), its
-switches off or in the configuration to deploy: ``max_preemptions_per_step 2``, ``budget_cap true``,
-``budget_cap_tokens 48``, ``reserve_tokens 0``. It runs in the steady states the PRs' cost tables were measured in
-(#63350 and #63351), in which nothing is admitted or preempted for the measured steps, so that every step does the same
-work:
+Stock vLLM is vLLM's own Scheduler, without the change. make-room's module is the one build.py generates at engine
+start (``--module`` times another generated module), its switches off or in the configuration to deploy:
+``max_preemptions_per_step 2``, ``budget_cap true``, ``budget_cap_tokens 48``, ``reserve_tokens 0``. They run in the
+steady states the PRs' cost tables were measured in (#63350 and #63351), in which nothing is admitted or preempted for
+the measured steps, so that every step does the same work:
 
   A  R running priority-2 decodes; the waiting head is a priority-2 request that does not fit the free KV (the
      saturated background tier), then W-1 small priority-2 requests behind it.
@@ -17,30 +18,35 @@ work:
 The head shares its first blocks with a running request's prompt (127 of them unless a state says otherwise), so its
 prefix-cache lookup walks that many cached blocks.
 
-A process times one state. It builds two schedulers for each configuration in that state, then the schedulers take
-turns of 5 steps, 5 of warm-up and 40 timed each, so that whatever else runs on the machine meanwhile slows them
-alike. A scheduler's cost is its 10th-percentile step: in a steady state every step does the same work, and the
-fastest are those that nothing else slowed (nor a turn's first, cold after the others'). A configuration's cost in
-the process is its cheaper scheduler's: one scheduler of a configuration may run a few percent slower than another
-through the whole process, as their places in memory differ, and the pair makes that need both. A state's ratio
-is the median over its processes of each one's on/off - 1: what the change costs as a fraction of the scheduler's own
-step, the same on a machine that is uniformly faster or slower. Its cost off in µs is the median over the processes,
-and the change's cost in µs that times the ratio, so that on = off x (1 + ratio). A round times every state once, a
-process each, the states in a rotated order, and a check is 3 rounds.
+A process times one state. It builds two schedulers of each configuration in that state, stock, off and on, and two more
+of off (off2), then the eight take turns of 5 steps, 5 of warm-up and 40 timed each, so that whatever else runs on the
+machine meanwhile slows them alike. A scheduler's cost is its 10th-percentile step (inclusive, as docs/GLOSSARY.md's
+percentiles are): in a steady state every step does the same work, and the fastest are those that nothing else slowed
+(nor a turn's first, cold after the others'). A configuration's cost in the process is its cheaper scheduler's: one
+scheduler of a configuration may run a few percent slower than another through the whole process, as their places in
+memory differ, and the pair makes that need both. A state has two ratios, each the median over its processes of each
+one's own: off/stock - 1, what the change costs a step with its switches off as a fraction of stock vLLM's step, which
+the PRs measured as main's within their tables' noise; and on/off - 1, what it costs in the configuration to deploy as a
+fraction of the step with its switches off. Neither moves on a machine that is uniformly faster or slower. The state's
+cost off in µs is the median over its processes; stock's is off's divided by off/stock, and on's off's times on/off. A
+round times every state once, a process each, the states in a rotated order, and a check is 3 rounds.
 
 What it can see: a state fails when the change's own cost a step grows by the tolerance of the step with the switches
-on (the table's "fails past", in µs), which is a small share of the change's cost where the change costs much (the B
-states) and a large one where it costs little (the A states). And what it cannot: with 40 timed steps the
-10th-percentile step lies between the 4th and 5th fastest, so work added to fewer than about 9 steps in 10 does not
-move it. Each cell records the ratio by the median step as well, as information the check does not read.
+on (the on/off table's "fails past", in µs), which is a small share of the change's cost where the change costs much
+(the B states) and a large one where it costs little (the A states), or when its cost with the switches off grows by
+the tolerance of stock's step (the off/stock table's): a cost common to off and on, which on/off cannot see, is one.
+And what it cannot: with 40 timed steps the 10th-percentile step lies between the 4th and 5th fastest, so work added
+to fewer than about 9 steps in 10 does not move it. Each cell records the on/off ratio by the median step as well, as
+information the check does not read.
 
-The check fails a state whose on/off exceeds the baseline's by more than the baseline's tolerance, a fraction of it
-(tolerance()), measured again over twice as many processes more and still exceeding it (confirm()). The baseline
-(benchmarks/perf/make-room-schedule.json) is two halves, A and B, of 3 rounds each, their rounds interleaved and the
-off configuration timed twice in each process: its noise is off against off within each process, and half B against
-half A, compared as the check compares itself with the baseline. A state whose on/off fell below the
-baseline's by more than the tolerance passes with a note (cheaper()): the change got cheaper, or the step with the
-switches off costlier, and either way the baseline no longer describes the code.
+The check fails a state whose off/stock or on/off exceeds the baseline's by more than the baseline's tolerance, a
+fraction of it (tolerance()), measured again over twice as many processes more and still exceeding it (confirm()). A
+state whose ratio fell below the baseline's by more than the tolerance passes with a note (cheaper()): the
+configuration on top of the ratio got cheaper or the one below it costlier, and either way the baseline no longer
+describes the code. The baseline (benchmarks/perf/make-room-schedule.json) is two halves, A and B, of 3 rounds each,
+their rounds interleaved: its noise is off against off within each process, and half B against half A in either
+ratio, compared as the check compares itself with the baseline. A check's processes time the same eight schedulers,
+its off2 giving its own noise, as information.
 
     python tests/perf_schedule.py check BASELINE [--out JSON] [--rounds 3] [--states A16,B64] [--module MODULE]
     python tests/perf_schedule.py baseline BASELINE [--rounds 3] [--beside TEXT]
@@ -76,8 +82,12 @@ TURN = 5  # the steps a scheduler takes in a row
 INSTANCES = 2  # schedulers of each configuration in a process; the cheaper one's cost counts
 RUN_TOKENS = 2048  # each running request's prompt
 MAX_MODEL_LEN = 32768
-# The configuration to deploy (docs/PRODUCTION.md), as make_room's keys.
+# The configurations, as make_room's keys: stock vLLM, vLLM's own Scheduler (STOCK_CLASS), without the change; make-room
+# with its switches off; and make-room in the configuration to deploy (docs/PRODUCTION.md).
+STOCK = "stock"
+STOCK_CLASS = "vllm.v1.core.sched.scheduler.Scheduler"
 CONFIGS: dict[str, dict | None] = {
+    STOCK: None,
     "off": None,
     "on": {
         "max_preemptions_per_step": 2,
@@ -86,16 +96,23 @@ CONFIGS: dict[str, dict | None] = {
         "reserve_tokens": 0,
     },
 }
-# The baseline times the off configuration twice in each process, the second time as "off2": the noise.
+# Each process times the off configuration twice, the second time as "off2": the baseline's noise, and a check's, as
+# information.
 NOISE = "off2"
+TIMED = [*CONFIGS, NOISE]
+# A state's two ratios, by the key its cell holds each under: off/stock - 1 and on/off - 1.
+RATIOS = {"off/stock": "off_ratio", "on/off": "ratio"}
 # What a baseline must have been measured with for a check to compare against it.
 METHOD = {
     "warmup_steps": WARMUP,
     "steps": STEPS,
     "turn_steps": TURN,
-    "cost": "the 10th-percentile step of the cheaper of a configuration's schedulers in a process",
+    "cost": "the 10th-percentile step, inclusive (statistics.quantiles(steps, n=10, method='inclusive')[0]), of the "
+    "cheaper of a configuration's schedulers in a process",
     "instances": INSTANCES,
     "configs": CONFIGS,
+    "stock": STOCK_CLASS,
+    "schedulers": INSTANCES * len(TIMED),  # in each process, a check's and a baseline's alike
 }
 
 
@@ -162,9 +179,15 @@ def load(path: Path, name: str):
     return module
 
 
-def steady_state(module, model: str, state: State, switches: dict | None):
-    """``module``'s Scheduler with ``switches`` in ``state``: the running requests decoding, the head and the requests
-    behind it waiting."""
+def scheduler_class(module, config: str):
+    """The class of a configuration's schedulers: stock vLLM's own Scheduler, as the suites import it, or
+    ``module``'s."""
+    return suite().StockScheduler if config == STOCK else module.Scheduler
+
+
+def steady_state(cls, model: str, state: State, switches: dict | None):
+    """A scheduler of the class ``cls`` with ``switches`` in ``state``: the running requests decoding, the head and the
+    requests behind it waiting."""
     T = suite()
     block = T.BLOCK
     R = state.running
@@ -174,7 +197,7 @@ def steady_state(module, model: str, state: State, switches: dict | None):
     growth = R * (WARMUP + STEPS + 2) // block + R + 64
     free = state.free or max(900 if state.scenario in "AB" else 400, growth)
     sched = T.scheduler(
-        module.Scheduler,
+        cls,
         model,
         run_blocks + free + 1,  # + vLLM's null block
         switches,
@@ -241,10 +264,10 @@ def measure(
     turn. Returns each configuration's timed steps in µs, scheduler by scheduler."""
     module = load(module_path, module_path.stem)
     order = [(c, i) for i in range(INSTANCES) for c in configs]
-    scheds = {
-        key: steady_state(module, model, state, CONFIGS["off" if key[0] == NOISE else key[0]])
-        for key in order
-    }
+    scheds = {}
+    for c, i in order:
+        config = "off" if c == NOISE else c
+        scheds[c, i] = steady_state(scheduler_class(module, config), model, state, CONFIGS[config])
     gc.collect()
     gc.freeze()  # the states' objects: the collector need not walk them while steps are timed
     times: dict[tuple[str, int], list[float]] = {key: [] for key in order}
@@ -343,8 +366,8 @@ def run(
 
 
 def cost(times: list[float]) -> float:
-    """A scheduler's cost: the 10th percentile of its timed steps."""
-    return statistics.quantiles(times, n=10)[0]
+    """A scheduler's cost: the 10th percentile of its timed steps, inclusive, as docs/GLOSSARY.md's percentiles are."""
+    return statistics.quantiles(times, n=10, method="inclusive")[0]
 
 
 def cheapest(schedulers: list[list[float]]) -> float:
@@ -353,11 +376,13 @@ def cheapest(schedulers: list[list[float]]) -> float:
 
 
 def cells(processes: list[dict]) -> dict[str, dict]:
-    """Each state's cell from its processes, in STATES' order: the ratio, the median over the processes of each
-    one's on/off - 1, which its turns pair; the cost off, the median over the processes, in µs, and the change's at
-    that cost; where the off configuration was timed twice, the noise, the median of off2/off - 1; and, as
-    information the check does not read, the same ratio by the median step, which work on fewer than about 9 steps
-    in 10 moves and the 10th-percentile step does not."""
+    """Each state's cell from its processes, in STATES' order: its two ratios, each the median over the processes of
+    each one's own, which its turns pair: on/off - 1 (``ratio``) and off/stock - 1 (``off_ratio``); the cost off, the
+    median over the processes, in µs, and stock's and on's from it by the ratios, so that off = stock x (1 +
+    off_ratio) and on = off x (1 + ratio), and the change's in µs with the switches off and on; where the off
+    configuration was timed twice, the noise, the median of off2/off - 1; and, as information the check does not
+    read, on/off by the median step, which work on fewer than about 9 steps in 10 moves and the 10th-percentile step
+    does not."""
     by_state: dict[str, list[tuple[dict[str, float], dict[str, float]]]] = {}
     for proc in processes:
         p10 = {c: cheapest(t) for c, t in proc["times_us"].items()}
@@ -367,12 +392,17 @@ def cells(processes: list[dict]) -> dict[str, dict]:
     for key in (s.key for s in STATES if s.key in by_state):
         procs = [p10 for p10, _ in by_state[key]]
         ratios = [round(p["on"] / p["off"] - 1, 4) for p in procs]
-        cell: dict = {"off_us": round(statistics.median(p["off"] for p in procs), 1)}
-        cell |= costs(cell["off_us"], round(statistics.median(ratios), 4))
+        off_ratios = [round(p["off"] / p[STOCK] - 1, 4) for p in procs]
+        off_us = round(statistics.median(p["off"] for p in procs), 1)
+        off_ratio = round(statistics.median(off_ratios), 4)
+        cell: dict = {"stock_us": round(off_us / (1 + off_ratio), 1), "off_us": off_us}
+        cell |= costs(off_us, round(statistics.median(ratios), 4))
         cell["ratios"] = ratios
         cell["median_ratio"] = round(
             statistics.median(m["on"] / m["off"] - 1 for _, m in by_state[key]), 4
         )
+        cell["off_change_us"] = round(off_us - cell["stock_us"], 1)
+        cell |= {"off_ratio": off_ratio, "off_ratios": off_ratios}
         if NOISE in procs[0]:
             cell["noises"] = [round(p[NOISE] / p["off"] - 1, 4) for p in procs]
             cell["noise"] = round(statistics.median(cell["noises"]), 4)
@@ -392,59 +422,72 @@ def excess(ratio: float, base: float) -> float:
 
 
 def baseline_cells(processes: list[dict]) -> dict[str, dict]:
-    """The baseline's cells: over both halves' processes, with each half's ratios and half B's excess over half A."""
+    """The baseline's cells: over both halves' processes, with each half's ratios and half B's excess over half A, in
+    on/off (``aa``) and in off/stock (``off_aa``)."""
     out = cells(processes)
-    by_run = {name: cells([p for p in processes if p["run"] == name]) for name in "ab"}
+    by_half = {name: cells([p for p in processes if p["run"] == name]) for name in "ab"}
     for key, cell in out.items():
-        a, b = by_run["a"][key], by_run["b"][key]
-        del cell["ratios"]
+        a, b = by_half["a"][key], by_half["b"][key]
+        del cell["ratios"], cell["off_ratios"]
         cell |= {"ratios_a": a["ratios"], "ratios_b": b["ratios"]}
         cell |= {"ratio_a": a["ratio"], "ratio_b": b["ratio"]}
         cell["aa"] = round(excess(b["ratio"], a["ratio"]), 4)
+        cell |= {"off_ratios_a": a["off_ratios"], "off_ratios_b": b["off_ratios"]}
+        cell |= {"off_ratio_a": a["off_ratio"], "off_ratio_b": b["off_ratio"]}
+        cell["off_aa"] = round(excess(b["off_ratio"], a["off_ratio"]), 4)
     return out
 
 
-def tolerance(noise: list[float], aa: list[float]) -> float:
+def tolerance(noise: list[float], aa: list[float], off_aa: list[float]) -> float:
     """The check's tolerance: twice the largest factor by which the baseline's two measurements of something
     unchanged differed in any state, as a fraction rounded up to a whole percent. Those are off against off in each
-    process (``noise``: the median over the processes of off2/off - 1) and its half B against its half A (``aa``: the
-    excess, as the check compares on/off), and a check run and the baseline may each be off by that much."""
-    worst = max(abs(math.log1p(x)) for x in [*noise, *aa])
+    process (``noise``: the median over the processes of off2/off - 1) and its half B against its half A in on/off
+    (``aa``) and in off/stock (``off_aa``), each the excess as the check compares a ratio with the baseline's, and a
+    check run and the baseline may each be off by that much."""
+    worst = max(abs(math.log1p(x)) for x in [*noise, *aa, *off_aa])
     return math.ceil(round(100 * math.expm1(2 * worst), 6)) / 100
 
 
+def against(key: str, what: str, ratio: float, base: float) -> str:
+    """A state's ratio ``what`` (one of RATIOS) against the baseline's, and the excess: off/stock to three decimals,
+    which moves little, and on/off to two."""
+    digits = 3 if what == "off/stock" else 2
+    return (
+        f"{key}: {what} {1 + ratio:.{digits}f} against the baseline's {1 + base:.{digits}f}, "
+        f"{excess(ratio, base):+.1%}"
+    )
+
+
 def check(measured: dict[str, dict], baseline: dict) -> list[str]:
-    """The states in ``measured`` whose on/off exceeds the baseline's by more than its tolerance, and what they cost;
-    a state the baseline lacks fails too."""
+    """The states in ``measured`` whose off/stock or on/off exceeds the baseline's by more than its tolerance, and by
+    how much; a state the baseline lacks fails too."""
     failures = []
     for key, cell in measured.items():
         base = baseline["cells"].get(key)
         if base is None:
             failures.append(f"{key}: not in the baseline")
             continue
-        over = excess(cell["ratio"], base["ratio"])
-        if over > baseline["tolerance"]:
-            failures.append(
-                f"{key}: on/off {1 + cell['ratio']:.2f} against the baseline's "
-                f"{1 + base['ratio']:.2f}, {over:+.1%} (tolerance {baseline['tolerance']:.0%})"
-            )
+        for what, field in RATIOS.items():
+            if excess(cell[field], base[field]) > baseline["tolerance"]:
+                failures.append(
+                    f"{against(key, what, cell[field], base[field])} "
+                    f"(tolerance {baseline['tolerance']:.0%})"
+                )
     return failures
 
 
 def cheaper(measured: dict[str, dict], baseline: dict) -> list[str]:
-    """The states in ``measured`` whose on/off fell below the baseline's by more than its tolerance. They pass: the
-    change got cheaper, or the step with the switches off costlier, and either way the baseline no longer describes
-    the code."""
+    """The states in ``measured`` whose off/stock or on/off fell below the baseline's by more than its tolerance. They
+    pass: the configuration on top of the ratio got cheaper or the one below it costlier, and either way the baseline
+    no longer describes the code."""
     notes = []
     for key, cell in measured.items():
         base = baseline["cells"].get(key)
         if base is None:
             continue
-        over = excess(cell["ratio"], base["ratio"])
-        if over < -baseline["tolerance"]:
-            notes.append(
-                f"{key}: on/off {1 + cell['ratio']:.2f} against the baseline's {1 + base['ratio']:.2f}, {over:+.1%}"
-            )
+        for what, field in RATIOS.items():
+            if excess(cell[field], base[field]) < -baseline["tolerance"]:
+                notes.append(against(key, what, cell[field], base[field]))
     return notes
 
 
@@ -467,7 +510,9 @@ def confirm(result: dict, baseline: dict, again) -> tuple[dict[str, dict], list[
     processes still exceeds the tolerance. Two of an unchanged module's three processes can stray the same way, and
     rarely do; a costlier module fails again. Returns the cells, the failures and the states measured again."""
     measured = cells(result["processes"])
-    failing = {f.split(":")[0] for f in check(measured, baseline) if " on/off " in f}
+    failing = {
+        f.split(":")[0] for f in check(measured, baseline) if not f.endswith("not in the baseline")
+    }
     suspects = [key for key in measured if key in failing]
     if suspects:
         more = again([BY_KEY[key] for key in suspects])
@@ -477,10 +522,22 @@ def confirm(result: dict, baseline: dict, again) -> tuple[dict[str, dict], list[
     return measured, check(measured, baseline), suspects
 
 
-def table(measured: dict[str, dict], baseline: dict | None) -> str:
-    """The cells as a Markdown table, in the PRs' rows' order. Against a baseline, "fails past" is how many µs a step
-    more the change may cost before the state fails: the tolerance of the step with the switches on."""
-    head = "| State | Running | off µs | on µs | change µs | ratio |"
+# How each of RATIOS reads in its table: the cell's keys of its two costs in µs, the one below the ratio and the one on
+# top, of the change between them, and how the ratio is shown.
+TABLES = {
+    "off/stock": ("stock_us", "off_us", "off_change_us", "{:+.1%}"),
+    "on/off": ("off_us", "on_us", "change_us", "{:+.2f}"),
+}
+
+
+def table(measured: dict[str, dict], baseline: dict | None, what: str = "on/off") -> str:
+    """The cells' ratio ``what`` (one of RATIOS) as a Markdown table, in the PRs' rows' order: the costs of the
+    configurations below and on top of it in µs, the change between them and the ratio. Against a baseline, "fails
+    past" is how many µs a step more the configuration on top may cost before the state fails: the tolerance of its
+    step at the baseline's ratio."""
+    below, top, change, form = TABLES[what]
+    field = RATIOS[what]
+    head = f"| State | Running | {below[:-3]} µs | {top[:-3]} µs | change µs | ratio |"
     rule = "|---|---:|---:|---:|---:|---:|"
     if baseline:
         head += " baseline | excess | fails past | |"
@@ -491,23 +548,33 @@ def table(measured: dict[str, dict], baseline: dict | None) -> str:
         if cell is None:
             continue
         line = (
-            f"| {state.label} | {state.running} | {cell['off_us']:,.0f} | {cell['on_us']:,.0f} "
-            f"| {cell['change_us']:+,.0f} | {cell['ratio']:+.2f} |"
+            f"| {state.label} | {state.running} | {cell[below]:,.0f} | {cell[top]:,.0f} "
+            f"| {cell[change]:+,.0f} | {form.format(cell[field])} |"
         )
         if baseline:
             base = baseline["cells"].get(state.key)
             if base is None:
                 line += " — | — | not in the baseline |"
             else:
-                over = excess(cell["ratio"], base["ratio"])
+                over = excess(cell[field], base[field])
                 verdict = "ok"
                 if abs(over) > baseline["tolerance"]:
                     verdict = "costlier" if over > 0 else "cheaper"
-                # The change may cost this much more a step before the state fails.
-                room = cell["off_us"] * baseline["tolerance"] * (1 + base["ratio"])
-                line += f" {base['ratio']:+.2f} | {over:+.1%} | +{room:,.0f} µs | {verdict} |"
+                # The configuration on top may cost this much more a step before the state fails.
+                room = cell[below] * baseline["tolerance"] * (1 + base[field])
+                line += f" {form.format(base[field])} | {over:+.1%} | +{room:,.0f} µs | {verdict} |"
         lines.append(line)
     return "\n".join(lines)
+
+
+def tables(measured: dict[str, dict], baseline: dict | None) -> str:
+    """Both ratios' tables, each under what it compares."""
+    return (
+        "make-room with its switches off against stock vLLM (ratio: off/stock - 1):\n"
+        f"{table(measured, baseline, 'off/stock')}\n\n"
+        "make-room in the configuration to deploy against its switches off (ratio: on/off - 1):\n"
+        f"{table(measured, baseline, 'on/off')}"
+    )
 
 
 def dumps(value, indent: int = 0) -> str:
@@ -608,6 +675,13 @@ def build_module(out: Path) -> Path:
     return build.build("make-room", out, source_tree=True)
 
 
+def count_states(lines) -> str:
+    """How many states ``lines`` name, each line led by its state's key, or the keys themselves: "1 state", "2
+    states"."""
+    n = len({line.split(":")[0] for line in lines})
+    return f"{n} state" if n == 1 else f"{n} states"
+
+
 def main() -> None:
     try:
         sys.exit(command())
@@ -635,7 +709,7 @@ def command() -> int:
     m.add_argument("module", type=Path)
     m.add_argument("model")
     m.add_argument("state", choices=list(BY_KEY))
-    m.add_argument("configs", nargs="+", choices=[*CONFIGS, NOISE])
+    m.add_argument("configs", nargs="+", choices=TIMED)
     args = parser.parse_args()
 
     if args.command == "measure":
@@ -661,7 +735,6 @@ def command() -> int:
         print(f"perf_schedule.py: {warning}", file=sys.stderr)
     from conftest import write_model
 
-    configs = ["off", "on"] + ([NOISE] if args.command == "baseline" else [])
     runs = "ab" if args.command == "baseline" else "a"
     with tempfile.TemporaryDirectory() as tmp:
         module = args.module or build_module(Path(tmp))
@@ -669,7 +742,7 @@ def command() -> int:
         model.mkdir()
         write_model(model, max_position_embeddings=MAX_MODEL_LEN)
         started = datetime.now(UTC)
-        result = run(module, str(model), states, configs, args.rounds, runs)
+        result = run(module, str(model), states, TIMED, args.rounds, runs)
         if baseline is not None:
 
             def again(failing: list[State]) -> dict:
@@ -677,7 +750,7 @@ def command() -> int:
                 print(
                     f"  measuring {keys} again, {2 * args.rounds} processes each", file=sys.stderr
                 )
-                return run(module, str(model), failing, configs, 2 * args.rounds, "c")
+                return run(module, str(model), failing, TIMED, 2 * args.rounds, "c")
 
             measured, failures, suspects = confirm(result, baseline, again)
     if args.raw:
@@ -695,25 +768,27 @@ def command() -> int:
         measured = baseline_cells(result["processes"])
         noise = [cell["noise"] for cell in measured.values()]
         aa = [cell["aa"] for cell in measured.values()]
+        off_aa = [cell["off_aa"] for cell in measured.values()]
         record = {
-            "what": "make-room's cost per step, Scheduler.schedule()'s wall time on vLLM 0.32.0's real scheduler "
-            "on CPU with its switches off and in the configuration to deploy, written by "
-            "python/leaseholder_vllm/tests/perf_schedule.py baseline",
+            "what": "the cost per step of stock vLLM's scheduler and of make-room's with its switches off and in the "
+            "configuration to deploy, Scheduler.schedule()'s wall time on vLLM 0.32.0's real scheduler on CPU, "
+            "written by python/leaseholder_vllm/tests/perf_schedule.py baseline",
             **record,
             "beside": args.beside,
-            "tolerance": tolerance(noise, aa),
+            "tolerance": tolerance(noise, aa, off_aa),
             "tolerance_rule": " ".join(tolerance.__doc__.split()),
             "noise_max": max(noise, key=abs),
             "aa_max": max(aa, key=abs),
+            "off_aa_max": max(off_aa, key=abs),
             "cells": measured,
         }
-        print(table(measured, None))
+        print(tables(measured, None))
         args.baseline.parent.mkdir(parents=True, exist_ok=True)
         args.baseline.write_text(dumps(record) + "\n")
         print(
             f"\nbaseline written to {args.baseline}: the worst off-against-off noise "
-            f"{record['noise_max']:+.1%}, the worst half B against half A {record['aa_max']:+.1%}, "
-            f"so a tolerance of {record['tolerance']:.0%}"
+            f"{record['noise_max']:+.1%}, the worst half B against half A {record['aa_max']:+.1%} in on/off "
+            f"and {record['off_aa_max']:+.1%} in off/stock, so a tolerance of {record['tolerance']:.0%}"
         )
         return 0
 
@@ -734,7 +809,7 @@ def command() -> int:
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(dumps(record) + "\n")
-    print(table(measured, baseline))
+    print(tables(measured, baseline))
     print(
         f"\nagainst the baseline of {baseline['machine']['host']}, {baseline['date']} "
         f"(tolerance {baseline['tolerance']:.0%}):"
@@ -742,13 +817,13 @@ def command() -> int:
     if busy:
         print(f"warning: {busy}")
     if failures:
-        print(f"FAIL: the change costs more than it did in {len(failures)} states:")
+        print(f"FAIL: the change costs more than it did in {count_states(failures)}:")
         print("\n".join(f"  {failure}" for failure in failures))
     else:
-        print(f"ok: {len(measured)} states within it")
+        print(f"ok: {count_states(measured)} within it")
     if record["cheaper"]:
         print(
-            f"note: {len(record['cheaper'])} states cheaper than the baseline by more than the tolerance, which no "
+            f"note: {count_states(record['cheaper'])} cheaper than the baseline by more than the tolerance, which no "
             "longer describes the code: once the change is meant, measure a new baseline"
         )
         print("\n".join(f"  {note}" for note in record["cheaper"]))

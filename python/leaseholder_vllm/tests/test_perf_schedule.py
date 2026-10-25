@@ -17,17 +17,34 @@ import pytest
 BASELINE = Path(__file__).resolve().parents[3] / "benchmarks/perf/make-room-schedule.json"
 
 
-def process(state: str, off: float, on: float, off2: float | None = None, run: str = "a") -> dict:
+def process(
+    state: str,
+    off: float,
+    on: float,
+    off2: float | None = None,
+    run: str = "a",
+    stock: float | None = None,
+) -> dict:
     """A process's timed steps: 40 of each configuration's two schedulers, the first's slowest 35 of them 50% above
-    the given cost, as if something else had slowed them, and the second's all 20% above it, as if it ran slower."""
-    times = {"off": off, "on": on} | ({} if off2 is None else {P.NOISE: off2})
+    the given cost, as if something else had slowed them, and the second's all 20% above it, as if it ran slower.
+    Stock vLLM costs what off does unless ``stock`` says otherwise."""
+    times = {P.STOCK: off if stock is None else stock, "off": off, "on": on}
+    times |= {} if off2 is None else {P.NOISE: off2}
     steps = {c: [[t] * 5 + [1.5 * t] * 35, [1.2 * t] * 40] for c, t in times.items()}
     return {"run": run, "rep": 1, "state": state, "order": list(steps), "times_us": steps}
 
 
+def ratios(ratio: float, off_ratio: float = 0.0) -> dict:
+    """A cell's two ratios: on/off - 1 and off/stock - 1."""
+    return {"ratio": ratio, "off_ratio": off_ratio}
+
+
 def test_a_configurations_cost_is_its_cheaper_schedulers_10th_percentile_step():
+    """The 10th percentile is inclusive, as docs/GLOSSARY.md's percentiles are: of 40 steps, 0.9 of the way from the
+    4th fastest to the 5th."""
     assert P.cost([15.0] * 35 + [10.0] * 5) == 10.0  # the 4th and 5th fastest of 40
-    assert P.cost(list(range(1, 41))) == 4.1  # between the 4th and 5th fastest of 40
+    assert P.cost(list(range(1, 41))) == 4.9
+    assert "method='inclusive'" in P.METHOD["cost"]
     assert P.cheapest([[12.0] * 40, [15.0] * 35 + [10.0] * 5]) == 10.0
     assert P.cheapest([[10.5] * 40, [15.0] * 35 + [10.0] * 5]) == 10.0
     assert P.cheapest([[9.0] * 40, [15.0] * 35 + [10.0] * 5]) == 9.0
@@ -47,54 +64,97 @@ def test_a_cells_ratio_is_the_median_of_its_processes_on_off():
     assert "noise" not in P.cells([process("C16", 100, 150)])["C16"]
 
 
+def test_a_cells_off_ratio_is_the_median_of_its_processes_off_against_stock():
+    """off/stock - 1 is what the change costs a step with its switches off, as a fraction of stock vLLM's step; stock's
+    cost in µs is off's over that, so that off = stock x (1 + off_ratio)."""
+    procs = [
+        process("B16", 101, 250, stock=100),
+        process("B16", 200, 500, stock=200),
+        process("B16", 99, 250, stock=90),
+    ]
+    cell = P.cells(procs)["B16"]
+    assert cell["off_ratios"] == [0.01, 0.0, 0.1] and cell["off_ratio"] == 0.01
+    assert cell["off_us"] == 101 and cell["stock_us"] == 100 and cell["off_change_us"] == 1
+
+
 def test_the_baseline_compares_its_half_b_with_its_half_a():
-    procs = [process("C16", 100, 150, 101, run) for run in "ab"]
-    procs += [process("C16", 100, 160, 100, "a"), process("C16", 100, 158, 99, "b")]
-    procs += [process("C16", 100, 170, 100, "a"), process("C16", 100, 162, 101, "b")]
+    procs = [process("C16", 100, 150, 101, run, stock=100) for run in "ab"]
+    procs += [process("C16", 100, 160, 100, "a", 99), process("C16", 100, 158, 99, "b", 98)]
+    procs += [process("C16", 100, 170, 100, "a", 98), process("C16", 100, 162, 101, "b", 100)]
     cell = P.baseline_cells(procs)["C16"]
     assert cell["ratios_a"] == [0.5, 0.6, 0.7] and cell["ratios_b"] == [0.5, 0.58, 0.62]
     assert cell["ratio_a"] == 0.6 and cell["ratio_b"] == 0.58
     assert cell["ratio"] == 0.59 and "ratios" not in cell  # over all six processes
     assert cell["aa"] == round(1.58 / 1.6 - 1, 4)
+    # And off against stock, each half on its own.
+    assert cell["off_ratios_a"] == [0.0, 0.0101, 0.0204] and cell["off_ratios_b"] == [
+        0.0,
+        0.0204,
+        0.0,
+    ]
+    assert cell["off_ratio_a"] == 0.0101 and cell["off_ratio_b"] == 0.0
+    assert cell["off_aa"] == round(1 / 1.0101 - 1, 4) and "off_ratios" not in cell
 
 
-def test_the_tolerance_is_twice_the_worst_factor_of_either_noise():
+def test_the_tolerance_is_twice_the_worst_factor_of_any_noise():
     # The worst differed by a factor of 1/0.958: twice that is 1.0896, up to a whole percent.
-    assert P.tolerance([0.01, -0.042], [0.02]) == 0.09
-    assert P.tolerance([0.01], [0.042, -0.001]) == 0.09  # run against run counts too
-    assert P.tolerance([0.0, 0.001], [0.0]) == 0.01
-    assert P.tolerance([0.01], [0.0]) == 0.03  # 1.01 ** 2 - 1 = 0.0201, rounded up
+    assert P.tolerance([0.01, -0.042], [0.02], [0.0]) == 0.09
+    assert P.tolerance([0.01], [0.042, -0.001], [0.0]) == 0.09  # half against half in on/off
+    assert P.tolerance([0.01], [0.0], [0.0, -0.042]) == 0.09  # and in off/stock
+    assert P.tolerance([0.0, 0.001], [0.0], [0.0]) == 0.01
+    assert P.tolerance([0.01], [0.0], [0.0]) == 0.03  # 1.01 ** 2 - 1 = 0.0201, rounded up
 
 
 def test_the_check_fails_a_state_whose_on_off_grew_past_the_tolerance():
-    baseline = {"tolerance": 0.10, "cells": {"B64": {"ratio": 0.5}, "C16": {"ratio": 0.0}}}
-    assert P.check({"B64": {"ratio": 0.64}}, baseline) == []  # 1.64 / 1.5: +9.3%
-    assert P.check({"B64": {"ratio": 0.2}, "C16": {"ratio": -0.05}}, baseline) == []  # cheaper
-    [failure] = P.check({"B64": {"ratio": 0.66}, "C16": {"ratio": 0.05}}, baseline)
-    assert failure.startswith("B64: on/off 1.66 against the baseline's 1.50, +10.7%")
-    assert P.check({"A16": {"ratio": 0.0}}, baseline) == ["A16: not in the baseline"]
+    baseline = {"tolerance": 0.10, "cells": {"B64": ratios(0.5), "C16": ratios(0.0)}}
+    assert P.check({"B64": ratios(0.64)}, baseline) == []  # 1.64 / 1.5: +9.3%
+    assert P.check({"B64": ratios(0.2), "C16": ratios(-0.05)}, baseline) == []  # cheaper
+    [failure] = P.check({"B64": ratios(0.66), "C16": ratios(0.05)}, baseline)
+    assert failure == "B64: on/off 1.66 against the baseline's 1.50, +10.7% (tolerance 10%)"
+    assert P.check({"A16": ratios(0.0)}, baseline) == ["A16: not in the baseline"]
+
+
+def test_the_check_fails_a_state_whose_off_against_stock_grew_past_the_tolerance():
+    """With its switches off the change must cost a step what stock vLLM's does, as the PRs say it does: a state whose
+    off/stock exceeds the baseline's by more than the tolerance fails."""
+    baseline = {"tolerance": 0.04, "cells": {"B16": ratios(1.5, 0.002)}}
+    assert P.check({"B16": ratios(1.5, 0.03)}, baseline) == []  # 1.03 / 1.002: +2.8%
+    [failure] = P.check({"B16": ratios(1.5, 0.05)}, baseline)
+    assert failure == "B16: off/stock 1.050 against the baseline's 1.002, +4.8% (tolerance 4%)"
+
+
+def test_a_cost_common_to_off_and_on_fails_off_against_stock_and_reads_cheaper_in_on_off():
+    """The same work added to every step, switches off or on: on/off falls, which alone would read as the change got
+    cheaper, and off/stock fails."""
+    baseline = {"tolerance": 0.04, "cells": P.cells([process("B64", 800, 1320, stock=800)])}
+    measured = P.cells([process("B64", 1240, 1760, stock=800)])
+    assert P.check(measured, baseline) == [
+        "B64: off/stock 1.550 against the baseline's 1.000, +55.0% (tolerance 4%)"
+    ]
+    assert P.cheaper(measured, baseline) == ["B64: on/off 1.42 against the baseline's 1.65, -14.0%"]
 
 
 def test_a_state_cheaper_past_the_tolerance_passes_and_is_reported():
-    """An on/off that fell by more than the tolerance means that the change got cheaper or the step with the switches
-    off costlier: the baseline no longer describes the code, though nothing costs more."""
-    baseline = {"tolerance": 0.04, "cells": {"B64": {"ratio": 0.6}, "C16": {"ratio": 0.8}}}
-    measured = {
-        "B64": {"ratio": 0.5},
-        "C16": {"ratio": 0.75},
-    }  # 1.5 / 1.6: -6.25%; 1.75 / 1.8: -2.8%
+    """A ratio that fell by more than the tolerance means that the configuration on top of it got cheaper or the one
+    below it costlier: the baseline no longer describes the code, though nothing costs more."""
+    baseline = {"tolerance": 0.04, "cells": {"B64": ratios(0.6), "C16": ratios(0.8, 0.05)}}
+    # B64's on/off 1.5 against 1.6: -6.25%; C16's 1.75 against 1.8: -2.8%, and its off/stock 1.0 against 1.05: -4.8%.
+    measured = {"B64": ratios(0.5), "C16": ratios(0.75)}
     assert P.check(measured, baseline) == []
-    assert P.cheaper(measured, baseline) == ["B64: on/off 1.50 against the baseline's 1.60, -6.2%"]
+    assert P.cheaper(measured, baseline) == [
+        "B64: on/off 1.50 against the baseline's 1.60, -6.2%",
+        "C16: off/stock 1.000 against the baseline's 1.050, -4.8%",
+    ]
     assert (
-        P.cheaper({"A16": {"ratio": 0.0}}, baseline) == []
-    )  # not in the baseline: check() says so
+        P.cheaper({"A16": ratios(0.0)}, baseline) == []
+    )  # not in the baseline, which check() says
     lines = P.table(P.cells([process("B64", 1000, 1500)]), baseline).splitlines()
     assert lines[2].endswith("| +0.50 | +0.60 | -6.2% | +64 µs | cheaper |")
 
 
 @pytest.mark.parametrize("again_ratio, fails", [(0.6, False), (0.7, True)])
 def test_a_failing_state_is_measured_again_and_fails_only_if_it_still_exceeds(again_ratio, fails):
-    baseline = {"tolerance": 0.04, "cells": {"B64": {"ratio": 0.6}, "C16": {"ratio": 0.8}}}
+    baseline = {"tolerance": 0.04, "cells": {"B64": ratios(0.6), "C16": ratios(0.8)}}
     # B64: two of three processes strayed, +6.25% over the baseline's on/off; C16 within it.
     procs = [process("B64", 100, 170), process("B64", 100, 170), process("B64", 100, 160)]
     procs += [process("C16", 100, 180)] * 3
@@ -112,8 +172,23 @@ def test_a_failing_state_is_measured_again_and_fails_only_if_it_still_exceeds(ag
     assert [f.split(":")[0] for f in failures] == (["B64"] if fails else [])
 
 
+def test_a_state_failing_off_against_stock_is_measured_again_too():
+    baseline = {"tolerance": 0.04, "cells": {"B16": ratios(1.5), "C16": ratios(0.8)}}
+    procs = [process("B16", 105, 262.5, stock=100)] * 3  # off/stock +5%, on/off the baseline's
+    procs += [process("C16", 100, 180)] * 3
+    calls = []
+
+    def again(states):
+        calls.append([s.key for s in states])
+        return {"processes": [process("B16", 100, 250, stock=100)] * 6, "load": []}
+
+    measured, failures, suspects = P.confirm({"processes": procs, "load": []}, baseline, again)
+    assert calls == [["B16"]] and suspects == ["B16"] and failures == []
+    assert len(measured["B16"]["off_ratios"]) == 9 and measured["B16"]["off_ratio"] == 0.0
+
+
 def test_a_passing_run_is_not_measured_again():
-    baseline = {"tolerance": 0.04, "cells": {"B64": {"ratio": 0.6}}}
+    baseline = {"tolerance": 0.04, "cells": {"B64": ratios(0.6)}}
     result = {"processes": [process("B64", 100, 161)] * 3, "load": []}
     measured, failures, suspects = P.confirm(result, baseline, lambda states: pytest.fail("again"))
     assert failures == [] and suspects == [] and measured["B64"]["ratio"] == 0.61
@@ -122,7 +197,7 @@ def test_a_passing_run_is_not_measured_again():
 def test_the_table_says_how_much_more_a_step_may_cost_before_a_state_fails():
     """The change may cost the tolerance of the on step more before the state fails: off x tol x (1 + ratio)."""
     measured = P.cells([process("B64", 1000, 1620)])
-    baseline = {"tolerance": 0.09, "cells": {"B64": {"ratio": 0.62}}}
+    baseline = {"tolerance": 0.09, "cells": {"B64": ratios(0.62)}}
     head, _, line = P.table(measured, baseline).splitlines()
     assert head.endswith("| baseline | excess | fails past | |")
     assert line.endswith("| +0.62 | +0.0% | +146 µs | ok |")  # 1000 x 0.09 x 1.62
@@ -131,9 +206,10 @@ def test_the_table_says_how_much_more_a_step_may_cost_before_a_state_fails():
 def test_a_cell_records_the_median_step_too_which_sees_work_on_half_the_steps():
     """The 10th-percentile step cannot see work done on fewer than about 9 steps in 10; the median-step ratio, kept
     as information beside it, can."""
-    steps = {"off": [[100.0] * 40] * 2, "on": [[160.0] * 20 + [320.0] * 20] * 2}
+    steps = {"stock": [[100.0] * 40] * 2, "off": [[100.0] * 40] * 2}
+    steps["on"] = [[160.0] * 20 + [320.0] * 20] * 2
     cell = P.cells(
-        [{"run": "a", "rep": 1, "state": "C16", "order": ["off", "on"], "times_us": steps}]
+        [{"run": "a", "rep": 1, "state": "C16", "order": list(steps), "times_us": steps}]
     )["C16"]
     assert cell["ratio"] == 0.6 and cell["median_ratio"] == 1.4
 
@@ -155,7 +231,7 @@ def test_a_run_busier_than_its_baseline_by_half_says_so():
 
 def test_the_table_shows_off_on_the_change_and_the_ratio_against_the_baseline():
     measured = P.cells([process("B64", 1000, 1620), process("C16", 250, 450)])
-    baseline = {"tolerance": 0.09, "cells": {"B64": {"ratio": 0.62}, "C16": {"ratio": 0.6}}}
+    baseline = {"tolerance": 0.09, "cells": {"B64": ratios(0.62), "C16": ratios(0.6)}}
     lines = P.table(measured, baseline).splitlines()
     assert lines[0].startswith("| State | Running | off µs | on µs | change µs | ratio |")
     assert lines[2] == "| B | 64 | 1,000 | 1,620 | +620 | +0.62 | +0.62 | +0.0% | +146 µs | ok |"
@@ -165,23 +241,83 @@ def test_the_table_shows_off_on_the_change_and_the_ratio_against_the_baseline():
     assert "baseline" not in P.table(measured, None)
 
 
+def test_the_off_table_shows_stock_off_and_their_ratio_against_the_baseline():
+    """Its "fails past" is the tolerance of stock's step at the baseline's off/stock: 330 x 0.04 x 1.0, and
+    200 x 0.04 x 0.96."""
+    measured = P.cells([process("B16", 340, 860, stock=330), process("C16", 190, 340, stock=200)])
+    baseline = {"tolerance": 0.04, "cells": {"B16": ratios(1.5), "C16": ratios(0.8, -0.04)}}
+    lines = P.table(measured, baseline, "off/stock").splitlines()
+    assert lines[0].startswith("| State | Running | stock µs | off µs | change µs | ratio |")
+    assert lines[2].endswith("| 16 | 330 | 340 | +10 | +3.0% | +0.0% | +3.0% | +13 µs | ok |")
+    assert lines[3].endswith("| 16 | 200 | 190 | -10 | -5.0% | -4.0% | -1.0% | +8 µs | ok |")
+    both = P.tables(measured, None)
+    assert "against stock vLLM (ratio: off/stock - 1):" in both and "baseline" not in both
+
+
 def test_the_schedulers_take_turns_of_five_steps_in_a_rotating_order(monkeypatch):
-    """measure() builds INSTANCES schedulers of each configuration and times each one's WARMUP + STEPS steps in
-    turns, the order rotated each turn, keeping the steps after WARMUP; stand-in schedulers record the order."""
-    seen = []
-    monkeypatch.setattr(P, "load", lambda path, name: None)
-    monkeypatch.setattr(
-        P, "steady_state", lambda module, model, state, switches: {"switches": switches}
-    )
+    """measure() builds INSTANCES schedulers of each configuration, stock vLLM's of its own class and the others of
+    the module's, and times each one's WARMUP + STEPS steps in turns, the order rotated each turn, keeping the steps
+    after WARMUP; stand-in schedulers record the order."""
+    seen, built = [], []
+    monkeypatch.setattr(P, "load", lambda path, name: SimpleNamespace(Scheduler="make-room's"))
+    monkeypatch.setattr(P, "suite", lambda: SimpleNamespace(StockScheduler="vLLM's"))
+
+    def steady_state(cls, model, state, switches):
+        built.append((cls, switches))
+        return {"switches": switches}
+
+    monkeypatch.setattr(P, "steady_state", steady_state)
     monkeypatch.setattr(P, "timed_step", lambda sched, state, k: seen.append((id(sched), k)) or k)
-    times = P.measure(Path("m.py"), "model", P.BY_KEY["C16"], ["off", "on"])
+    times = P.measure(Path("m.py"), "model", P.BY_KEY["C16"], P.TIMED)
     timed = list(range(P.WARMUP, P.WARMUP + P.STEPS))
-    assert times == {"off": [timed, timed], "on": [timed, timed]}
+    assert times == {c: [timed, timed] for c in ["stock", "off", "on", "off2"]}
+    on = P.CONFIGS["on"]
+    kinds = [("vLLM's", None), ("make-room's", None), ("make-room's", on), ("make-room's", None)]
+    assert built == kinds * P.INSTANCES
     order = [s for i, (s, _) in enumerate(seen) if i % P.TURN == 0]  # whose turn, turn by turn
-    off0, on0, off1, on1 = order[:4]
-    assert len({off0, on0, off1, on1}) == 4  # a scheduler each
-    assert order[:8] == [off0, on0, off1, on1, on0, off1, on1, off0]
-    assert [k for s, k in seen if s == on1][:10] == list(range(10))
+    assert len(set(order[:8])) == 8  # a scheduler each
+    assert order[8:16] == order[1:8] + order[:1]  # the next turn's order, rotated by one
+    assert [k for s, k in seen if s == order[7]][:10] == list(range(10))
+
+
+def test_the_method_records_what_a_process_times():
+    """A check compares only with a baseline measured alike: the configurations, stock vLLM's class, how many
+    schedulers a process times, a check's as a baseline's, and how a cost is taken."""
+    assert P.TIMED == ["stock", "off", "on", "off2"] and P.CONFIGS["stock"] is None
+    assert P.METHOD["schedulers"] == P.INSTANCES * len(P.TIMED) == 8
+    assert P.METHOD["stock"] == "vllm.v1.core.sched.scheduler.Scheduler"
+    assert P.METHOD["configs"] == P.CONFIGS
+
+
+def test_a_check_and_a_baseline_time_the_same_schedulers(monkeypatch, tmp_path, capsys):
+    """Both time stock, off, on and off2 in each process, so that a check's processes are its baseline's; stand-ins
+    take the timing's and the machine's place."""
+    seen = []
+
+    def run(module, model, states, configs, reps, runs="a"):
+        seen.append((runs, configs))
+        procs = [process(s.key, 100, 150, 100, name) for name in runs for s in states] * reps
+        load = {"before": [1.0] * 3, "after": [1.0] * 3, "busy": []}
+        loads = [{"run": name, "rep": r + 1} | load for r in range(reps) for name in runs]
+        return {"processes": procs, "load": loads}
+
+    here = {"host": "here", "cpu": "a CPU", "cores": 1, "os": "an OS"}
+    here |= {"python": "3.12", "torch": "2.13", "vllm": "v0.32.0"}
+    monkeypatch.setattr(P, "run", run)
+    monkeypatch.setattr(P, "machine", lambda: here)
+    monkeypatch.setattr(P, "importable", lambda modules: None)
+    monkeypatch.setattr(P, "build_module", lambda out: out / "lh_make_room_scheduler.py")
+    path = tmp_path / "baseline.json"
+    common = ["--states", "B16", "--rounds", "1"]
+    argv = ["perf_schedule.py", "baseline", str(path), *common, "--beside", "nothing"]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert P.command() == 0
+    monkeypatch.setattr(sys, "argv", ["perf_schedule.py", "check", str(path), *common])
+    assert P.command() == 0
+    assert seen == [("ab", P.TIMED), ("a", P.TIMED)]
+    out = capsys.readouterr().out
+    assert out.count("against stock vLLM (ratio: off/stock - 1):") == 2
+    assert "ok: 1 state within it" in out
 
 
 @pytest.mark.parametrize(
@@ -350,20 +486,27 @@ def test_the_checked_in_baseline_is_complete_and_its_numbers_agree():
     assert all(len(load["before"]) == len(load["after"]) == 3 for load in baseline["load"])
     assert list(baseline["cells"]) == [s.key for s in P.STATES]
     for key, cell in baseline["cells"].items():
-        a, b = cell["ratios_a"], cell["ratios_b"]
-        assert len(a) == len(b) == reps and len(cell["noises"]) == 2 * reps, key
-        assert cell["ratio_a"] == round(statistics.median(a), 4), key
-        assert cell["ratio_b"] == round(statistics.median(b), 4), key
-        assert cell["ratio"] == round(statistics.median(a + b), 4), key
+        for ratio in ("ratio", "off_ratio"):
+            a, b = cell[f"{ratio}s_a"], cell[f"{ratio}s_b"]
+            assert len(a) == len(b) == reps, key
+            assert cell[f"{ratio}_a"] == round(statistics.median(a), 4), key
+            assert cell[f"{ratio}_b"] == round(statistics.median(b), 4), key
+            assert cell[ratio] == round(statistics.median(a + b), 4), key
         assert cell["aa"] == round(P.excess(cell["ratio_b"], cell["ratio_a"]), 4), key
+        assert cell["off_aa"] == round(P.excess(cell["off_ratio_b"], cell["off_ratio_a"]), 4), key
+        assert len(cell["noises"]) == 2 * reps, key
         assert cell["noise"] == round(statistics.median(cell["noises"]), 4), key
         costs = P.costs(cell["off_us"], cell["ratio"])
         assert {k: cell[k] for k in costs} == costs, key
+        assert cell["stock_us"] == round(cell["off_us"] / (1 + cell["off_ratio"]), 1), key
+        assert cell["off_change_us"] == round(cell["off_us"] - cell["stock_us"], 1), key
     # The tolerance is the one its rule gives from the noise it records.
     cells = baseline["cells"].values()
     noise, aa = [c["noise"] for c in cells], [c["aa"] for c in cells]
-    assert baseline["tolerance"] == P.tolerance(noise, aa)
+    off_aa = [c["off_aa"] for c in cells]
+    assert baseline["tolerance"] == P.tolerance(noise, aa, off_aa)
     assert baseline["noise_max"] == max(noise, key=abs) and baseline["aa_max"] == max(aa, key=abs)
+    assert baseline["off_aa_max"] == max(off_aa, key=abs)
 
 
 # On vLLM's real scheduler: no timing, only what the states do.
@@ -387,25 +530,33 @@ def long_model(tmp_path_factory):
 
 def steps(module, model, key: str, config: str) -> list[int]:
     """WARMUP + STEPS steps of the state, as the measurement runs them (StateChanged if it is not steady), and in
-    each the number of times make-room made room, or tried to."""
+    each the number of times make-room made room, or tried to: never, for stock vLLM's scheduler, which has none."""
     state = P.BY_KEY[key]
-    sched = P.steady_state(module, model, state, P.CONFIGS[config])
+    sched = P.steady_state(P.scheduler_class(module, config), model, state, P.CONFIGS[config])
     calls = []
-    make_room = sched._make_room
+    make_room = getattr(sched, "_make_room", None)
 
     def counted(*args):
         calls[-1] += 1
         return make_room(*args)
 
-    sched._make_room = counted
+    if make_room is not None:
+        sched._make_room = counted
     for k in range(P.WARMUP + P.STEPS):
         calls.append(0)
         P.timed_step(sched, state, k)
     return calls
 
 
+def test_stock_vllm_is_the_class_the_method_names(module):
+    stock = P.scheduler_class(module, "stock")
+    assert f"{stock.__module__}.{stock.__qualname__}" == P.METHOD["stock"]
+    assert P.scheduler_class(module, "off") is P.scheduler_class(module, "on") is module.Scheduler
+
+
 @pytest.mark.parametrize("key", ["A16", "A64", "A64-nohit", "B16", "B64", "C16", "C64"])
 def test_each_state_is_steady_and_runs_the_path_it_is_named_for(module, long_model, key):
+    assert steps(module, long_model, key, "stock") == [0] * (P.WARMUP + P.STEPS)  # steady too
     on, off = steps(module, long_model, key, "on"), steps(module, long_model, key, "off")
     assert off == [0] * len(off)  # with the switches off, make-room never runs
     if key.startswith("A"):

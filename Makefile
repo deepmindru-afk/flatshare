@@ -98,12 +98,12 @@ test-python:
 # The engine change's upkeep checks, outside make check (python/leaseholder_vllm/README.md says how to read them).
 .PHONY: perf-make-room compat-upstream
 
-# make-room's cost per step: Scheduler.schedule() on CPU with its switches off and in the configuration to deploy, in
-# the 13 steady states of the PRs' cost tables (tests/perf_schedule.py; 10 minutes on a 2.1 GHz Xeon, its negative
-# control included). It prints the table, writes PERF_OUT, fails a state whose on/off grew past PERF_BASELINE's
-# tolerance (measured again first), and then runs the check's negative control against the same baseline. UPDATE=1
-# measures a new baseline into PERF_BASELINE instead and needs PERF_BESIDE, what else ran on the machine. The tracked
-# baseline is peacock's: another machine's goes under build/ (PERF_BASELINE=build/perf-baseline.json), for its checks.
+# The change's cost per step: Scheduler.schedule() on CPU for stock vLLM and for make-room with its switches off and in
+# the configuration to deploy, in the 13 steady states of the PRs' cost tables (tests/perf_schedule.py). It prints the
+# tables, writes PERF_OUT, fails a state whose off/stock or on/off grew past PERF_BASELINE's tolerance (measured again
+# first), and then runs the check's negative control against the same baseline. UPDATE=1 measures a new baseline into
+# PERF_BASELINE instead (22 minutes on a 2.1 GHz Xeon, the control included) and needs PERF_BESIDE, what else ran on
+# the machine. The tracked baseline is peacock's; another machine's goes under build/, as build/perf-baseline.json.
 PERF_BASELINE ?= benchmarks/perf/make-room-schedule.json
 PERF_OUT ?= build/perf-make-room.json
 perf-make-room: $(VLLM_SRC)
