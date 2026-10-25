@@ -386,6 +386,25 @@ def test_a_state_file_from_another_boot_or_a_reused_pid_is_not_a_running_unit(ho
     assert ctl(host, "--user", "is-active", "box.target").stdout.strip() == "inactive"
 
 
+def test_a_broken_unit_link_or_a_missing_unit_stops_only_itself(host: dict) -> None:
+    # A stop reads every unit for what is PartOf or BindsTo the units it stops: one link that dangles there (an earlier
+    # tenant's, or into a node directory since deleted) fails no stop of the others, and a unit asked for that does
+    # not exist fails the command, as systemd's, after the others have stopped.
+    assert ctl(host, "--user", "start", "svc-a").returncode == 0
+    pid = int((host["home"] / "a.ready").read_text())
+    (host["units"] / "lh-tunnel@.service").symlink_to(
+        host["home"] / "nowhere" / "lh-tunnel@.service"
+    )
+    done = ctl(host, "--user", "stop", "svc-a")
+    assert done.returncode == 0, done.stderr
+    assert gone(pid) and ctl(host, "--user", "is-active", "svc-a").stdout.strip() == "inactive"
+    assert ctl(host, "--user", "start", "svc-a").returncode == 0
+    pid = int((host["home"] / "a.ready").read_text())
+    done = ctl(host, "--user", "stop", "svc-a", "nothing.service")
+    assert done.returncode == 5 and "Unit nothing.service not loaded" in done.stderr
+    assert gone(pid) and ctl(host, "--user", "is-active", "svc-a").stdout.strip() == "inactive"
+
+
 def test_the_shims_answer_what_the_scripts_ask(host: dict) -> None:
     assert ctl(host, "--user", "daemon-reload").returncode == 0
     assert ctl(host, "--user", "enable", "-q", "svc-a.service").returncode == 0

@@ -625,9 +625,18 @@ def closure(names: list[str], keys: tuple[str, ...]) -> list[str]:
     return seen
 
 
-def ordered(names: list[str]) -> list[str]:
-    """``names`` in start order: each after the units it is After= (and before those it is Before=)."""
-    units = {name: load(name) for name in names}
+def loadable(name: str) -> Unit | None:
+    """The unit, or None where its file does not load (a link that dangles, a unit that is not there)."""
+    try:
+        return load(name)
+    except (ServiceError, OSError):
+        return None
+
+
+def ordered(names: list[str], tolerant: bool = False) -> list[str]:
+    """``names`` in start order: each after the units it is After= (and before those it is Before=); with
+    ``tolerant``, a unit that does not load is ordered by nothing (a stop's, which stops what it can)."""
+    units = {name: (loadable(name) or Unit(name, [])) if tolerant else load(name) for name in names}
     after = {
         name: {unit_name(n) for n in unit.words("After")} & set(names)
         for name, unit in units.items()
@@ -703,23 +712,33 @@ def start(names: list[str]) -> int:
 
 def stop(names: list[str]) -> int:
     requested = [unit_name(n) for n in names]
-    everything = [
-        p.name for p in unit_dir().iterdir() if p.suffix in (".service", ".target", ".socket")
+    # A unit that does not load (a link that dangles beside the others) binds nothing; a requested one that neither
+    # loads nor runs is an error, as systemd's, once the others have stopped.
+    units = {
+        p.name: loadable(p.name)
+        for p in unit_dir().iterdir()
+        if p.suffix in (".service", ".target", ".socket")
+    }
+    missing = [
+        name
+        for name in requested
+        if units.get(name) is None
+        and loadable(name) is None
+        and not owned(read_state(name), "runner")
     ]
-    bound: list[str] = list(requested)
+    bound: list[str] = [name for name in requested if name not in missing]
     changed = True
     while changed:  # the units part of, or bound to, a unit that stops stop with it
         changed = False
-        for name in everything:
-            if name in bound:
+        for name, unit in units.items():
+            if name in bound or unit is None:
                 continue
-            unit = load(name)
             if {unit_name(n) for key in ("PartOf", "BindsTo") for n in unit.words(key)} & set(
                 bound
             ):
                 bound.append(name)
                 changed = True
-    for name in reversed(ordered(bound)):
+    for name in reversed(ordered(bound, tolerant=True)):
         with locked(name):
             if passive(name):
                 write_state(name, state="inactive")
@@ -728,7 +747,7 @@ def stop(names: list[str]) -> int:
             runner = owned(state, "runner")  # not a process that took a stale pid since
             if runner:
                 os.kill(runner, signal.SIGTERM)
-                unit = load(name)
+                unit = loadable(name) or Unit(name, [])
                 deadline = time.time() + unit.seconds("TimeoutStopSec", 90.0) + 30
                 while alive(runner) and time.time() < deadline:
                     time.sleep(0.05)
@@ -737,7 +756,9 @@ def stop(names: list[str]) -> int:
             group_gone(owned(state, "main"), 5.0)
             if read_state(name).get("state") != "failed":
                 write_state(name, state="inactive", runner=None, main=None)
-    return 0
+    for name in missing:
+        print(f"Failed to stop {name}: Unit {name} not loaded.", file=sys.stderr)
+    return 5 if missing else 0
 
 
 def show(names: list[str], properties: list[str], value_only: bool) -> int:
