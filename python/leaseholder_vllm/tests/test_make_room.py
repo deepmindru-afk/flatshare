@@ -316,7 +316,7 @@ def test_a_victim_takes_the_stock_preemption_path(module, model):
     assert victim.num_preemptions == 1
     assert not any(sched.kv_cache_manager.get_blocks("bg").blocks)
     assert "voice" in scheduled(out) and voice.status == RequestStatus.RUNNING
-    assert sched.make_room_preemptions == 1  # the operator's count, apart from the running loop's
+    assert sched._num_priority_preemptions == 1  # the operator's count, not the running loop's
 
 
 def test_preempts_the_lowest_priority_first_and_only_as_many_as_needed(module, model):
@@ -1256,8 +1256,8 @@ def test_make_room_counts_and_logs_what_it_holds_back(module, model, monkeypatch
     sched.add_request(request("late", 300, priority=2, arrival=3))
     for _ in range(3):
         step(sched)  # held: the prefill's chunk of 256, and the late request's admission
-    assert (sched.make_room_held_steps, sched.make_room_held_tokens) == (4, 4 * 256)
-    assert (sched.make_room_held_admissions, sched.make_room_preemptions) == (3, 0)
+    assert (sched._num_prefill_held_steps, sched._num_prefill_held_tokens) == (4, 4 * 256)
+    assert (sched.make_room_held_admissions, sched._num_priority_preemptions) == (3, 0)
 
     lines = []
     monkeypatch.setattr(
@@ -1272,6 +1272,31 @@ def test_make_room_counts_and_logs_what_it_holds_back(module, model, monkeypatch
         "make-room: budget cap held lower-priority prefill back in 4 steps (1024 prefill "
         "tokens and 3 admissions, summed over the steps); 0 preemptions to make room"
     ]
+
+
+@pytest.mark.parametrize("threshold, held_tokens", [(128, 2 * 128), (384, 511)])
+def test_a_steps_held_tokens_are_at_most_what_its_budget_leaves(
+    module, model, threshold, held_tokens
+):
+    """Two lower-priority prefill chunks held in one step count what the running loop would have scheduled for them:
+    a held chunk takes nothing from the step's budget, so each counts against what the chunks held before it leave.
+    Both chunks' 128 fit in the 511 tokens the decode leaves; of 384 each, the second would have had 127."""
+    sched = scheduler(
+        module.Scheduler,
+        model,
+        400,
+        {"budget_cap": True, "budget_cap_tokens": 4},
+        long_prefill_token_threshold=threshold,
+        max_model_len=4096,
+    )
+    run(sched, request("decode", 40, priority=2, arrival=0))
+    sched.add_request(request("a", 3000, priority=2, arrival=1))
+    sched.add_request(request("b", 3000, priority=2, arrival=2))
+    assert scheduled(step(sched)) == {"decode", "a", "b"}
+    sched.add_request(request("voice", 100, priority=0, arrival=3))
+    for _ in range(4):
+        step(sched)  # held: both chunks
+    assert (sched._num_prefill_held_steps, sched._num_prefill_held_tokens) == (4, 4 * held_tokens)
 
 
 # The reserve

@@ -3,12 +3,38 @@ vLLM #63350 (https://github.com/vllm-project/vllm/pull/63350), backported to v0.
 The scheduler.py part of these commits on vLLM v0.32.0 (5df63a720):
 
   0c08194ed [Core] Priority scheduling: preempt for a waiting request under KV pressure (cherry-picked from 569183d93)
+    Backported to v0.32.0: the make-room call follows 0.32.0's long prefill
+    threshold, as v0.32.0 has no local prefill cadence, and
+    tests/v1/core/utils.py keeps v0.32.0's create_scheduler signature.
+  145ba6331 [Core] Priority scheduling: give up on room before counting growth (cherry-picked from 44937b87a)
+  062a47231 [Core] Priority scheduling: count the decodes' growth once without deferred frees (cherry-picked from 0b02a8964)
+  dd79faa77 [Core] Priority scheduling: release nothing without victims or deferred frees (cherry-picked from 705e18140)
+  35033bf22 [Core] Priority scheduling: skip the prefix lookup when nothing can be preempted (cherry-picked from df5e162f0)
+  6ea23d221 [Core] Priority scheduling: take the first waiting request without iterating (cherry-picked from 63e9db63e)
+  7d1db90ca [Core] Priority scheduling: check a fit against a bound before counting growth (cherry-picked from e87503f22)
+  58ca55361 [Core] Priority scheduling: count make-room's preemptions in scheduler stats (cherry-picked from e2a6975d7)
+    Backport: v0.32.0's SchedulerStats and Prometheus logger have no field
+    for them, so the scheduler counts the preemptions and make_stats leaves
+    them.
 
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index cec96d2a4..dd6aa2349 100644
+index cec96d2a4..2e593a48b 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
-@@ -371,6 +371,12 @@ class Scheduler(SchedulerInterface):
+@@ -53,6 +53,12 @@ from vllm.v1.core.sched.request_queue import (
+     create_request_queue,
+ )
+ from vllm.v1.core.sched.utils import check_stop, remove_all
++from vllm.v1.core.single_type_kv_cache_manager import (
++    ChunkedLocalAttentionManager,
++    CrossAttentionManager,
++    FullAttentionManager,
++    SlidingWindowManager,
++)
+ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+ from vllm.v1.kv_cache_interface import (
+     KVCacheConfig,
+@@ -371,6 +377,34 @@ class Scheduler(SchedulerInterface):
          self.scheduler_reserve_full_isl = (
              self.scheduler_config.scheduler_reserve_full_isl
          )
@@ -18,10 +44,32 @@ index cec96d2a4..dd6aa2349 100644
 +        # Requests room was made for whose allocation the waiting loop has not
 +        # tried since: no room is made for them again until it has.
 +        self._make_room_untried: set[Request] = set()
++        # Requests preempted to make room.
++        self._num_priority_preemptions = 0
++        # The most new blocks a running request takes in a step, if bounded: one
++        # per KV cache group from the managers that allocate by the token count,
++        # without speculative or lookahead tokens.
++        self._max_growth_blocks: int | None = None
++        managers = self.kv_cache_manager.coordinator.single_type_managers
++        if (
++            not self.num_spec_tokens
++            and not self.num_lookahead_tokens
++            and all(
++                type(manager)
++                in (
++                    FullAttentionManager,
++                    SlidingWindowManager,
++                    ChunkedLocalAttentionManager,
++                    CrossAttentionManager,
++                )
++                for manager in managers
++            )
++        ):
++            self._max_growth_blocks = len(managers)
  
          self.has_mamba_layers = kv_cache_config.has_mamba_layers
          self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
-@@ -654,6 +660,17 @@ class Scheduler(SchedulerInterface):
+@@ -654,6 +688,17 @@ class Scheduler(SchedulerInterface):
                  long_prefill_token_threshold, input_budget // num_eligible_reqs
              )
  
@@ -39,7 +87,7 @@ index cec96d2a4..dd6aa2349 100644
          # First, schedule the RUNNING requests.
          req_index = 0
          while req_index < len(self.running) and token_budget > 0:
-@@ -925,6 +942,10 @@ class Scheduler(SchedulerInterface):
+@@ -925,6 +970,10 @@ class Scheduler(SchedulerInterface):
  
                  request = request_queue.peek_request()
                  request_id = request.request_id
@@ -50,7 +98,7 @@ index cec96d2a4..dd6aa2349 100644
  
                  ready_to_schedule = self._handle_blocked_waiting_request(request)
                  if not ready_to_schedule:
-@@ -951,6 +972,21 @@ class Scheduler(SchedulerInterface):
+@@ -951,6 +1000,21 @@ class Scheduler(SchedulerInterface):
                      skip_request(request_queue)
                      continue
  
@@ -72,7 +120,7 @@ index cec96d2a4..dd6aa2349 100644
                  num_external_computed_tokens = 0
                  load_kv_async = False
                  connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
-@@ -1253,6 +1289,8 @@ class Scheduler(SchedulerInterface):
+@@ -1253,6 +1317,8 @@ class Scheduler(SchedulerInterface):
                  # Replayed tokens are already counted in the adopted hit; a
                  # chunk that ends inside the replayed range needs no new slots.
                  num_tokens_past_hit = max(num_new_tokens - num_replay_tokens, 0)
@@ -81,14 +129,14 @@ index cec96d2a4..dd6aa2349 100644
                  new_blocks = self.kv_cache_manager.allocate_slots(
                      request,
                      num_tokens_past_hit,
-@@ -3091,6 +3129,247 @@ class Scheduler(SchedulerInterface):
+@@ -3091,6 +3157,285 @@ class Scheduler(SchedulerInterface):
              self._request_remaining_blocks(req) for req in self._inflight_prefills
          )
  
 +    def _peek_make_room_request(self, defer_prefills: bool) -> Request | None:
 +        """The waiting request of the highest priority that the waiting loop can
-+        schedule in this step, unless prefills are deferred or new requests
-+        paused."""
++        schedule in this step, if a running request has a lower priority,
++        unless prefills are deferred or new requests paused."""
 +        if (
 +            not self.max_priority_preemptions_per_step
 +            or defer_prefills
@@ -109,12 +157,30 @@ index cec96d2a4..dd6aa2349 100644
 +                for req in self.running
 +                if req.lora_request and req.lora_request.lora_int_id > 0
 +            }
-+        # Each queue iterates in priority order.
 +        heads = (
-+            next((req for req in queue if self._can_schedule(req, loras)), None)
++            self._first_schedulable(queue, loras)
 +            for queue in (self.kv_holding_waiting, self.waiting)
 +        )
-+        return min((req for req in heads if req is not None), default=None)
++        request = min((req for req in heads if req is not None), default=None)
++        if request is None or not any(
++            req.priority > request.priority for req in self.running
++        ):
++            # No room could be made for it: spare its prefix cache lookup.
++            return None
++        return request
++
++    def _first_schedulable(
++        self, queue: RequestQueue, loras: set[int]
++    ) -> Request | None:
++        """The first request in `queue`'s order that the waiting loop can
++        schedule in this step: mostly its first, which `peek_request` returns
++        without the copy of the heap that iterating a priority queue makes."""
++        if not queue:
++            return None
++        request = queue.peek_request()
++        if self._can_schedule(request, loras):
++            return request
++        return next((req for req in queue if self._can_schedule(req, loras)), None)
 +
 +    def _can_schedule(self, request: Request, loras: set[int]) -> bool:
 +        """Whether the waiting loop can schedule the waiting `request` in this
@@ -181,10 +247,25 @@ index cec96d2a4..dd6aa2349 100644
 +            (req for req in self.running if req.priority > request.priority),
 +            key=lambda req: (req.priority, req.arrival_time),
 +            reverse=True,
-+        )
++        )[: self.max_priority_preemptions_per_step]
 +        if not candidates:
 +            return set()
 +        num_blocks_short = self._num_blocks_short(request, hit)
++        if (
++            num_blocks_short > 0
++            and not self.need_mamba_block_aligned_split
++            and num_blocks_short > self._num_released_blocks(candidates, hit)
++        ):
++            # Not even all the candidates would make room: the decodes' growth
++            # only adds to the shortfall. (Mamba's align mode can count growth
++            # below zero, for a request holding blocks ahead of its tokens.)
++            return set()
++        if (
++            self._max_growth_blocks is not None
++            and num_blocks_short + len(self.running) * self._max_growth_blocks <= 0
++        ):
++            # It fits in this step, however the running requests grow.
++            return set()
 +        num_growth_blocks = sum(self._num_growth_blocks(req, 1) for req in self.running)
 +        if num_blocks_short + num_growth_blocks <= 0:
 +            # It fits in this step, after the running loop.
@@ -193,13 +274,15 @@ index cec96d2a4..dd6aa2349 100644
 +        # or with deferred frees in the next, after the running loop has grown
 +        # the decodes once more.
 +        num_steps = 2 if self.defer_block_free else 1
-+        num_blocks_short += sum(
-+            self._num_growth_blocks(req, num_steps) for req in self.running
-+        )
++        if num_steps > 1:
++            num_growth_blocks = sum(
++                self._num_growth_blocks(req, num_steps) for req in self.running
++            )
++        num_blocks_short += num_growth_blocks
 +        if num_blocks_short <= self._num_released_blocks([], hit):
 +            return set()
 +        victims: list[Request] = []
-+        for victim in candidates[: self.max_priority_preemptions_per_step]:
++        for victim in candidates:
 +            victims.append(victim)
 +            num_blocks_short -= self._num_growth_blocks(victim, num_steps)
 +            if num_blocks_short <= self._num_released_blocks(victims, hit):
@@ -212,6 +295,7 @@ index cec96d2a4..dd6aa2349 100644
 +                victim, timestamp, drop_stale_output=self.requires_kv_delivery
 +            )
 +        self._make_room_untried.add(request)
++        self._num_priority_preemptions += len(victims)
 +        return set(victims)
 +
 +    def _num_blocks_short(
@@ -300,6 +384,8 @@ index cec96d2a4..dd6aa2349 100644
 +        lands by then, but not the blocks of the prefix-cache hit `hit`, which
 +        its request takes as hits; and the blocks the in-flight prefills among
 +        `victims` still reserve."""
++        if not victims and not self.deferred_frees:
++            return 0
 +        hit_blocks = set() if hit is None else {id(b) for g in hit[0] for b in g}
 +        holders: dict[int, int] = defaultdict(int)
 +        blocks: dict[int, KVCacheBlock] = {}

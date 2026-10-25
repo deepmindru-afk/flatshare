@@ -12,8 +12,11 @@ PRs' module are the negative control: each must make a trace diverge.
 
 ``TRACE_SEEDS`` sets the random workloads' seeds (20; RV2's identity check ran 100). ``TRACE_REFERENCE``, a generated
 module's path, compares the variant with that module instead, the reserve and the variant's counters included: for
-example main's module against a branch's. The scheduler needs torch and vLLM 0.32.0's dependencies, so these run as
-tests/test_make_room.py does: ``make test-trace TORCH_PYTHON=...``.
+example main's module against a branch's. A module from before #63351 bounded a step's held tokens by its budget (the
+old build.py's, which W5's records ran) counted each held chunk against the step's whole budget, so with two chunks
+held in a step it counts more held tokens, never fewer: against such a module, the variant's held tokens need only be
+at most its. The scheduler needs torch and vLLM 0.32.0's dependencies, so these run as tests/test_make_room.py does:
+``make test-trace TORCH_PYTHON=...``.
 """
 
 import importlib.util
@@ -91,11 +94,18 @@ if REFERENCE:
         "B16R": {"budget_cap": True, "reserve_tokens": 4 * B},
         "R": {"reserve_tokens": 8 * B},
     }
+# The counters the variant logs, each as (its attribute, the attribute in a module build.py wrote before the PRs
+# had counters), the first three the PRs'.
 COUNTERS = (
-    "make_room_preemptions",
-    "make_room_held_steps",
-    "make_room_held_tokens",
-    "make_room_held_admissions",
+    ("_num_priority_preemptions", "make_room_preemptions"),
+    ("_num_prefill_held_steps", "make_room_held_steps"),
+    ("_num_prefill_held_tokens", "make_room_held_tokens"),
+    ("make_room_held_admissions", "make_room_held_admissions"),
+)
+HELD_TOKENS = 2
+# Whether the reference bounds a step's held tokens by the step's budget, as #63351 does.
+REFERENCE_BOUNDS_HELD = (
+    bool(REFERENCE) and "_prefill_held_step_tokens" in Path(REFERENCE).read_text()
 )
 
 
@@ -291,7 +301,7 @@ def scheduler(
 
 def run(module, model, workload: str, name: str, mode: str, watermark: float, **kwargs):
     """The trace of ``workload`` ("suite", "pressure", "random-SEED" or "connector-SEED") on ``module``, and the
-    variant's counters when it has them."""
+    counters it has (None for one it has not)."""
     sync = mode == "sync"
     sched = scheduler(module, sync, model, SWITCHES[name], watermark, **kwargs)
     kind, _, seed = workload.partition("-")
@@ -300,7 +310,7 @@ def run(module, model, workload: str, name: str, mode: str, watermark: float, **
     else:
         requests = {"suite": T.workload, "pressure": pressure_workload}.get(kind)
         seen = trace(sched, requests() if requests else random_workload(int(seed)), sync)
-    return seen, tuple(getattr(sched, counter, None) for counter in COUNTERS)
+    return seen, tuple(getattr(sched, name, getattr(sched, old, None)) for name, old in COUNTERS)
 
 
 def assert_same(variant, other, model, *args, **kwargs):
@@ -310,8 +320,17 @@ def assert_same(variant, other, model, *args, **kwargs):
     assert first is None, (
         f"first divergence at step {first}: the variant {v[first]}, the other {o[first]}"
     )
-    if REFERENCE:
+    assert None not in v_counters
+    if REFERENCE_BOUNDS_HELD:
         assert v_counters == o_counters
+    elif REFERENCE:
+        held = HELD_TOKENS
+        assert (
+            v_counters[:held] + v_counters[held + 1 :] == o_counters[:held] + o_counters[held + 1 :]
+        )
+        assert v_counters[held] <= o_counters[held]
+    else:
+        assert v_counters[:3] == o_counters[:3]  # the PRs' counters
 
 
 @pytest.mark.parametrize("workload", ["suite", "pressure"])

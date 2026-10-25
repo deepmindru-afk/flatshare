@@ -93,10 +93,12 @@ def test_make_room_is_the_prs_and_the_variants_own_parts(tmp_path):
         "make_room_preempted_reqs = self._make_room(",
         "first_tokens_priority = self._first_tokens_priority(",
         "self._make_room_untried.discard(request)",
-        # The variant's: the switches from --additional-config, the reserve, the counters and their log.
+        "self._num_priority_preemptions += len(victims)",
+        "self._count_prefill_hold(0)",
+        # The variant's: the switches from --additional-config, the reserve, the counters' log.
         "make_room = self._make_room_switches(",
         "num_blocks += self.reserve_blocks",
-        "self.make_room_preemptions += len(victims)",
+        "self.make_room_held_admissions += 1",
         "self._make_room_log()",
     ):
         assert line in module
@@ -125,7 +127,7 @@ def test_a_source_the_patches_do_not_match_fails_the_build_naming_the_hunk(tmp_p
         text=True,
     )
     assert result.returncode != 0
-    assert "make-room: 63350.patch: hunk @@ -371,6 +371,12 @@" in result.stderr
+    assert "make-room: 63350.patch: hunk @@ -371,6 +377,34 @@" in result.stderr
     assert "does not match the scheduler at its line 371" in result.stderr
     assert not (tmp_path / "out").exists()
 
