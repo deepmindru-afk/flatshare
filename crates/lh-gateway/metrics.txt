@@ -457,7 +457,7 @@ lh_gateway_realtime_sessions{state="user_speaking"} 0
 lh_gateway_realtime_state_timeouts_total{state="critical"} 0
 lh_gateway_realtime_state_timeouts_total{state="playback"} 0
 lh_gateway_realtime_state_timeouts_total{state="user_speaking"} 0
-# HELP lh_gateway_node_ready Whether a node answers its readiness probe (1), or takes no new sessions (0); with one upstream, whether it is ready (1), or a request found it broken and its /health has not answered since (0), while its requests are answered 503.
+# HELP lh_gateway_node_ready Whether the engine is ready (1), or a request found it broken and its /health has not answered since (0), while its requests are answered 503.
 # TYPE lh_gateway_node_ready gauge
 lh_gateway_node_ready 0
 # EOF

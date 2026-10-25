@@ -179,12 +179,6 @@ pub(crate) fn resolve_session(
     }
 }
 
-/// Whether a request names its session, so that its next requests can name the same one; a minted session is
-/// the request's own.
-pub(crate) fn names_session(inputs: &ClientInputs, prompt_cache_key: Option<&str>) -> bool {
-    session_source(inputs, prompt_cache_key).is_some()
-}
-
 /// The first present source of a request's session, in PROTOCOL.md's order.
 fn session_source<'a>(
     inputs: &'a ClientInputs,

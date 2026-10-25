@@ -98,7 +98,7 @@ pub enum EventKind {
     /// The user barged in, `played_ms` into the reply: policy `leaseholder` takes it as the user speaking again.
     /// The voice agent ends the reply's stream itself.
     Interrupted { played_ms: u64 },
-    /// The session ended: the gateway forgets its turn state and, with several GPU nodes, its placement.
+    /// The session ended: the gateway forgets its turn state.
     SessionClosed,
 }
 

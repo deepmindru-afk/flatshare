@@ -49,17 +49,6 @@ struct State {
     realtime: Option<Realtime>,
 }
 
-/// What an admission point holds, as placement leaseholder reads it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Load {
-    /// The estimated tokens of the background requests it holds, in flight and waiting.
-    pub background_tokens: u64,
-    /// The KV pool less the estimated tokens of the background requests in flight.
-    pub free_tokens: u64,
-    /// The realtime sessions armed for a turn now.
-    pub armed: u32,
-}
-
 /// What a held request was last told.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Signal {
@@ -217,21 +206,6 @@ impl Admission {
     /// The policy; `Debug` shows its parameters.
     pub fn policy(&self) -> Policy {
         self.policy
-    }
-
-    /// What placement leaseholder reads of the node under policy leaseholder.
-    pub fn load(&self) -> Load {
-        let pool_tokens = match self.policy {
-            Policy::Leaseholder(lh) => lh.pool_tokens,
-            _ => 0,
-        };
-        let state = self.lock();
-        let in_flight = state.core.background_tokens();
-        Load {
-            background_tokens: in_flight + state.core.waiting_tokens(),
-            free_tokens: pool_tokens.saturating_sub(in_flight),
-            armed: state.realtime.as_ref().map_or(0, Realtime::armed),
-        }
     }
 
     fn leaseholder(&self) -> bool {

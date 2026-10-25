@@ -6,7 +6,6 @@ mod drain;
 mod events;
 mod leaseholder;
 mod metrics;
-mod placement;
 mod proxy;
 mod reload;
 mod sockets;

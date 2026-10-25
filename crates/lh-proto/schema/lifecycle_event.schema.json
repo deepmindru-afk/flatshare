@@ -188,7 +188,7 @@
       ]
     },
     {
-      "description": "The session ended: the gateway forgets its turn state and, with several GPU nodes, its placement.",
+      "description": "The session ended: the gateway forgets its turn state.",
       "type": "object",
       "properties": {
         "type": {

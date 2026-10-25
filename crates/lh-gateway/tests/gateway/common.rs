@@ -482,12 +482,6 @@ pub fn listeners_toml(
     toml.replace("tcp = \"127.0.0.1:0\"", &format!("tcp = \"{tcp}\""))
 }
 
-/// The test configuration of a gateway on GPU nodes instead of one upstream: `tables` holds `[nodes.<name>]`,
-/// `[placement]` and any other table.
-pub fn nodes_toml(socket: &std::path::Path, tables: &str) -> String {
-    harness_toml(socket, tables)
-}
-
 /// The test configuration's listeners and tenants, after `top`.
 fn harness_toml(socket: &std::path::Path, top: &str) -> String {
     format!(
@@ -538,12 +532,6 @@ impl Gateway {
     /// A gateway whose `upstream` is `upstream` as written, such as a mock's [`Mock::upstream`].
     pub async fn start_upstream(upstream: &str, top: &str) -> Self {
         let config = Config::from_toml(&upstream_toml(upstream, &socket_path(), top)).unwrap();
-        Self::from_config(config, Arc::new(LogSink)).await
-    }
-
-    /// A gateway on GPU nodes: `tables` holds `[nodes.<name>]`, `[placement]` and any other table.
-    pub async fn start_nodes(tables: &str) -> Self {
-        let config = Config::from_toml(&nodes_toml(&socket_path(), tables)).unwrap();
         Self::from_config(config, Arc::new(LogSink)).await
     }
 
