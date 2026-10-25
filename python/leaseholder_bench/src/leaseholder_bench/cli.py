@@ -306,11 +306,15 @@ def _drill(args: argparse.Namespace) -> int:
             deadline_s=args.deadline,
             probe_interval_s=args.probe_interval,
         )
-        voice, agents = clients(config, args.gateway, args.uds or default_uds())
+        drill_clients = clients(config, args.gateway, args.uds or default_uds())
+        engine = async_client(args.engine, timeout=10.0)
         host = Host()
         try:
             with exclusive(host):  # never beside an E2 point
-                asyncio.run(run_streams(config, voice, agents, agents_key(host), args.out))
+                key = agents_key(host)
+                asyncio.run(
+                    run_streams(config, drill_clients, key, args.out, args.event_file, engine)
+                )
         except E2Error as exc:
             print(f"lh-bench drill: {exc}", file=sys.stderr)
             return 1
@@ -341,13 +345,15 @@ def _add_drill(commands: Commands) -> None:
         help="the client side of a failure drill (ops/drills/drill.sh) and its summary",
         description="streams: open streaming completions through the gateway (realtime on the voice plane's "
         "socket, background on its TCP port with the agents tenant's key), print 'streaming' once each has its "
-        "first byte, read each to its end, then send a one-token completion every PROBE_INTERVAL seconds until "
-        "one succeeds; writes the record to OUT. report: summarize a record. start: time a server's start "
-        "from its journal.",
+        "first byte, and read each to its end; from the moment EVENT_FILE holds the event's time, send a "
+        "one-token completion on each plane every PROBE_INTERVAL seconds, each on a new connection, until every "
+        "stream has ended and each plane's latest one succeeded; sample the engine's running and waiting "
+        "requests meanwhile; writes the record to OUT. report: summarize a record. start: time a server's "
+        "start from its journal.",
     )
     actions = drill.add_subparsers(dest="action", required=True)
     streams = actions.add_parser(
-        "streams", help="open the streams, then probe until a request succeeds"
+        "streams", help="open the streams, and probe from the event until requests succeed again"
     )
     streams.add_argument(
         "--gateway", default="http://127.0.0.1:18080", help="the gateway (default %(default)s)"
@@ -378,10 +384,25 @@ def _add_drill(commands: Commands) -> None:
         default=1.0,
         help="seconds between probes (default %(default)s)",
     )
+    streams.add_argument(
+        "--event-file",
+        type=Path,
+        required=True,
+        help="where the drill script writes the event's wall-clock time as the event happens",
+    )
+    streams.add_argument(
+        "--engine",
+        default=runtime_socket("phastform-engine.sock"),
+        help=f"the engine, for its running requests ({ADDRESS}; default %(default)s, its tunnel on cyan)",
+    )
     streams.add_argument("--out", type=Path, required=True, help="the record (JSON)")
     summary = actions.add_parser("report", help="summarize a drill's record")
     summary.add_argument("record", type=Path)
-    summary.add_argument("--event", type=float, help="the kill's or the restart's wall-clock time")
+    summary.add_argument(
+        "--event",
+        type=float,
+        help="the event's wall-clock time (default: the record's, as the client read it)",
+    )
     summary.add_argument(
         "--label", default="the event", help="what --event names (default %(default)s)"
     )
