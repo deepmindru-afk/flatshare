@@ -867,24 +867,34 @@ def _nodes(rows: Sequence[Mapping[str, Any]], gpu_columns: bool) -> list[str]:
 
 
 def _stages(rows: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The voice worker's stage times of each point, p50 / p95."""
-    lines = [
-        "",
-        "## Voice turn stages",
-        "",
+    """The voice worker's stage times of each point it timed, p50 / p95; the points it did not are
+    counted."""
+    timed = [r for r in rows if any(r[column] is not None for column in WORKER_COLUMNS)]
+    intro = (
         "The voice worker's own timing of each turn, p50 / p95 in ms: from the end of the caller's "
         "speech (VAD) to the final transcript and to the end-of-turn decision; from the LLM request "
         "to its first token and to the first sentence handed to TTS; from the end-of-turn decision "
         "to that sentence; from that sentence to its first audio; and from the end of speech to the "
         "reply's first audio frame on the track. Events are those the worker sent the gateway, "
-        "dropped from its queue and failed to deliver.",
+        "dropped from its queue and failed to deliver."
+    )
+    if untimed := len(rows) - len(timed):
+        intro += (
+            f" {untimed} point{'' if untimed == 1 else 's'} without the worker's turn lines "
+            f"{'is' if untimed == 1 else 'are'} left out."
+        )
+    lines = [
+        "",
+        "## Voice turn stages",
+        "",
+        intro,
         "",
         "| Point | Transcript | End of turn | LLM first token | LLM first sentence "
         "| Turn to first sentence | TTS first audio | End to end | Events sent / dropped / failed |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     runs = Counter(map(_configuration, rows))
-    for r in rows:
+    for r in timed:
         stages = [
             " / ".join(_cell(r[f"{stage.removesuffix('_ms')}_{q}_ms"]) for q in ("p50", "p95"))
             for stage in WATERFALL

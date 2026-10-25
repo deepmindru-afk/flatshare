@@ -588,7 +588,9 @@ def test_the_report_shows_stages_and_clocks_only_for_points_that_have_them(tmp_p
     assert "| — / 3 / — | — | — |" in table  # a2-s8, sampled by no campaign
     assert "| a2-s16 | 100 / 150 | 200 / 300 | 300 / 450 |" in table
     assert "| 700 / 1,050 | 300 / 0 / 1 |" in table
-    assert "| a2-s8 | — / — |" in table
+    # A point the worker logged no turn of has no row of stage times, only a count.
+    stages = table.split("## Voice turn stages")[1].split("\n## ")[0]
+    assert "| a2-s8 |" not in stages and "1 point without the worker's turn lines" in stages
 
 
 def test_the_kv_samples_give_the_time_running_requests_leave_two_calls_short(
@@ -775,7 +777,8 @@ def test_repeats_of_a_point_are_one_configuration_placed_at_their_medians(tmp_pa
     lines = table.splitlines()
     assert lines[lines.index(medians) - 1].startswith("| disc-frozen (w2c) |")  # after its runs
     assert "| disc-wide: disc-wide label | • | 16 | 4,500 |" in table  # measured once: as before
-    assert "| disc-frozen (w2c) | 100 / 150 |" in table and "| disc-wide | — / — |" in table
+    assert "| disc-frozen (w2c) | 100 / 150 |" in table and "| disc-wide | — / — |" not in table
+    assert "4 points without the worker's turn lines are left out." in table  # the rest
 
 
 def test_a_median_between_two_runs_keeps_its_half(tmp_path: Path) -> None:

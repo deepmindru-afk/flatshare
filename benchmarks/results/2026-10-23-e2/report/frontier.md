@@ -379,7 +379,7 @@ The voice SLO allows a V2V p95 of 2,017 ms, 250 ms above voice alone with as man
 
 ## Voice turn stages
 
-The voice worker's own timing of each turn, p50 / p95 in ms: from the end of the caller's speech (VAD) to the final transcript and to the end-of-turn decision; from the LLM request to its first token and to the first sentence handed to TTS; from the end-of-turn decision to that sentence; from that sentence to its first audio; and from the end of speech to the reply's first audio frame on the track. Events are those the worker sent the gateway, dropped from its queue and failed to deliver.
+The voice worker's own timing of each turn, p50 / p95 in ms: from the end of the caller's speech (VAD) to the final transcript and to the end-of-turn decision; from the LLM request to its first token and to the first sentence handed to TTS; from the end-of-turn decision to that sentence; from that sentence to its first audio; and from the end of speech to the reply's first audio frame on the track. Events are those the worker sent the gateway, dropped from its queue and failed to deliver. 30 points without the worker's turn lines are left out.
 
 | Point | Transcript | End of turn | LLM first token | LLM first sentence | Turn to first sentence | TTS first audio | End to end | Events sent / dropped / failed |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
@@ -387,45 +387,15 @@ The voice worker's own timing of each turn, p50 / p95 in ms: from the end of the
 | a1-voice (r4) | 748 / 802 | 752 / 805 | 77 / 95 | 284 / 366 | 286 / 380 | 182 / 242 | 1,234 / 1,367 | 241 / 0 / 0 |
 | a1-voice (s1) | 748 / 799 | 753 / 805 | 80 / 97 | 313 / 407 | 314 / 410 | 190 / 240 | 1,272 / 1,378 | 241 / 0 / 0 |
 | a1-voice (s2) | 746 / 791 | 751 / 797 | 79 / 96 | 274 / 399 | 280 / 405 | 194 / 240 | 1,237 / 1,373 | 240 / 0 / 0 |
-| a1-voice (w2) | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a2-stock-s8 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a2-stock-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a2-stock-s24 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a3-priority-s8 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a3-priority-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a3-priority-s24 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a4-b1024-t512-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a4-b1024-t256-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a4-b512-t0-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
 | a4-b512-t256-s16 (s1) | 767 / 849 | 772 / 855 | 92 / 228 | 280 / 825 | 293 / 843 | 215 / 275 | 1,299 / 1,841 | 240 / 0 / 0 |
 | a4-b512-t256-s16 (s2) | 768 / 846 | 774 / 851 | 94 / 217 | 320 / 1,160 | 328 / 1,164 | 225 / 285 | 1,327 / 2,191 | 240 / 0 / 0 |
-| a4-b512-t256-s16 (w2) | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a4-b1024-t0-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a4-b512-t256-s24 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a4-b1024-t0-s24 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| factor-no-preemptive-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a5-queued8192-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a5-watermark10-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a6-reserve2048-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a6-cap8-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a6-cap2-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a7a-pr54530-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a7a-seqs12-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
 | a7b-sglang-hicache-s8 | 756 / 847 | 761 / 854 | 100 / 144 | 291 / 441 | 295 / 443 | 201 / 244 | 1,266 / 1,483 | 241 / 0 / 0 |
-| a7b-sglang-s8 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
 | a7b-sglang-hicache-s16 | 798 / 886 | 803 / 892 | 101 / 286 | 322 / 825 | 332 / 862 | 221 / 336 | 1,359 / 1,943 | 240 / 0 / 0 |
-| a7b-sglang-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a8a-flow-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a8b-smg-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| a8c-resubmit-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
 | a9-s8 | 786 / 831 | 792 / 836 | 90 / 116 | 347 / 604 | 349 / 607 | 230 / 299 | 1,370 / 1,721 | 241 / 0 / 0 |
 | a9-s16 (a9-standard) | 794 / 835 | 796 / 841 | 92 / 239 | 333 / 811 | 349 / 814 | 203 / 271 | 1,341 / 1,892 | 241 / 0 / 0 |
 | a9-s16 (s1) | 796 / 855 | 802 / 860 | 94 / 232 | 345 / 969 | 350 / 976 | 213 / 261 | 1,336 / 2,049 | 240 / 0 / 0 |
 | a9-s16 (s2) | 796 / 837 | 802 / 842 | 97 / 256 | 332 / 672 | 337 / 678 | 222 / 297 | 1,348 / 1,719 | 240 / 0 / 0 |
 | a9-s24 | 811 / 843 | 816 / 849 | 188 / 393 | 417 / 997 | 433 / 999 | 212 / 257 | 1,458 / 2,047 | 240 / 0 / 0 |
-| calls4-s0 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| calls4-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
-| calls6-s16 | — / — | — / — | — / — | — / — | — / — | — / — | — / — | — / — / — |
 | disc-frozen-s24 (r1) | 816 / 852 | 821 / 860 | 2,027 / 7,800 | 2,921 / 8,610 | 3,019 / 8,687 | 226 / 316 | 4,055 / 9,800 | 240 / 0 / 0 |
 | disc-frozen-s24 (r2) | 813 / 841 | 816 / 845 | 2,401 / 6,899 | 3,280 / 7,672 | 3,457 / 7,688 | 231 / 376 | 4,531 / 8,852 | 240 / 0 / 0 |
 | disc-frozen-s24 (r3) | 808 / 851 | 811 / 857 | 1,679 / 7,860 | 3,069 / 9,275 | 3,041 / 9,351 | 224 / 360 | 4,106 / 10,425 | 240 / 0 / 0 |
