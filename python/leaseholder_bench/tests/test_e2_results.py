@@ -1198,9 +1198,7 @@ def unredacted(data: Any) -> list[str]:
 
 
 @pytest.mark.parametrize("results", [RESULTS, W5_RESULTS], ids=lambda p: p.name)
-def test_the_committed_records_give_the_report_and_hold_no_credential(
-    tmp_path: Path, results: Path
-) -> None:
+def test_the_committed_records_are_complete_and_hold_no_credential(results: Path) -> None:
     assert unredacted({"tenants": {"a": {"keys_sha256": ["<sha256>"]}}}) == ["keys_sha256"]
     dirs = sorted(run.parent for run in results.glob("*/*/run.json"))  # as make reproduce-e2 does
     assert dirs
@@ -1213,8 +1211,23 @@ def test_the_committed_records_give_the_report_and_hold_no_credential(
             assert not unredacted(json.loads(path.read_text())), path
         for path in (p for p in run_dir.rglob("*") if p.is_file()):
             assert not re.search(r"/(home|Users|root)/", path.read_text()), path  # no account
-    write_report(rows, tmp_path)
-    assert (tmp_path / "frontier.md").read_text().startswith("# E2 frontier")
+
+
+def test_the_committed_records_give_their_committed_report(tmp_path: Path) -> None:
+    # Each set of records keeps the report it gives in report/, every file make reproduce-e2 writes
+    # (make reproduce-e2 E2_REPORT=<its report/> rewrites it), so that a change to the report's code
+    # shows in what it changes there.
+    reports = sorted(REPO.glob("benchmarks/results/*/report"))
+    assert {RESULTS / "report", W5_RESULTS / "report"} <= set(reports)
+    for committed in reports:
+        dirs = sorted(run.parent for run in committed.parent.glob("*/*/run.json"))
+        rows, incomplete = load_points(dirs)
+        assert dirs and not incomplete
+        out = tmp_path / committed.parent.name
+        written = write_report(rows, out)
+        assert sorted(p.name for p in written) == sorted(p.name for p in committed.iterdir())
+        for path in written:
+            assert path.read_bytes() == (committed / path.name).read_bytes(), committed / path.name
 
 
 @pytest.mark.parametrize("results", [RESULTS, W5_RESULTS], ids=lambda p: p.name)

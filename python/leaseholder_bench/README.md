@@ -362,7 +362,7 @@ workload's section, voice SLO and figure (its families, the arms' names and what
 scale), repeated points placed at their medians with every run kept, the stage waterfall's means
 and V2V marks, the report's columns that only some points have, compact records that give the
 report of their run directories byte for byte, the committed records (complete, without
-credentials, exported again to themselves, and reported as `make reproduce-e2` reports them), the names of the lines the voice
+credentials, exported again to themselves, and giving the report committed beside them, every file byte for byte), the names of the lines the voice
 worker writes, and the series the record and the report read from the gateway: each in its checked-in exposition
 (`crates/lh-gateway/metrics.txt`), and each count the sum of the series it is made of. `tests/test_campaign.py` runs `benchmarks/e2/campaign.sh` against stand-ins for the hosts (an ssh that runs each command in a directory per host, rsync, cyan's `lh-bench` and the GPU node's `variant.sh`): what each point is measured with. `tests/test_demo.py` runs the demo
 video's renderer on a synthetic pair of calls ([`benchmarks/e2`](../../benchmarks/e2/README.md#the-demo-video));
