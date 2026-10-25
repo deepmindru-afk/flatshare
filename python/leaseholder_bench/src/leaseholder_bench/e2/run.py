@@ -192,7 +192,7 @@ def configure_cyan(arm: Arm, host: Host, systemd: Systemd) -> dict[str, Any]:
 def reset_cyan(host: Host, systemd: Systemd) -> dict[str, Any]:
     """Undo what e2 run changes on cyan: SMG stopped, the gateway back on gateway.toml, preemptive
     generation and lifecycle events on, and the voice worker on one GPU node."""
-    with _exclusive(host):
+    with exclusive(host):
         return _apply(host, systemd, None, {}, Voice(), ())
 
 
@@ -743,7 +743,7 @@ def run_point(
     seed = arm.agents.seed if agents_seed is None else agents_seed
     host = host or Host()
     systemd = systemd or Systemd()
-    with _exclusive(host):
+    with exclusive(host):
         _fresh(out)
         shutil.copyfile(arm_file, out / "arm.toml")
         record = _Record(out, arm, host, gpu_source)
@@ -997,8 +997,8 @@ def _aiperf_env(arm: Arm, host: Host, out: Path, seed: int) -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def _exclusive(host: Host) -> Iterator[None]:
-    """One e2 run (or reset) at a time: they share cyan's units and cores. The lock file names the
+def exclusive(host: Host) -> Iterator[None]:
+    """One e2 run, reset or drill at a time: they share cyan's units and cores. The lock file names the
     holder's pid, to stop it by."""
     path = host.root / "runs" / ".lh-bench-e2.lock"
     path.parent.mkdir(parents=True, exist_ok=True)

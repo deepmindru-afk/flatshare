@@ -1356,7 +1356,7 @@ def test_a_complete_point_is_kept_and_an_incomplete_one_moved_aside(
 
 def test_one_point_at_a_time(cyan: Cyan) -> None:
     lock = cyan.host.root / "runs" / ".lh-bench-e2.lock"
-    with e2._exclusive(cyan.host):
+    with e2.exclusive(cyan.host):
         with pytest.raises(E2Error, match="another lh-bench e2 run"):
             run(cyan, "a1-voice", VOICE_ALONE)
         assert lock.read_text() == f"{os.getpid()}\n"  # the holder's, kept through the refusal
