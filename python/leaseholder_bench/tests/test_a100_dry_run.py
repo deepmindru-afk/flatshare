@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,29 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def dry_env(home: Path, hosts: Path, runtime: Path) -> dict[str, str]:
+    """The environment of the dry run's stand-ins for run.sh on HOME."""
+    env = os.environ | {
+        "HOME": str(home),
+        "PATH": os.pathsep.join([str(FAKES / "a100"), str(FAKES / "campaign"), os.environ["PATH"]]),
+        "FAKE_HOSTS": str(hosts),
+        "FAKE_LH_BENCH": str(Path(sys.executable).with_name("lh-bench")),
+        "FAKE_PYTHON": sys.executable,
+        "XDG_RUNTIME_DIR": str(runtime),
+        "LH_FORWARD_PORT": str(free_port()),
+    }
+    for name in (
+        "FAKE_PROBE_FAIL_AT",
+        "FAKE_E2_FAIL",
+        "LH_NODE_DIR",
+        "LH_PROFILE",
+        "LH_E2_RESULTS",
+        "LH_GPU_ID",
+    ):
+        env.pop(name, None)
+    return env
 
 
 def a100_host(hosts: Path) -> Path:
@@ -640,3 +664,27 @@ def test_the_gpu_stage_stops_the_gpu_units_before_it_reads_the_facts(ubuntu: dic
     stop = "systemctl --user stop leaseholder.target lh-engine lh-stt lh-tts"
     assert stop in asked, asked
     assert asked.index(stop) < asked.index("systemctl --user is-system-running"), asked
+
+
+def test_a_failed_point_under_a_deadline_stops_the_run_as_a_failure(
+    tmp_path: Path, runtime: Path
+) -> None:
+    # The documented invocation passes --until: a point that fails far from the deadline is a failure (exit 1, with
+    # campaign.sh's status), not a stop before the deadline.
+    hosts = tmp_path / "hosts"
+    home = a100_host(hosts)
+    env = dry_env(home, hosts, runtime) | {
+        "FAKE_E2_FAIL": "w5-disc-pr-ab48-s24"
+    }  # round 1's first point
+    until = (datetime.now(UTC) - timedelta(minutes=30)).strftime("%H:%M")  # about 23.5 hours away
+    done = subprocess.run(
+        ["bash", str(RUN), "--until", until, "4"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    blocks = (home / "leaseholder" / "runs" / "a100" / "blocks.log").read_text()
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "a100-r1 did not complete (campaign.sh exit status 1)" in blocks
+    assert "stopped before its deadline" not in blocks

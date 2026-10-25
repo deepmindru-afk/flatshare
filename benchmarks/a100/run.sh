@@ -77,7 +77,8 @@ campaign() { # campaign FILE: its points on this host, as campaign.sh --local ru
   (cd "$HOME" && LH_NODE_DIR=leaseholder/node bash "$src/benchmarks/e2/campaign.sh" --local ${until:+--until "$until"} \
     "$1") || status=$?
   points_done "$1" && return 0
-  if [[ -n $deadline ]]; then
+  # campaign.sh exits 0 with points left only where --until stopped it; any other status is a failure.
+  if [[ -n $deadline && $status == 0 ]]; then
     log "$(basename "$1" .campaign) stopped before its deadline ($until UTC) with points left"
     exit 0
   fi
