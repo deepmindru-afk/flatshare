@@ -168,8 +168,10 @@ The failure drills run from a workstation with SSH to the hosts, on the variant 
 - While a campaign measures, `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` on the GPU node lists only the
   box's units (their cgroups end in `lh-*.service`). A point measured while any other process held the GPU is measured again.
 - `free -g`, and `df -h /dev/shm`: the CPU tier occupies 20 GiB there.
-- Port audit:
-  - on Phastform: `ss -Hlntu | grep -E ':(8000|8100|8880)\b'` shows only `127.0.0.1`;
+- Listener audit, as `python3 ~/leaseholder/src/deploy/bin/audit-listeners` checks it on either host (`deploy.sh` runs
+  it after each install):
+  - on Phastform: `ss -Hlx | grep /lh/` lists the servers' sockets in `/run/user/$UID/lh/`, `engine.sock`, `stt.sock`
+    and `tts.sock`, and none of the box's units listens on TCP, but for the SGLang variant's engine on loopback;
   - on cyan: `ss -Hlntup` shows no LiveKit socket on the host network.
 
 ## Failures
