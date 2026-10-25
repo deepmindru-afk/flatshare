@@ -15,7 +15,8 @@ own. A new session costs about 12 ms where a new connection costs about 165 ms (
 servers keep their connections open between requests.
 
 The environment (the unit's EnvironmentFile, ~/.config/leaseholder/tunnel-NODE.env) names the node, LH_TUNNEL_TARGET
-(user@host), and may set LH_TUNNEL_SESSIONS. It tells systemd it is ready (Type=notify) once its sockets listen.
+(user@host), and may set LH_TUNNEL_SESSIONS. It tells systemd it is ready (Type=notify) once its sockets listen. On
+SIGTERM or SIGINT it closes its sockets, opens nothing more, and ends its masters and sessions.
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ class Master:
         self.control = control
         self.sessions = 0
         self.ready = False
+        self.process: asyncio.subprocess.Process | None = None
 
 
 class Tunnel:
@@ -78,6 +80,8 @@ class Tunnel:
         self.opened = 0.0
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.tasks: set[asyncio.Task] = set()
+        self.sessions: set[asyncio.subprocess.Process] = set()
+        self.closing = False
 
     def listen(self) -> None:
         with contextlib.suppress(FileNotFoundError):
@@ -92,10 +96,19 @@ class Tunnel:
         self.open_master()
 
     def close(self) -> None:
+        """Stops accepting and ends the masters and the sessions; nothing opens from here on."""
+        self.closing = True
         asyncio.get_running_loop().remove_reader(self.listener.fileno())
         self.listener.close()
         with contextlib.suppress(FileNotFoundError):
             self.path.unlink()
+        for process in self.processes():
+            end(process)
+
+    def processes(self) -> list[asyncio.subprocess.Process]:
+        """The ssh processes still running: the masters and the sessions."""
+        masters = [master.process for master in self.masters if master.process]
+        return [p for p in [*masters, *self.sessions] if p.returncode is None]
 
     def spawn(self, coroutine) -> None:
         task = asyncio.get_running_loop().create_task(coroutine)
@@ -106,8 +119,12 @@ class Tunnel:
         return BACKOFF_S[min(self.failures, len(BACKOFF_S)) - 1] if self.failures else 0.0
 
     def open_master(self) -> None:
-        """One more master, unless the socket has its most or waits out failures."""
-        if len(self.masters) >= MASTERS or time.monotonic() - self.opened < self.backoff():
+        """One more master, unless the socket closes, has its most or waits out failures."""
+        if (
+            self.closing
+            or len(self.masters) >= MASTERS
+            or time.monotonic() - self.opened < self.backoff()
+        ):
             return
         self.opened = time.monotonic()
         used = {master.control.name for master in self.masters}
@@ -125,6 +142,9 @@ class Tunnel:
             *self.options, self.target,
             stdin=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )  # fmt: skip
+        master.process = process
+        if self.closing:  # closed while it started
+            end(process)
         watch = asyncio.get_running_loop().create_task(self.await_control(master))
         error = await process.stderr.read() if process.stderr else b""
         status = await process.wait()
@@ -134,7 +154,7 @@ class Tunnel:
         self.failures = 0 if master.ready and lasted > 60 else self.failures + 1
         reason = error.decode(errors="replace").strip() or f"exit status {status}"
         log(f"{self.path.name}: master {master.control.name} ended after {lasted:.0f} s: {reason}")
-        if not self.masters:
+        if not self.masters and not self.closing:
             await asyncio.sleep(self.backoff())
             self.open_master()  # keep one ready
 
@@ -172,12 +192,16 @@ class Tunnel:
             )  # fmt: skip
         finally:
             connection.close()  # the session holds the connection now
+        self.sessions.add(session)
+        if self.closing:  # closed while it started
+            end(session)
         if master:
             master.sessions += 1
         try:
             error = await session.stderr.read() if session.stderr else b""
             status = await session.wait()
         finally:
+            self.sessions.discard(session)
             if master:
                 master.sessions -= 1
         # nc exits 1 when the node's server does not answer, which the client sees as a closed connection; any other
@@ -185,6 +209,11 @@ class Tunnel:
         if status not in (0, 1):
             text = error.decode(errors="replace").strip()
             log(f"{self.path.name}: a session ended with exit status {status}: {text}")
+
+
+def end(process: asyncio.subprocess.Process) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        process.terminate()
 
 
 def notify(state: str) -> None:
@@ -218,9 +247,23 @@ async def main(node: str) -> int:
         asyncio.get_running_loop().add_signal_handler(signum, stop.set)
     await stop.wait()
     notify("STOPPING=1")
+    # systemd would stop the masters and sessions with the unit too; a tunnel run by hand leaves nothing behind
+    # either. Each task ends once its process has. OpenSSH 8.9's client loop waits in poll() with signals unblocked
+    # (clientloop.c, client_wait_until_can_do_something), so a SIGTERM that lands just before it blocks is seen only
+    # at its next event, up to ServerAliveInterval later: those still running get a second one.
     for tunnel in tunnels:
         tunnel.close()
-    # The sessions and masters are the unit's processes, which systemd stops with it.
+    tasks = [task for tunnel in tunnels for task in tunnel.tasks]
+    if tasks:
+        _, running = await asyncio.wait(tasks, timeout=0.5)
+        if running:
+            for tunnel in tunnels:
+                for process in tunnel.processes():
+                    end(process)
+            await asyncio.wait(running, timeout=4.5)
+    for tunnel in tunnels:
+        for process in tunnel.processes():
+            process.kill()
     return 0
 
 

@@ -4,6 +4,7 @@ nodes have); skipped without them."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
@@ -144,11 +145,26 @@ def node() -> Iterator[dict]:
     }
     wait_for(lambda: (root / "sshd.pid").exists(), "sshd started")
     yield {"root": root, "lh": lh, "servers": servers, "runtime": runtime, "env": env}
+    # Each connection's sshd runs in a session of its own (setsid), which outlives the listener: end them first.
+    for child in children(sshd.pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(child, signal.SIGTERM)
     sshd.terminate()
     sshd.wait(5)
     for server in servers.values():
         server.shutdown()
     shutil.rmtree(root, ignore_errors=True)
+
+
+def children(pid: int) -> list[int]:
+    """A process's children (Linux)."""
+    path = Path(f"/proc/{pid}/task/{pid}/children")
+    return [int(child) for child in path.read_text().split()] if path.exists() else []
+
+
+def masters(node: dict) -> list[Path]:
+    """The tunnel's masters' control sockets: each master removes its own as it ends."""
+    return list((node["runtime"] / "lh" / "ssh-phastform").glob("*-*"))
 
 
 def start(node: dict) -> subprocess.Popen:
@@ -177,8 +193,9 @@ def test_each_socket_reaches_the_nodes_socket_of_its_name_through_its_own_key(no
     finally:
         tunnel.send_signal(signal.SIGTERM)
         assert tunnel.wait(10) == 0
-    # It removes its sockets as it stops.
+    # It removes its sockets as it stops, and ends its masters.
     assert not any((node["runtime"] / "lh").glob("phastform-*.sock"))
+    assert masters(node) == []
 
 
 def test_connections_beyond_a_masters_sessions_go_through_more_masters(node: dict) -> None:
@@ -195,6 +212,7 @@ def test_connections_beyond_a_masters_sessions_go_through_more_masters(node: dic
     finally:
         tunnel.send_signal(signal.SIGTERM)
         tunnel.wait(10)
+    assert masters(node) == [], "every master ends with the tunnel"
 
 
 def test_a_dead_server_on_the_node_closes_the_connection_without_an_answer(node: dict) -> None:
