@@ -75,7 +75,8 @@ LOGGER = """# Log as vLLM's scheduler does: vLLM's logging covers its loggers on
 logger = init_logger("vllm.v1.core.sched.scheduler")
 """
 
-# The inserted code is written as vLLM's own (88 columns, ruff format), so that it lifts into scheduler.py as is.
+# The inserted code is the PRs' (#63350, #63351) under their names, but for the variant's own parts (the switches,
+# the reserve, the counters and their log), in vLLM's style: its ruff 0.14.0 check and format pass on it.
 SWITCHES = """        # Make room for waiting requests of a higher priority: preempt running
         # requests of a lower priority for their KV, hold lower-priority prefill
         # back for a request's first tokens, and keep a KV reserve that requests
@@ -83,9 +84,15 @@ SWITCHES = """        # Make room for waiting requests of a higher priority: pre
         make_room = self._make_room_switches(
             vllm_config.additional_config.get("make_room", {})
         )
-        self.max_preemptions_per_step = make_room["max_preemptions_per_step"]
-        self.prefill_budget_cap = make_room["budget_cap"]
-        self.prefill_budget_cap_tokens = make_room["budget_cap_tokens"]
+        self.max_priority_preemptions_per_step = make_room["max_preemptions_per_step"]
+        # Requests room was made for whose allocation the waiting loop has not
+        # tried since: no room is made for them again until it has.
+        self._make_room_untried: set[Request] = set()
+        self.priority_prefill_budget_cap = make_room["budget_cap"]
+        self.priority_prefill_budget_cap_tokens = make_room["budget_cap_tokens"]
+        # The step in which each KV load in flight was first seen: a load holds
+        # lower-priority prefill back for its first budget cap tokens steps.
+        self._load_hold_start: dict[Request, int] = {}
         self.reserve_blocks = cdiv(make_room["reserve_tokens"], block_size)
         num_max_len_blocks = cdiv(self.max_model_len, block_size)
         if self.reserve_blocks and (
@@ -95,12 +102,6 @@ SWITCHES = """        # Make room for waiting requests of a higher priority: pre
                 "make_room.reserve_tokens leaves no room for a request of "
                 "max_model_len tokens"
             )
-        # Requests make-room preempted for whose allocation the waiting loop has
-        # not tried since: no room is made for them again until it has.
-        self._make_room_untried: set[Request] = set()
-        # The step in which make-room first saw each KV load in flight: a load
-        # holds lower-priority prefill back for its first budget_cap_tokens steps.
-        self._make_room_load_start: dict[Request, int] = {}
         # What make-room did, for the operator (see _make_room_log).
         self.make_room_held_steps = 0
         self.make_room_held_tokens = 0
@@ -111,37 +112,36 @@ SWITCHES = """        # Make room for waiting requests of a higher priority: pre
         self._make_room_log_time = time.monotonic()
 """
 
-MAKE_ROOM = """        # Make room for the waiting request of the highest priority that can be
-        # scheduled in this step, before the running requests are scheduled, so
-        # that no victim is un-scheduled.
-        make_room_victims: set[Request] = set()
-        first_tokens_priority = None
-        if self.max_preemptions_per_step or self.prefill_budget_cap:
-            self._make_room_log()
-            waiting_req = self._make_room_waiting_req()
-            hit = None if waiting_req is None else self._make_room_hit(waiting_req)
-            hold_priority = self._make_room_hold_priority()
-            if (
-                waiting_req is not None
-                and self.max_preemptions_per_step
-                and waiting_req not in self._make_room_untried
-                # Nor while the budget cap holds it back.
-                and (hold_priority is None or waiting_req.priority <= hold_priority)
-            ):
-                make_room_victims = self._make_room(
-                    waiting_req, hit, scheduled_timestamp
-                )
-            # Prefills of a lower priority sit out the steps of a request's first
-            # tokens.
-            first_tokens_priority = self._make_room_first_tokens_priority(
-                waiting_req, hit, hold_priority
+MAKE_ROOM = """        # Priority policy: make room for the waiting request of the highest
+        # priority first, so that no request scheduled in this step is preempted.
+        self._make_room_log()
+        make_room_req = self._peek_make_room_request()
+        make_room_hit = (
+            None if make_room_req is None else self._local_prefix_hit(make_room_req)
+        )
+        hold_priority = self._first_tokens_hold_priority()
+        make_room_preempted_reqs: set[Request] = set()
+        if (
+            make_room_req is not None
+            and self.max_priority_preemptions_per_step
+            and make_room_req not in self._make_room_untried
+            # Nor while the budget cap holds it back.
+            and (hold_priority is None or make_room_req.priority <= hold_priority)
+        ):
+            make_room_preempted_reqs = self._make_room(
+                make_room_req, make_room_hit, scheduled_timestamp
             )
+        # Prefills of a lower priority sit out the steps of a request's first
+        # tokens.
+        first_tokens_priority = self._first_tokens_priority(
+            make_room_req, make_room_hit, hold_priority
+        )
 
 """
 
-NOT_RESUMED = """                if request in make_room_victims:
-                    # Preempted in this step to make room: resuming it now would
-                    # take back the blocks its preemption has just freed.
+NOT_RESUMED = """                if request in make_room_preempted_reqs:
+                    # Preempted to make room: resuming it now would take back the
+                    # blocks just freed.
                     break
 """
 
@@ -163,22 +163,41 @@ RESERVE = """                if (
                     # Nor does a prefill of a lower priority start meanwhile.
                     self._make_room_count_hold(0, 1)
                     if request_queue is self.kv_holding_waiting:
-                        # Requests holding KV are drained first, so the request
-                        # whose first tokens are due may be behind this one.
+                        # Requests holding KV blocks are drained first, so the
+                        # request whose first tokens are due may be behind it.
                         skip_request(request_queue)
                         continue
                     break
-                if request_queue is self.waiting and self._make_room_holds_back(
-                    request
+
+                if (
+                    request_queue is self.waiting
+                    and self.reserve_blocks
+                    and request.priority > 0
+                    and self._num_blocks_short(request, self._local_prefix_hit(request))
+                    > 0
                 ):
-                    # Nor one the reserve, or a prefill of a higher priority in
-                    # flight, keeps waiting.
+                    # Nor one of a positive priority value that would take the
+                    # reserve.
+                    break
+
+                if (
+                    request_queue is self.waiting
+                    and self.max_priority_preemptions_per_step
+                    and any(
+                        req.priority < request.priority
+                        for req in self._inflight_prefills
+                    )
+                    and self._num_blocks_short(request, self._local_prefix_hit(request))
+                    > 0
+                ):
+                    # While a prefill of a higher priority is in flight, leave
+                    # free what in-flight prefills still need, or a request
+                    # preempted for it could take its cached blocks back.
                     break
 
 """
 
-TRIED = """                # The waiting loop tries the request's allocation: make-room may
-                # make room for it again.
+TRIED = """                # Its allocation is tried: room may be made for it again.
                 self._make_room_untried.discard(request)
 """
 
@@ -206,8 +225,10 @@ HELPERS = '''
                 switches[key] = flag
             elif key in switches:
                 least = 1 if key == "budget_cap_tokens" else 0
-                if isinstance(value, bool) or not isinstance(value, int) or (
-                    value < least
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < least
                 ):
                     raise ValueError(
                         f"make_room.{key} must be an integer of at least {least}, "
@@ -216,8 +237,7 @@ HELPERS = '''
                 switches[key] = value
             else:
                 raise ValueError(
-                    f"make_room has no key {key!r}; its keys are "
-                    + ", ".join(switches)
+                    f"make_room has no key {key!r}; its keys are " + ", ".join(switches)
                 )
         if self.policy != SchedulingPolicy.PRIORITY and (
             switches["max_preemptions_per_step"]
@@ -264,16 +284,16 @@ HELPERS = '''
         self.make_room_held_tokens += num_tokens
         self.make_room_held_admissions += num_admissions
 
-    def _make_room_waiting_req(self) -> Request | None:
+    def _peek_make_room_request(self) -> Request | None:
         """The waiting request of the highest priority that the waiting loop can
-        schedule in this step: not one loading its KV (until the load is done),
-        compiling its grammar, paused for streaming input or awaiting output from
-        before its preemption, nor one whose LoRA adapter could not join the
-        running requests' (max_loras). It counts every running request's
-        adapter, where the waiting loop counts the scheduled ones': one the budget
-        cap holds back is not scheduled, so this may make no room for a request
-        the loop would admit."""
-        if self._pause_state != PauseState.UNPAUSED:
+        schedule in this step, unless new requests are paused."""
+        if (
+            not (
+                self.max_priority_preemptions_per_step
+                or self.priority_prefill_budget_cap
+            )
+            or self._pause_state != PauseState.UNPAUSED
+        ):
             return None
         if self._make_room_untried:
             # Forget the requests that are gone.
@@ -291,14 +311,17 @@ HELPERS = '''
             }
         # Each queue iterates in priority order.
         heads = (
-            next((req for req in queue if self._make_room_ready(req, loras)), None)
+            next((req for req in queue if self._can_schedule(req, loras)), None)
             for queue in (self.kv_holding_waiting, self.waiting)
         )
         return min((req for req in heads if req is not None), default=None)
 
-    def _make_room_ready(self, request: Request, loras: set[int]) -> bool:
-        """Whether the waiting loop can schedule `request` in this step, as far
-        as its status and its LoRA adapter beside the running requests' tell."""
+    def _can_schedule(self, request: Request, loras: set[int]) -> bool:
+        """Whether the waiting loop can schedule the waiting `request` in this
+        step, as far as its status, its output in flight and its LoRA adapter
+        beside the running requests' (`loras`) tell: not while it loads its KV
+        (until the load is done), compiles its grammar or awaits streaming input,
+        nor while output from before its preemption is in flight."""
         if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
             if request.request_id not in self.finished_recving_kv_req_ids:
                 return False
@@ -311,8 +334,6 @@ HELPERS = '''
         elif request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             return False
         if request.num_stale_output_tokens and not request.drop_stale_output:
-            # Output from before its preemption is still in flight (pipeline
-            # parallelism): it resumes once that is delivered.
             return False
         return not (
             self.lora_config
@@ -321,12 +342,78 @@ HELPERS = '''
             and request.lora_request.lora_int_id not in loras
         )
 
-    def _make_room_hit(
+    def _first_tokens_hold_priority(self) -> int | None:
+        """With the budget cap, the highest priority among the requests whose
+        first tokens are due: the running ones with fewer than
+        `priority_prefill_budget_cap_tokens` output tokens and, while a running
+        slot is free, the ones whose KV load is done, which the waiting loop
+        promotes in this step but only on budget the running loop leaves, and
+        the ones whose load is in flight, for its first
+        `priority_prefill_budget_cap_tokens` steps: a stuck load holds nothing
+        after those."""
+        if not self.priority_prefill_budget_cap:
+            return None
+        # Each load in flight and the step it was first seen in; the loads that
+        # are done or gone drop out.
+        self._load_hold_start = {
+            req: self._load_hold_start.get(req, self.current_step)
+            for req in self._inflight_prefills
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            and req.request_id not in self.finished_recving_kv_req_ids
+        }
+        priorities = [
+            req.priority
+            for req in self.running
+            if req.num_output_tokens < self.priority_prefill_budget_cap_tokens
+        ]
+        if self._running_slot_free():
+            priorities.extend(
+                self.requests[req_id].priority
+                for req_id in self.finished_recving_kv_req_ids
+                if req_id in self.requests
+            )
+            priorities.extend(
+                req.priority
+                for req, start in self._load_hold_start.items()
+                if self.current_step - start < self.priority_prefill_budget_cap_tokens
+            )
+        return min(priorities, default=None)
+
+    def _first_tokens_priority(
+        self,
+        request: Request | None,
+        hit: tuple[tuple[list[KVCacheBlock], ...], int] | None,
+        hold_priority: int | None,
+    ) -> int | None:
+        """With the budget cap, the highest priority whose first tokens hold
+        lower-priority prefill back in this step: `hold_priority`, and that of
+        the waiting `request` (whose prefix-cache hit is `hit`) once it fits,
+        deferred frees counted, while a running slot is free."""
+        if not self.priority_prefill_budget_cap:
+            return None
+        priorities = [] if hold_priority is None else [hold_priority]
+        if (
+            request is not None
+            and self._running_slot_free()
+            and self._num_blocks_short(request, hit)
+            <= self._num_released_blocks([], hit)
+        ):
+            priorities.append(request.priority)
+        return min(priorities, default=None)
+
+    def _running_slot_free(self) -> bool:
+        """Whether a running slot is free: a waiting request, or one whose KV
+        load is done, needs one to be promoted, and with none free, holding
+        prefill back would only stall the running requests."""
+        num_running = len(self.running) + self.num_waiting_for_streaming_input
+        return num_running < self.max_num_active_reqs
+
+    def _local_prefix_hit(
         self, request: Request
     ) -> tuple[tuple[list[KVCacheBlock], ...], int] | None:
-        """`request`'s local prefix-cache hit before its first step, its blocks
-        by group and its tokens, as get_computed_blocks finds it but without its
-        KV events; None if it looks up none."""
+        """The waiting `request`'s local prefix-cache hit before its first step,
+        its blocks by group and its tokens, as get_computed_blocks finds it but
+        without its KV events; None if it looks up none."""
         if (
             request.num_computed_tokens
             or not self.kv_cache_manager.prefix_cache_lookup_enabled(request)
@@ -339,96 +426,70 @@ HELPERS = '''
         )
         return hit_blocks, num_hit_tokens
 
-    def _make_room_hold_priority(self) -> int | None:
-        """The highest priority among the requests whose first tokens are due,
-        if the budget cap is on: the running ones with fewer than
-        `budget_cap_tokens` output tokens and, while a running slot is free, the
-        ones whose KV load is done, which the waiting loop promotes in this step
-        but only on budget the running loop leaves, and the ones whose load is
-        in flight, for its first `budget_cap_tokens` steps: a stuck load holds
-        nothing after those."""
-        if not self.prefill_budget_cap:
-            return None
-        # Each load in flight and the step make-room first saw it in; the loads
-        # that are done or gone drop out.
-        self._make_room_load_start = {
-            req: self._make_room_load_start.get(req, self.current_step)
-            for req in self._inflight_prefills
-            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-            and req.request_id not in self.finished_recving_kv_req_ids
-        }
-        priorities = [
-            req.priority
-            for req in self.running
-            if req.num_output_tokens < self.prefill_budget_cap_tokens
-        ]
-        if self._make_room_slot_free():
-            priorities.extend(
-                self.requests[req_id].priority
-                for req_id in self.finished_recving_kv_req_ids
-                if req_id in self.requests
-            )
-            priorities.extend(
-                req.priority
-                for req, start in self._make_room_load_start.items()
-                if self.current_step - start < self.prefill_budget_cap_tokens
-            )
-        return min(priorities, default=None)
-
-    def _make_room_first_tokens_priority(
+    def _make_room(
         self,
-        waiting_req: Request | None,
+        request: Request,
         hit: tuple[tuple[list[KVCacheBlock], ...], int] | None,
-        hold_priority: int | None,
-    ) -> int | None:
-        """The highest priority whose first tokens hold lower-priority prefill
-        back in this step, if the budget cap is on: `hold_priority`, and that of
-        `waiting_req` (whose prefix-cache hit is `hit`) once it fits, deferred
-        frees counted, while a running slot is free."""
-        if not self.prefill_budget_cap:
-            return None
-        priorities = [] if hold_priority is None else [hold_priority]
-        if (
-            waiting_req is not None
-            and self._make_room_slot_free()
-            and self._num_blocks_short(waiting_req, hit)
-            <= self._num_released_blocks([], hit)
-        ):
-            priorities.append(waiting_req.priority)
-        return min(priorities, default=None)
-
-    def _make_room_slot_free(self) -> bool:
-        """Whether a running slot is free: a request admitted with its KV loading
-        from a connector, or waiting, needs one to be promoted, and with none
-        free, holding prefill back would only stall the running requests."""
-        num_active = len(self.running) + self.num_waiting_for_streaming_input
-        return num_active < self.max_num_active_reqs
-
-    def _make_room_holds_back(self, request: Request) -> bool:
-        """Whether the reserve keeps waiting `request`, which is short of free
-        blocks: a positive priority value leaves the KV reserve free, and a
-        priority below an in-flight prefill's leaves free what in-flight
-        prefills still need, so that a request preempted to make room cannot
-        take back its cached blocks between the chunks of the request it made
-        room for."""
-        held = (self.reserve_blocks and request.priority > 0) or (
-            self.max_preemptions_per_step
-            and any(req.priority < request.priority for req in self._inflight_prefills)
+        timestamp: float,
+    ) -> set[Request]:
+        """Preempt running requests of a lower priority than the waiting
+        `request` until it is no block short, and return them. They go in the
+        order the running loop preempts in, the highest priority value first and
+        the latest arrival among equals, which spares older work: as few as make
+        it fit, at most `max_priority_preemptions_per_step`, and none if that
+        many would not. The room counts the blocks the running decodes take until
+        the victims' frees land, and a block as released once all its holders
+        go, unless `request` takes it as a prefix-cache hit (`hit`)."""
+        if self.connector is not None and self.connector.has_pending_block_frees():
+            # As in the running loop, pending transfers free blocks instead.
+            return set()
+        candidates = sorted(
+            (req for req in self.running if req.priority > request.priority),
+            key=lambda req: (req.priority, req.arrival_time),
+            reverse=True,
         )
-        return (
-            bool(held)
-            and self._num_blocks_short(request, self._make_room_hit(request)) > 0
+        if not candidates:
+            return set()
+        num_blocks_short = self._num_blocks_short(request, hit)
+        num_growth_blocks = sum(self._num_growth_blocks(req, 1) for req in self.running)
+        if num_blocks_short + num_growth_blocks <= 0:
+            # It fits in this step, after the running loop.
+            return set()
+        # Otherwise it is admitted once the victims' frees land: in this step,
+        # or with deferred frees in the next, after the running loop has grown
+        # the decodes once more.
+        num_steps = 2 if self.defer_block_free else 1
+        num_blocks_short += sum(
+            self._num_growth_blocks(req, num_steps) for req in self.running
         )
+        if num_blocks_short <= self._num_released_blocks([], hit):
+            return set()
+        victims: list[Request] = []
+        for victim in candidates[: self.max_priority_preemptions_per_step]:
+            victims.append(victim)
+            num_blocks_short -= self._num_growth_blocks(victim, num_steps)
+            if num_blocks_short <= self._num_released_blocks(victims, hit):
+                break
+        else:
+            return set()
+        for victim in victims:
+            self.running.remove(victim)
+            self._preempt_request(
+                victim, timestamp, drop_stale_output=self.requires_kv_delivery
+            )
+        self._make_room_untried.add(request)
+        self.make_room_preemptions += len(victims)
+        return set(victims)
 
     def _num_blocks_short(
         self,
         request: Request,
         hit: tuple[tuple[list[KVCacheBlock], ...], int] | None,
     ) -> int:
-        """Free blocks `request` lacks to be admitted with its whole remaining
-        sequence, net of its prefix-cache hit `hit`, beside what in-flight
-        prefills still need, as async KV loads are admitted; with a positive
-        priority value, the reserve too."""
+        """Free blocks the waiting `request` lacks to be admitted with its whole
+        remaining sequence, net of its prefix-cache hit `hit`, beside the
+        watermark and what in-flight prefills still need, as an async KV load is
+        admitted; with a positive priority value, the reserve too."""
         num_blocks = self._inflight_prefill_reserved_blocks()
         if request not in self._inflight_prefills:
             num_blocks += self._make_room_remaining_blocks(request, hit)
@@ -444,10 +505,11 @@ HELPERS = '''
         request: Request,
         hit: tuple[tuple[list[KVCacheBlock], ...], int] | None,
     ) -> int:
-        """Blocks `request` still needs for its whole remaining sequence, as
-        allocate_slots admits it: net of its prefix-cache hit `hit`, whose blocks
-        other requests hold take none and whose blocks in the free queue take
-        one each, and with an encoder-decoder model's cross-attention blocks."""
+        """Blocks the waiting `request` still needs for its whole remaining
+        sequence, as allocate_slots admits it: net of its prefix-cache hit `hit`,
+        whose blocks other requests hold take none and whose blocks in the free
+        queue take one each, and with an encoder-decoder model's cross-attention
+        blocks."""
         hit_blocks, num_computed_tokens = hit or (
             self.kv_cache_manager.empty_kv_cache_blocks.blocks,
             request.num_computed_tokens,
@@ -475,9 +537,9 @@ HELPERS = '''
         )
 
     def _num_growth_blocks(self, request: Request, num_steps: int) -> int:
-        """New blocks the running loop allocates `request` in the next
-        `num_steps` steps: a decode's tokens (and lookahead) may start blocks.
-        An in-flight prefill's are among the blocks it still reserves."""
+        """New blocks the running loop allocates the running `request` in the
+        next `num_steps` steps: a decode's tokens (and lookahead) may start
+        blocks. An in-flight prefill's are among the blocks it still reserves."""
         if request in self._inflight_prefills:
             return 0
         num_tokens_main_model = (
@@ -497,68 +559,16 @@ HELPERS = '''
             num_tokens_main_model=num_tokens_main_model,
         )
 
-    def _make_room(
-        self,
-        request: Request,
-        hit: tuple[tuple[list[KVCacheBlock], ...], int] | None,
-        timestamp: float,
-    ) -> set[Request]:
-        """Preempt running requests of a lower priority than `request` until it
-        is no block short, and return them. They go in the order vLLM's own
-        preemption takes them, the highest priority value first and the latest
-        arrival among equals, which spares older work; as few as make it fit, at
-        most `max_preemptions_per_step`, and none if that many would not. The
-        room counts the blocks the running decodes take until the victims'
-        frees land, and a block as released once all its holders go, unless
-        `request` takes it as a prefix-cache hit (`hit`)."""
-        if self.connector is not None and self.connector.has_pending_block_frees():
-            # Pending transfers free blocks instead, as the running loop waits.
-            return set()
-        candidates = sorted(
-            (req for req in self.running if req.priority > request.priority),
-            key=lambda req: (req.priority, req.arrival_time),
-            reverse=True,
-        )
-        if not candidates:
-            return set()
-        num_short = self._num_blocks_short(request, hit)
-        if num_short + sum(self._num_growth_blocks(req, 1) for req in self.running) <= 0:
-            # It fits in this step, after the running loop.
-            return set()
-        # Otherwise it is admitted once the victims' frees land: in this step,
-        # or with deferred frees in the next, after the running loop has grown
-        # its decodes once more.
-        num_steps = 2 if self.defer_block_free else 1
-        num_short += sum(self._num_growth_blocks(req, num_steps) for req in self.running)
-        if num_short <= self._num_released_blocks([], hit):
-            return set()
-        victims: list[Request] = []
-        for victim in candidates[: self.max_preemptions_per_step]:
-            victims.append(victim)
-            num_short -= self._num_growth_blocks(victim, num_steps)
-            if num_short <= self._num_released_blocks(victims, hit):
-                break
-        else:
-            return set()
-        for victim in victims:
-            self.running.remove(victim)
-            self._preempt_request(
-                victim, timestamp, drop_stale_output=self.requires_kv_delivery
-            )
-        self._make_room_untried.add(request)
-        self.make_room_preemptions += len(victims)
-        return set(victims)
-
     def _num_released_blocks(
         self,
         victims: list[Request],
         hit: tuple[tuple[list[KVCacheBlock], ...], int] | None,
     ) -> int:
         """Blocks back in the free pool by the next step once `victims` are
-        preempted: those whose every holder is a victim or a deferred free,
-        which lands by then, but not the blocks of the prefix-cache hit `hit`,
-        which its request takes as hits; and the blocks the in-flight prefills
-        among `victims` still reserve."""
+        preempted: those whose every holder is a victim or a deferred free, which
+        lands by then, but not the blocks of the prefix-cache hit `hit`, which
+        its request takes as hits; and the blocks the in-flight prefills among
+        `victims` still reserve."""
         hit_blocks = set() if hit is None else {id(b) for g in hit[0] for b in g}
         holders: dict[int, int] = defaultdict(int)
         blocks: dict[int, KVCacheBlock] = {}
@@ -674,8 +684,8 @@ def patched(path: Path, edits: list[tuple[str, str]]) -> str:
 def build(out_dir: Path, source_tree: bool = False) -> Path:
     sched = sched_dir(source_tree)
     header = (
-        '"""vLLM v1 Scheduler and AsyncScheduler with Leaseholder\'s make-room change, generated by '
-        'deploy/phastform/variants/make-room/build.py. Do not edit."""\n'
+        '"""vLLM v1 Scheduler and AsyncScheduler with Leaseholder\'s make-room change,\n'
+        'generated by deploy/phastform/variants/make-room/build.py. Do not edit."""\n'
     )
     source = (
         header

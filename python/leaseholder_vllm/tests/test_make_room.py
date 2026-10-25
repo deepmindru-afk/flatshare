@@ -1435,7 +1435,10 @@ def test_a_bad_switch_fails_the_engine_start_naming_it(module, model, make_room,
 def test_budget_cap_takes_true_or_false_in_any_case(module, model, value, on):
     """As vLLM's CLI parses --additional-config.make_room.budget_cap: false and true become booleans, 0 and 1 integers,
     and other spellings stay strings."""
-    assert scheduler(module.Scheduler, model, 33, {"budget_cap": value}).prefill_budget_cap is on
+    assert (
+        scheduler(module.Scheduler, model, 33, {"budget_cap": value}).priority_prefill_budget_cap
+        is on
+    )
 
 
 def test_the_switches_need_priority_scheduling(module, model):
