@@ -531,13 +531,16 @@ def test_the_corpus_row_refuses_traces_that_do_not_resolve_on_this_host(
     assert "callers: 1 of 3 do not resolve to a readable file (manifest.json)" in row.value
 
 
-def test_the_preflight_refuses_what_would_fail_the_smoke_tests_listener_audit(
+def test_the_voice_plane_outside_its_namespace_is_degraded_and_the_audit_needs_ss(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:
-    # Under systemd, with user namespaces refused, the voice plane's units would listen in the host's namespace,
-    # which smoke.sh's audit refuses, and the refusal names the way out; and the audit needs ss.
+    # With user namespaces refused the voice plane runs in the host's namespace under either supervisor: smoke.sh's
+    # listener audit accepts its listeners there by LH_VOICENET=host (test_deploy.py), so the preflight names the
+    # host's public addresses and the way to its own namespace; and the audit needs ss.
     monkeypatch.delenv("LH_SUPERVISOR", raising=False)
+    monkeypatch.setattr(host_py, "_public_addresses", lambda: ["203.0.113.7"])
     node = ready_host(tmp_path, venv, engine, monkeypatch, facts(userns=False))
+    assert host_py.supervisor(node.host) == "systemd"
     (tmp_path / "bin" / "ss").unlink()
     which = host_py.shutil.which
     monkeypatch.setattr(
@@ -546,9 +549,14 @@ def test_the_preflight_refuses_what_would_fail_the_smoke_tests_listener_audit(
         lambda name, *a, **k: None if name == "ss" else which(name, *a, **k),
     )
     checks = {c.check: c for c in host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)}
-    assert checks["User namespaces"].status == "refused"
-    assert "kernel.apparmor_restrict_unprivileged_userns=0" in checks["User namespaces"].reason
-    assert "LH_SUPERVISOR=lh-svc" in checks["User namespaces"].reason
+    userns = checks["User namespaces"]
+    assert userns.status == "degraded" and userns.value == "refused"
+    assert "203.0.113.7 must drop inbound UDP" in userns.reason
+    assert (
+        "listener audit accepts its UDP sockets, loopback TCP listeners and file sockets"
+        in userns.reason
+    )
+    assert "kernel.apparmor_restrict_unprivileged_userns=0" in userns.reason
     assert (
         checks["Listener audit"].status == "refused"
         and "iproute2" in checks["Listener audit"].reason
@@ -558,8 +566,8 @@ def test_the_preflight_refuses_what_would_fail_the_smoke_tests_listener_audit(
 def test_the_override_runs_the_units_under_lh_svc_where_systemd_could(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:
-    # A host with a user manager and lingering but no user namespaces and no sudo: LH_SUPERVISOR=lh-svc runs the
-    # units under lh-svc, and the voice plane in the host's namespace is the degraded path, not a refusal.
+    # A host with a user manager and lingering: LH_SUPERVISOR=lh-svc runs the units under lh-svc, and with no user
+    # namespaces the voice plane in the host's namespace is the degraded path there too.
     monkeypatch.setenv("LH_SUPERVISOR", "lh-svc")
     monkeypatch.setattr(host_py, "_public_addresses", lambda: ["203.0.113.7"])
     node = ready_host(tmp_path, venv, engine, monkeypatch, facts(userns=False))
@@ -568,8 +576,8 @@ def test_the_override_runs_the_units_under_lh_svc_where_systemd_could(
     userns = checks["User namespaces"]
     assert userns.status == "degraded"
     assert "203.0.113.7 must drop inbound UDP" in userns.reason
-    # Under lh-svc the audit cannot tell the units' listeners: the named addresses are the check.
-    assert "cannot attribute" in userns.reason
+    # The audit tells lh-svc's units by their environment, and the voice plane's listeners by LH_VOICENET=host.
+    assert "listener audit accepts" in userns.reason and "cannot attribute" not in userns.reason
     supervisor = checks["systemd --user and linger"]
     assert supervisor.status == "degraded" and "LH_SUPERVISOR=lh-svc" in supervisor.value
     # %t is lh-svc's, not systemd's /run/user/UID.

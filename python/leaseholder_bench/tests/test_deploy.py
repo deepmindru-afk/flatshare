@@ -303,18 +303,33 @@ class Listeners:
             "XDG_RUNTIME_DIR": str(self.runtime),
         }
 
-    def process(self, unit: str | None, command: str = "vllm serve") -> str:
-        """A process, in ``unit`` or (None) another user's session; returns ss's note of it."""
+    def process(
+        self,
+        unit: str | None,
+        command: str = "vllm serve",
+        lh_svc: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        """A process, in ``unit`` or (None) another user's session; returns ss's note of it. Under systemd a
+        unit's process is in the unit's cgroup; under deploy/bin/lh-svc (``lh_svc``) it stays in the SSH
+        session's, and lh-svc names its unit in its environment (LH_SVC_UNIT), beside ``env``."""
         self.pids += 1
         pid = str(1000 + self.pids)
         (self.proc / pid).mkdir(parents=True)
-        cgroup = (
-            f"/user.slice/user-1007.slice/user@1007.service/app.slice/{unit}"
-            if unit
-            else "/init.scope"
-        )
+        if lh_svc:
+            cgroup = "/user.slice/user-1007.slice/session-4.scope"
+        elif unit:
+            cgroup = f"/user.slice/user-1007.slice/user@1007.service/app.slice/{unit}"
+        else:
+            cgroup = "/init.scope"
         (self.proc / pid / "cgroup").write_text(f"0::{cgroup}\n")
         (self.proc / pid / "cmdline").write_bytes(command.replace(" ", "\0").encode())
+        environ = (
+            {"HOME": "/home/lh"} | ({"LH_SVC_UNIT": unit} if lh_svc and unit else {}) | (env or {})
+        )
+        (self.proc / pid / "environ").write_bytes(
+            b"".join(f"{k}={v}\0".encode() for k, v in environ.items())
+        )
         return f'users:(("python3",pid={pid},fd=3))'
 
     def manager(self) -> str:
@@ -328,12 +343,18 @@ class Listeners:
         (self.proc / pid / "cmdline").write_bytes(b"/lib/systemd/systemd\0--user")
         return f'users:(("systemd",pid={pid},fd=40))'
 
-    def tcp(self, address: str, unit: str | None, command: str = "vllm serve") -> None:
-        held = self.process(unit, command) if unit else ""  # ss shows no process of another user's
+    def tcp(self, address: str, unit: str | None, command: str = "vllm serve", **how) -> None:
+        held = (
+            self.process(unit, command, **how) if unit else ""
+        )  # ss shows no process of another user's
         self.inet.append(f"tcp LISTEN 0 4096 {address} 0.0.0.0:* {held}")
 
-    def socket(self, path: str, unit: str | None) -> None:
-        held = self.process(unit) if unit else ""
+    def udp(self, address: str, unit: str | None, command: str = "livekit-server", **how) -> None:
+        held = self.process(unit, command, **how) if unit else ""
+        self.inet.append(f"udp UNCONN 0 0 {address} 0.0.0.0:* {held}")
+
+    def socket(self, path: str, unit: str | None, **how) -> None:
+        held = self.process(unit, **how) if unit else ""
         self.unix.append(f"u_str LISTEN 0 4096 {path} 362417538 * 0 {held}")
 
     def audit(self, *args: str) -> subprocess.CompletedProcess[str]:
@@ -434,6 +455,96 @@ def test_the_audit_fails_when_another_user_holds_the_gateways_port(tmp_path: Pat
         "audit-listeners: 127.0.0.1:18080 is held by a process that is not lh-gateway.service's: "
         "another user's?\n"
     )
+
+
+def test_the_audit_tells_lh_svcs_units_by_the_unit_their_environment_names(tmp_path: Path) -> None:
+    # Under deploy/bin/lh-svc a unit's processes stay in the SSH session's cgroup, and the gateway binds its own
+    # listeners (no socket unit holds them): lh-svc's LH_SVC_UNIT in a process's environment names its unit, as
+    # gpu-guard reads it, so the gateway's port is the gateway's, and the GPU servers' sockets are judged.
+    host = Listeners(tmp_path)
+    lh = host.runtime / "lh"
+    host.tcp(
+        "127.0.0.1:18080", "lh-gateway.service", "lh-gateway --config gateway.toml", lh_svc=True
+    )
+    host.socket(f"{lh}/gateway.sock", "lh-gateway.service", lh_svc=True)
+    for unit, name in (("lh-engine", "engine"), ("lh-stt", "stt"), ("lh-tts", "tts")):
+        host.socket(f"{lh}/{name}.sock", f"{unit}.service", lh_svc=True)
+    host.tcp("127.0.0.1:631", None)  # another user's
+    done = host.audit("--expect", f"{lh}/engine.sock")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        f"audit-listeners: ok: the box's units hold 4 Unix sockets, all in {host.runtime}, "
+        "and 1 TCP or UDP listeners, all allowed\n"
+    )
+    # And a unit of lh-svc's fails where it would under systemd: on a port, or a socket outside the directory.
+    host.tcp("127.0.0.1:8000", "lh-engine.service", lh_svc=True)
+    host.socket("/tmp/lh-stt.sock", "lh-stt.service", lh_svc=True)
+    done = host.audit()
+    assert done.returncode == 1
+    assert done.stderr.splitlines() == [
+        "audit-listeners: lh-engine.service listens on tcp 127.0.0.1:8000",
+        f"audit-listeners: lh-stt.service listens on a socket outside {host.runtime}: /tmp/lh-stt.sock",
+    ]
+
+
+def test_the_audit_accepts_the_voice_plane_in_the_hosts_namespace_where_in_voicenet_ran_it_there(
+    tmp_path: Path,
+) -> None:
+    # On a host whose kernel refuses unprivileged user namespaces the voice plane runs in the host's network
+    # namespace (LH_VOICENET=host, the preflight's degraded path), and in-voicenet marks its processes so: there
+    # its listeners show, where in its own namespace they do not. Its UDP sockets (the WebRTC candidates, on the
+    # host's interfaces), its loopback TCP listeners and its file sockets are accepted, under either supervisor.
+    host = Listeners(tmp_path)
+    marked = {"LH_VOICENET": "host"}
+    host.tcp("127.0.0.1:17880", "lh-livekit.service", "livekit-server", lh_svc=True, env=marked)
+    host.udp("127.0.0.1:17882", "lh-livekit.service", "livekit-server", lh_svc=True, env=marked)
+    host.udp("10.0.0.5:51234", "lh-voice-worker.service", "lh-voice-worker", env=marked)
+    host.tcp("127.0.0.1:41003", "lh-voice-worker.service", "lh-voice-worker", env=marked)
+    host.socket(
+        "/tmp/pymp-k2j/listener-q8w", "lh-voice-worker.service", env=marked
+    )  # its forkserver's
+    host.tcp("127.0.0.1:18080", "lh-gateway.service", "lh-gateway", lh_svc=True)
+    done = host.audit()
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        f"audit-listeners: ok: the box's units hold 0 Unix sockets, all in {host.runtime}, "
+        "and 1 TCP or UDP listeners, all allowed; the voice plane runs in the host's network namespace "
+        "(LH_VOICENET=host) with 5 listeners: 2 UDP sockets, 2 loopback TCP listeners and 1 file socket\n"
+    )
+    # Unmarked, the same listeners are refused; marked, a voice-plane listener beyond what the degraded path
+    # allows (TCP off loopback, an abstract socket, which any user of the host's namespace reaches) is refused,
+    # and a unit of the GPU node's is no voice plane, marked or not.
+    host = Listeners(tmp_path / "unmarked")
+    host.tcp("127.0.0.1:17880", "lh-livekit.service", "livekit-server", lh_svc=True)
+    host.udp("10.0.0.5:51234", "lh-voice-worker.service", "lh-voice-worker")
+    host.tcp("0.0.0.0:7881", "lh-livekit.service", "livekit-server", env=marked)
+    host.socket("@livekit-rtc", "lh-voice-worker.service", env=marked)
+    host.tcp("127.0.0.1:8000", "lh-engine.service", env=marked)
+    done = host.audit()
+    assert done.returncode == 1
+    assert done.stderr.splitlines() == [
+        "audit-listeners: lh-livekit.service listens on tcp 127.0.0.1:17880",
+        "audit-listeners: lh-voice-worker.service listens on udp 10.0.0.5:51234",
+        "audit-listeners: lh-livekit.service listens on tcp 0.0.0.0:7881",
+        "audit-listeners: lh-engine.service listens on tcp 127.0.0.1:8000",
+        f"audit-listeners: lh-voice-worker.service listens on an abstract socket outside {host.runtime}: "
+        "@livekit-rtc",
+    ]
+
+
+def test_in_voicenet_marks_what_it_runs_in_the_hosts_namespace(tmp_path: Path) -> None:
+    lh = tmp_path / "lh"
+    lh.mkdir()
+    (lh / "voicenet.pid").write_text("host\n")
+    show = [sys.executable, "-c", "import os; print(os.environ.get('LH_VOICENET'))"]
+    done = subprocess.run(
+        ["bash", str(DEPLOY / "bin" / "in-voicenet"), *show],
+        env={k: v for k, v in os.environ.items() if k != "LH_VOICENET"}
+        | {"XDG_RUNTIME_DIR": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0 and done.stdout.strip() == "host", done.stderr
 
 
 def test_the_gateways_socket_unit_listens_where_gateway_toml_does() -> None:

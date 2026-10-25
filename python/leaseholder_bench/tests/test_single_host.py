@@ -91,6 +91,39 @@ while True:
 """
 
 
+SMOKE_SERVER = """\
+import json, os, socketserver, sys
+from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+# A GPU server for smoke.sh on its Unix socket: the engine's model and reply, the STT's transcript, the TTS's audio.
+class Handler(BaseHTTPRequestHandler):
+    def reply(self, body, kind="application/json"):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    def do_GET(self):
+        self.reply({"data": [{"id": "qwen"}]} if self.path == "/v1/models" else b"", "text/plain")
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.path == "/v1/audio/speech":
+            self.reply(b"RIFF" + bytes(64), "audio/wav")
+        elif self.path == "/v1/audio/transcriptions":
+            self.reply({"text": "What is the capital of France?"})
+        else:
+            self.reply({"choices": [{"message": {"content": "Paris."}}]})
+    def log_message(self, *args):
+        pass
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+server = Server(sys.argv[1], Handler)
+Path(os.environ["READY"]).write_text(str(os.getpid()))
+server.serve_forever()
+"""
+
+
 @pytest.fixture
 def host(tmp_path: Path) -> dict:
     """A home with units in ~/.config/systemd/user, the shims first on PATH, and the services' scripts."""
@@ -677,3 +710,86 @@ def test_gpu_guard_tells_the_supervisors_units_from_foreign_processes(tmp_path: 
         for process in (ours, theirs):
             process.kill()
             process.wait()
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="the audit reads /proc (Linux)")
+def test_block_0s_smoke_test_passes_its_listener_audit_under_lh_svc(host: dict) -> None:
+    # Block 0 runs the box's smoke.sh, whose listener audit reads the host's listeners (a stand-in ss lists them,
+    # held by the units' real processes) and attributes each to its unit by /proc. Under lh-svc every process is in
+    # the session's cgroup and the gateway binds 127.0.0.1:18080 itself; the voice plane runs in the host's network
+    # namespace (the kernel refuses user namespaces: voicenet-holder with LH_VOICENET=host, in-voicenet).
+    units, home, py = host["units"], host["home"], sys.executable
+    run = Path(host["env"]["XDG_RUNTIME_DIR"])
+    (run / "lh").mkdir(mode=0o700)
+    (home / "smoke_server.py").write_text(SMOKE_SERVER)
+    for name in ("engine", "stt", "tts"):
+        (units / f"lh-{name}.service").write_text(
+            f"[Unit]\nPartOf=leaseholder.target\n[Service]\nEnvironment=READY=%h/lh-{name}.ready\n"
+            f"ExecStart={py} %h/smoke_server.py %t/lh/{name}.sock\n"
+            f"ExecStartPost={py} %h/wait.py %h/lh-{name}.ready\n"
+        )
+    (units / "leaseholder.target").write_text(
+        "[Unit]\nWants=lh-stt.service lh-tts.service lh-engine.service\n"
+    )
+    (units / "lh-voicenet.service").write_text(
+        f"[Service]\nEnvironment=LH_VOICENET=host\nExecStart=/bin/bash {BIN}/voicenet-holder %t/lh/voicenet.pid\n"
+        f"ExecStartPost={py} %h/wait.py %t/lh/voicenet.pid\n"
+    )
+    for name in ("gateway", "livekit", "voice-worker"):
+        door = "" if name == "gateway" else f"{BIN}/in-voicenet "
+        (units / f"lh-{name}.service").write_text(
+            f"[Unit]\nAfter=lh-voicenet.service\n[Service]\nEnvironment=READY=%h/lh-{name}.ready\n"
+            f"ExecStart={door}{py} %h/svc.py {name}\nExecStartPost={py} %h/wait.py %h/lh-{name}.ready\n"
+        )
+    started = ("leaseholder.target", "lh-voicenet", "lh-gateway", "lh-livekit", "lh-voice-worker")
+    try:
+        for unit in started:
+            done = ctl(host, "--user", "start", unit)
+            assert done.returncode == 0, (unit, done.stderr)
+        pid = {name: (home / f"lh-{name}.ready").read_text() for name in ("engine", "stt", "tts")}
+        pid |= {
+            name: (home / f"lh-{name}.ready").read_text()
+            for name in ("gateway", "livekit", "voice-worker")
+        }
+        held = lambda name: f'users:(("python3",pid={pid[name]},fd=3))'  # noqa: E731
+        listed = home / "listed"
+        listed.mkdir()
+        (listed / "inet").write_text(
+            f"tcp LISTEN 0 1024 127.0.0.1:18080 0.0.0.0:* {held('gateway')}\n"
+            f"tcp LISTEN 0 4096 127.0.0.1:17880 0.0.0.0:* {held('livekit')}\n"
+            f"udp UNCONN 0 0 127.0.0.1:17882 0.0.0.0:* {held('livekit')}\n"
+            f"udp UNCONN 0 0 10.0.0.5:51234 0.0.0.0:* {held('voice-worker')}\n"
+        )
+        (listed / "unix").write_text(
+            "".join(
+                f"u_str LISTEN 0 4096 {run}/lh/{name}.sock 3624 * 0 {held(name)}\n"
+                for name in ("engine", "stt", "tts")
+            )
+        )
+        tools = home / "tools"
+        tools.mkdir()
+        (tools / "ss").write_text(
+            f"#!/bin/sh\ncase $2 in -lntup) cat {listed}/inet ;; -lxp) cat {listed}/unix ;; esac\n"
+        )
+        (tools / "nvidia-smi").write_text("#!/bin/sh\necho '4321 MiB, 40960 MiB'\n")
+        for tool in tools.iterdir():
+            tool.chmod(0o755)
+        env = os.environ | host["env"] | {"PATH": f"{tools}{os.pathsep}{host['env']['PATH']}"}
+        smoke = subprocess.run(
+            ["bash", str(REPO / "deploy" / "phastform" / "smoke.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert smoke.returncode == 0, smoke.stdout + smoke.stderr
+        audit = next(
+            line for line in smoke.stdout.splitlines() if line.startswith("listener audit")
+        )
+        assert (
+            f"ok: the box's units hold 3 Unix sockets, all in {run}, and 1 TCP or UDP listeners, all allowed; "
+            "the voice plane runs in the host's network namespace (LH_VOICENET=host) with 3 listeners"
+        ) in audit
+        assert smoke.stdout.rstrip().endswith("smoke: ok")
+    finally:
+        ctl(host, "--user", "stop", *reversed(started))

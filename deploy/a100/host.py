@@ -1156,20 +1156,10 @@ def preflight(
         )
     if host.get("userns") is True:
         add("User namespaces", "ok", "the voice plane in its own network namespace")
-    elif supervisor(host) == "systemd":
-        # Under systemd the voice plane's processes are lh-*.service units', whose listeners in the host's namespace
-        # smoke.sh's listener audit (deploy/bin/audit-listeners) refuses, and block 0 with it.
-        add(
-            "User namespaces",
-            "refused",
-            "refused" if host.get("userns") is False else "not checked (no unshare or ip)",
-            "the voice plane would run in the host's network namespace, where smoke.sh's listener audit refuses "
-            "LiveKit's and the voice worker's listeners: allow unprivileged user namespaces (Ubuntu 24.04: sudo sysctl "
-            "-w kernel.apparmor_restrict_unprivileged_userns=0, then bootstrap.sh stage again), or, with no sudo, run "
-            "the units under deploy/bin/lh-svc with the voice plane in the host's namespace, degraded: "
-            "LH_SUPERVISOR=lh-svc bootstrap.sh stage",
-        )
     else:
+        # The voice plane in the host's namespace, under either supervisor: smoke.sh's listener audit
+        # (deploy/bin/audit-listeners) accepts what it holds there by the LH_VOICENET=host that in-voicenet marks its
+        # processes with, and refuses anything else of ours, as it does in the namespaced path.
         public = _public_addresses()
         add(
             "User namespaces",
@@ -1181,8 +1171,9 @@ def preflight(
                 if public
                 else ""
             )
-            + "; the listener audit cannot attribute listeners to units under lh-svc (their processes' cgroups "
-            "are the session's), so the check here is the named addresses, not the audit",
+            + "; smoke.sh's listener audit accepts its UDP sockets, loopback TCP listeners and file sockets there "
+            "(LH_VOICENET=host) and nothing else of ours; allowing unprivileged user namespaces gives it its own "
+            "(Ubuntu 24.04: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0, then bootstrap.sh stage)",
             "none on latency; isolation differs",
         )
     # smoke.sh (block 0) audits the listening sockets with ss on the GPU node.
