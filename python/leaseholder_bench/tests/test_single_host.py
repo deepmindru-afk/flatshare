@@ -405,6 +405,42 @@ def test_a_broken_unit_link_or_a_missing_unit_stops_only_itself(host: dict) -> N
     assert gone(pid) and ctl(host, "--user", "is-active", "svc-a").stdout.strip() == "inactive"
 
 
+def test_a_stop_cancels_a_start_it_meets_rather_than_wait_for_it(host: dict) -> None:
+    # A start whose server never becomes ready waits up to its TimeoutStartSec; a stop meanwhile ends it at once, as
+    # systemd's cancels the start job, rather than waiting the start out.
+    py, units = sys.executable, host["units"]
+    (units / "slow.service").write_text(
+        f"[Service]\nExecStart={py} -c 'import time; time.sleep(120)'\n"
+        f"ExecStartPost={py} %h/wait.py %h/never.ready\nTimeoutStartSec=60\n"
+    )
+    starting = subprocess.Popen(
+        ["systemctl", "--user", "start", "slow.service"],
+        env=os.environ | host["env"],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 10
+        while (
+            ctl(host, "--user", "is-active", "slow").stdout.strip() != "activating"
+            and time.time() < deadline
+        ):
+            time.sleep(0.05)
+        begun = time.monotonic()
+        done = ctl(host, "--user", "stop", "slow.service")
+        assert done.returncode == 0, done.stderr
+        assert time.monotonic() - begun < 15
+        assert (
+            starting.wait(timeout=15) == 1
+            and "Job for slow.service failed" in starting.stderr.read()
+        )
+        assert ctl(host, "--user", "is-active", "slow").stdout.strip() == "inactive"
+    finally:
+        starting.kill()
+        starting.wait()
+        ctl(host, "--user", "stop", "slow.service")
+
+
 def test_the_shims_answer_what_the_scripts_ask(host: dict) -> None:
     assert ctl(host, "--user", "daemon-reload").returncode == 0
     assert ctl(host, "--user", "enable", "-q", "svc-a.service").returncode == 0

@@ -667,6 +667,8 @@ def start(names: list[str]) -> int:
         if needs & failed:
             failed.add(name)
             continue
+        # The lock covers the decision and the runner's spawn, not the wait: a stop meanwhile takes the lock and
+        # ends the start, as systemd's cancels the start job, rather than waiting out its TimeoutStartSec.
         with locked(name):
             if unit.passive:
                 write_state(name, state="active", since=time.time())
@@ -691,22 +693,23 @@ def start(names: list[str]) -> int:
                     start_new_session=True,
                 )
                 write_state(name, state="activating", runner=runner.pid, main=None, result=None)
-            deadline = time.time() + unit.seconds("TimeoutStartSec", 90.0) + 10
-            while time.time() < deadline:
-                values = read_state(name)
-                gone = runner.poll() is not None if runner else not owned(values, "runner")
-                if started(values) or values.get("state") in ("failed", "inactive") or gone:
-                    break
-                time.sleep(0.05)
-            if not started(read_state(name)):
-                failed.add(name)
-                if name in requested:
-                    print(
-                        f"Job for {name} failed because the control process exited with error code.\n"
-                        f'See "journalctl --user -u {name}" for details.',
-                        file=sys.stderr,
-                    )
-                    status = 1
+        # The wait, unlocked.
+        deadline = time.time() + unit.seconds("TimeoutStartSec", 90.0) + 10
+        while time.time() < deadline:
+            values = read_state(name)
+            gone = runner.poll() is not None if runner else not owned(values, "runner")
+            if started(values) or values.get("state") in ("failed", "inactive") or gone:
+                break
+            time.sleep(0.05)
+        if not started(read_state(name)):
+            failed.add(name)
+            if name in requested:
+                print(
+                    f"Job for {name} failed because the control process exited with error code.\n"
+                    f'See "journalctl --user -u {name}" for details.',
+                    file=sys.stderr,
+                )
+                status = 1
     return status
 
 
