@@ -79,6 +79,8 @@ The other arms take an earlier arm's winner, so their files are written from its
 
 [`w5-cap-r1.campaign`](w5-cap-r1.campaign) to [`w5-cap-r3.campaign`](w5-cap-r3.campaign) measure calls per GPU: the PRs' 48-token configuration with 4 and with 6 callers beside the discriminating scenario (`arms/w5-disc-pr-ab48-c4-s24.toml`, `w5-disc-pr-ab48-c6-s24.toml`), and voice alone with as many callers, the SLO's references (`w5-a1-voice-c4.toml`, `w5-a1-voice-c6.toml`), over three of W5's samples of the agents. Each round swaps the order of its two engine groups, and of the caller counts within each.
 
+[`fb-r1.campaign`](fb-r1.campaign) to [`fb-r5.campaign`](fb-r5.campaign) are FB's rounds: voice alone, the frozen box and the PRs' 48-token configuration again, on the final code, with W5's arm files, W5's five samples of the agents (seeds 11 to 15) and no KV sampler, as W5's points ran, so that each round compares with W5's of the same seed. Each round rotates the three by one place.
+
 The `[admission]` keys are those of `lh-gateway`'s configuration ([its README](../../crates/lh-gateway/README.md)); `lh-bench e2 run` passes the `[gateway]` table through as it is.
 
 ## Two GPU nodes: dedicate vs pool

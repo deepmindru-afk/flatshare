@@ -198,9 +198,14 @@ def test_the_campaigns_name_arm_files_that_load() -> None:
     assert campaigns
     for campaign in campaigns:
         lines = campaign_lines(campaign)
+        # The two settings campaign.sh reads, each at most once: the agents' seed and the KV sampler's interval.
         seeds = [line for line in lines if line.startswith("agents-seed")]
         assert len(seeds) <= 1 and all(re.fullmatch(r"agents-seed\s+\d+", s) for s in seeds)
-        for line in (line for line in lines if line not in seeds):
+        sampling = [line for line in lines if line.startswith("kv-sample-s")]
+        assert len(sampling) <= 1 and all(
+            re.fullmatch(r"kv-sample-s\s+\d+(\.\d+)?", s) for s in sampling
+        )
+        for line in (line for line in lines if line not in seeds + sampling):
             arm = load_arm(campaign.parent / line)
             variant = arm.engine.variant
             assert variant == "frozen" or (PHASTFORM / "variants" / variant).is_dir(), line
