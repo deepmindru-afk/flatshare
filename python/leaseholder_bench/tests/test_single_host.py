@@ -107,6 +107,35 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as notify:
 while True:
     time.sleep(0.05)
 """
+LEAVES = """\
+import os, signal, subprocess, sys, time
+from pathlib import Path
+# A main process that leaves a child in its group: at the unit's first start it starts the child, says it is ready
+# (ready.PID) once the child is, and exits with the status sys.argv[1] when the file exit appears; at a later start
+# it says it is ready and serves. The child records each signal it gets in signals, ignores it, and ends itself a
+# minute on.
+home = Path(os.environ["HOME"])
+if sys.argv[1:] == ["child"]:
+    def record(signum, _):
+        with open(home / "signals", "a") as signals:
+            signals.write(signal.Signals(signum).name + "\\n")
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, record)
+    (home / "child.pid").write_text(str(os.getpid()))
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+    sys.exit()
+first = not (home / "child.pid").exists()
+if first:
+    subprocess.Popen([sys.executable, __file__, "child"])
+    while not (home / "child.pid").exists():
+        time.sleep(0.02)
+(home / f"ready.{os.getpid()}").touch()
+while not (first and (home / "exit").exists()):
+    time.sleep(0.05)
+sys.exit(int(sys.argv[1]))
+"""
 
 
 SMOKE_SERVER = """\
@@ -448,6 +477,48 @@ def test_a_runner_reaps_the_orphans_it_adopts_and_no_process_it_started(
     with pytest.raises(ChildProcessError):
         os.waitpid(orphan, os.WNOHANG)  # reaped
     assert started.wait(timeout=5) == 3
+
+
+def journal_times(host: dict, unit: str, message: str) -> list[float]:
+    """When the unit's journal logged each line holding ``message``."""
+    out = ctl(host, "-u", unit, "-o", "short-unix", tool="journalctl").stdout
+    return [float(line.split(" ", 1)[0]) for line in out.splitlines() if message in line]
+
+
+@pytest.mark.parametrize("status", [1, 0], ids=["restarted", "started-afresh"])
+def test_a_unit_is_deactivating_while_what_is_left_of_its_group_is_ended(
+    host: dict, status: int
+) -> None:
+    # As under systemd: from the main process's exit until what is left of its group has been ended, the unit is
+    # deactivating, not active, and a start meanwhile waits for that to be over: it then joins the restart that
+    # follows a failure, or, after an exit with status 0 (Restart=on-failure), starts the unit afresh. lh-svc said
+    # active, and such a start returned at once, the unit not running. Here the child ignores its SIGINT for 3 s.
+    home, py = host["home"], sys.executable
+    (home / "leaves.py").write_text(LEAVES)
+    (host["units"] / "leaves.service").write_text(
+        f"[Service]\nExecStart={py} %h/leaves.py {status}\n"
+        f"ExecStartPost={py} %h/wait.py %h/ready.${{MAINPID}}\n"
+        "KillSignal=SIGINT\nTimeoutStopSec=3\nRestart=on-failure\nRestartSec=0.1\n"
+    )
+    try:
+        assert ctl(host, "--user", "start", "leaves.service").returncode == 0
+        (home / "exit").touch()  # the main process exits, leaving the child
+        deadline = time.monotonic() + 10
+        while not (exited := journal_times(host, "leaves", "Main process exited")):
+            assert time.monotonic() < deadline, "the main process did not exit"
+            time.sleep(0.05)
+        # Not active: is-active exits 3, as systemd's does for a unit deactivating.
+        state = ctl(host, "--user", "is-active", "leaves.service")
+        assert (state.returncode, state.stdout.strip()) == (3, "deactivating")
+        done = ctl(host, "--user", "start", "leaves.service")
+        took = time.time() - exited[0]
+        assert done.returncode == 0, done.stderr
+        # It returned once that was over, TimeoutStopSec on, with the next main process ready: not at once, nor by
+        # starting a runner of its own beside the one deactivating.
+        assert took >= 3 and len(list(home.glob("ready.*"))) == 2, took
+        assert ctl(host, "--user", "is-active", "leaves.service").stdout.strip() == "active"
+    finally:
+        ctl(host, "--user", "stop", "leaves.service")
 
 
 def test_a_start_whose_server_dies_fails_at_once_not_at_its_timeout(host: dict) -> None:

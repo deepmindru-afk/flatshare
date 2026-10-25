@@ -30,10 +30,11 @@ LH_SVC_UNIT=UNIT in their environment where systemd would put them in the unit's
 the unit's journal with UTC times, restarts it as Restart says and stops it on SIGTERM. When the main process
 exits on its own, what is left of its group is ended as a stop ends it (KillSignal, then SIGKILL after
 TimeoutStopSec) before ExecStopPost and any restart, as systemd ends what is left of the unit's cgroup: an engine
-core that outlived its server would otherwise hold the GPU, and the restart's gpu-guard refuse to start beside it. On
-Linux the runner is the subreaper of the unit's processes, and reaps those whose parent exited before them, as systemd's
-manager does: left to init, which in a container may reap none, each would stay a member of its group as a zombie, and
-every restart and stop would wait out TimeoutStopSec and more. `start` returns
+core that outlived its server would otherwise hold the GPU, and the restart's gpu-guard refuse to start beside it. The
+unit is deactivating meanwhile, as systemd's is, and a start waits for that to be over. On Linux the runner is the
+subreaper of the unit's processes, and reaps those whose parent exited before them, as systemd's manager does: left to
+init, which in a container may reap none, each would stay a member of its group as a zombie, and every restart and stop
+would wait out TimeoutStopSec and more. `start` returns
 once a unit's ExecStartPost commands have succeeded, as systemd's does, and fails as systemd's does when it cannot;
 `stop` returns only once every process it stops has exited: the unit's own (ExecStop, then KillSignal, then SIGKILL
 after TimeoutStopSec, the signals and ExecStopPost also when ExecStop fails or cannot run, the unit then ending
@@ -637,6 +638,9 @@ class Runner:
                 write_state(self.name, state="failed", result="exit-code", runner=None, main=None)
             return None
         status = self.main.returncode
+        # Deactivating, as systemd's unit is while what is left of its cgroup is ended: not active, and a start waits
+        # for it. Written before the journal's line, as a stop's is: who reads the line finds the unit deactivating.
+        write_state(self.name, state="deactivating")
         self.say(f"Main process exited, status={status}")
         self.terminate(unit)  # what is left of its group
         self.control(unit, "ExecStopPost", env, time.time() + 30)
@@ -780,13 +784,19 @@ def start(names: list[str]) -> int:
         if needs & failed:
             failed.add(name)
             continue
-        # The lock covers the decision and the runner's spawn, not the wait: a stop meanwhile takes the lock and
-        # ends the start, as systemd's cancels the start job, rather than waiting out its TimeoutStartSec.
+        # The lock covers the decision and the runner's spawn, not the start's wait: a stop meanwhile takes the lock
+        # and ends the start, as systemd's cancels the start job, rather than waiting out its TimeoutStartSec.
         with locked(name):
             if unit.passive:
                 write_state(name, state="active", since=time.time())
                 continue
-            state = current(name)
+            # While what is left of the unit's last run is ended (deactivating), the decision waits, as systemd's start
+            # job does: the start then joins the restart that follows, or starts the unit afresh. Locked, so that a
+            # stop meanwhile ends what the start began rather than see it undone; at most the runner's longest,
+            # TimeoutStopSec, the SIGKILL's KILLED_GONE_S and ExecStopPost's 30 s, and a margin.
+            settled = time.time() + unit.seconds("TimeoutStopSec", 90.0) + KILLED_GONE_S + 40
+            while (state := current(name)) == "deactivating" and time.time() < settled:
+                time.sleep(0.05)
             if state == "active":
                 continue
             # Started is having reached active since this request, as systemd's start of a unit that exits
@@ -797,7 +807,8 @@ def start(names: list[str]) -> int:
                 return values.get("state") == "active" or (values.get("since") or 0) >= asked
 
             runner = None
-            if state != "activating":
+            # A live runner's start, or its deactivation still past its time: joined, never a second runner.
+            if state not in ("activating", "deactivating"):
                 runner = subprocess.Popen(
                     [sys.executable, os.path.abspath(__file__), "run", name],
                     stdin=subprocess.DEVNULL,
