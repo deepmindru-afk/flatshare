@@ -20,9 +20,9 @@ summary leaves them out. They draw their lines and pauses from a generator of th
 measured turns after them are those of the same call without them.
 
 A turn fails when the agent does not answer within ``reply_timeout``, or does not stop speaking: its
-line in turns.jsonl has an ``error`` and keeps what the turn measured before. In the summary a
-sample that the timeout cut short counts as censored at the timeout, never as missing, so that a
-failure raises a percentile rather than leaving it out.
+line in turns.jsonl has an ``error`` and keeps what the turn measured before, and the turns after it
+play what they would have. In the summary a sample that the timeout cut short counts as censored at
+the timeout, never as missing, so that a failure raises a percentile rather than leaving it out.
 
 With ``--save-audio`` each caller also keeps the frames it already handles, what it sent and the
 agent's audio as received, and once every call has ended writes them as ``call-<i>.wav`` with the
@@ -149,9 +149,15 @@ class Caller:
 
     async def turn(self, number: int, warmup: random.Random | None = None) -> dict[str, Any]:
         """One turn of the call; a warm-up turn draws its line from ``warmup`` and is never
-        interrupted."""
+        interrupted. The turn draws its interruption with its line, before either is played, so
+        that a turn that fails takes as many draws as one answered: the turns after it play the
+        lines and interruptions of the same call without the failure."""
         config, audio = self.config, self.agent_audio
         clip = (warmup or self.rng).choice(self.corpus.turns)
+        interruption, delay = None, 0.0
+        if warmup is None and self.rng.random() < config.barge_in:
+            delay = self.rng.uniform(*config.barge_in_delay)
+            interruption = self.rng.choice(self.corpus.barge_ins)
         at = self.moments[number] = {}
         played = await self.microphone.play(clip)
         at |= {"start": played["start"], "speech_end": played["speech_end"]}
@@ -167,10 +173,8 @@ class Caller:
             "barge_in": False,
         }
         try:
-            if warmup is None and self.rng.random() < config.barge_in:
-                delay = self.rng.uniform(*config.barge_in_delay)
+            if interruption is not None:
                 await asyncio.sleep(max(0.0, reply + delay - time.monotonic()))
-                interruption = self.rng.choice(self.corpus.barge_ins)
                 barged = await self.microphone.play(interruption)
                 onset = barged["onset"]
                 at |= {"barge_in": onset, "barge_in_speech_end": barged["speech_end"]}
