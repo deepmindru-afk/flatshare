@@ -317,10 +317,12 @@ def started_at(pid: object) -> str | None:
     if not isinstance(pid, int) or not pid:
         return None
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
+        # Bytes, read past the name's last ") ": the kernel keeps 15 bytes of a name, which may end inside a
+        # character, and a name may hold ") " itself.
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
     except OSError:
         return None
-    return stat.rsplit(") ", 1)[1].split()[19]
+    return stat.rsplit(b") ", 1)[1].split()[19].decode()
 
 
 def write_state(name: str, **values: object) -> None:
@@ -345,9 +347,8 @@ def alive(pid: int | None) -> bool:
         return False
     except PermissionError:
         return True
-    try:  # a zombie child of a runner that is gone is not alive
-        with open(f"/proc/{pid}/stat") as stat:
-            return stat.read().split(") ", 1)[1][0] != "Z"
+    try:  # a zombie child of a runner that is gone is not alive (its state read as started_at reads its start)
+        return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b") ", 1)[1][:1] != b"Z"
     except OSError:
         return True
 

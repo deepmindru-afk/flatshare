@@ -627,6 +627,45 @@ def test_a_state_file_from_another_boot_or_a_reused_pid_is_not_a_running_unit(ho
     assert ctl(host, "--user", "is-active", "box.target").stdout.strip() == "inactive"
 
 
+@pytest.mark.skipif(
+    not Path("/proc/sys/kernel/random/boot_id").exists(), reason="reads /proc (Linux)"
+)
+def test_lh_svc_reads_a_units_process_whose_name_the_kernel_cut_inside_a_character(
+    host: dict,
+) -> None:
+    # The kernel keeps 15 bytes of a process's name (PR_SET_NAME's, a title's), which can end inside a character:
+    # /proc/PID/stat is then not UTF-8, and lh-svc raised reading whether a unit's process lives and when it started.
+    # A name may hold ") " too, which lh-svc took for the name's end, and so a live process for a zombie.
+    state = Path(host["env"]["XDG_STATE_HOME"]) / "lh-svc"
+    state.mkdir(parents=True, exist_ok=True)
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    program = (
+        "import ctypes, sys, time\n"
+        "ctypes.CDLL(None).prctl(15, bytes.fromhex(sys.argv[1]), 0, 0, 0)  # PR_SET_NAME\n"
+        "time.sleep(60)"
+    )
+    for name in (("abcdefghijklmn" + chr(0xE9)).encode(), b"x) Z y"):  # 16 bytes: é is two
+        named = subprocess.Popen([sys.executable, "-c", program, name.hex()])
+        try:
+            deadline = time.monotonic() + 10
+            while Path(f"/proc/{named.pid}/comm").read_bytes() != name[:15] + b"\n":
+                assert time.monotonic() < deadline, "the process never took its name"
+                time.sleep(0.02)
+            stat = Path(f"/proc/{named.pid}/stat").read_bytes()
+            started = stat.rsplit(b") ", 1)[1].split()[19].decode()
+            # The runner of a unit, as its state names it: alive, of this boot, started when it did.
+            (state / "named.service.json").write_text(
+                json.dumps(
+                    {"state": "active", "runner": named.pid, "runner_start": started, "boot": boot}
+                )
+            )
+            done = ctl(host, "--user", "is-active", "named.service")
+            assert (done.returncode, done.stdout.strip()) == (0, "active"), (name, done.stderr)
+        finally:
+            named.kill()
+            named.wait()
+
+
 def test_a_broken_unit_link_or_a_missing_unit_stops_only_itself(host: dict) -> None:
     # A stop reads every unit for what is PartOf or BindsTo the units it stops: one link that dangles there (an earlier
     # tenant's, or into a node directory since deleted) fails no stop of the others, and a unit asked for that does
