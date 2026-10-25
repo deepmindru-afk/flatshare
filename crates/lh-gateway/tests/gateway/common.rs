@@ -63,6 +63,11 @@ pub enum Script {
         chunk: Bytes,
         gap: Duration,
     },
+    /// `text/event-stream`: the chunks at once, then nothing more until the response is dropped, as an engine
+    /// still working on its next token sends.
+    Quiet {
+        chunks: Vec<Bytes>,
+    },
     /// JSON, but the response headers come only after this delay.
     Slow(Duration),
     /// A body of `content_type`: the chunks, `gap` apart, then the connection breaks, as a killed engine's does.
@@ -356,6 +361,18 @@ async fn answer(State(state): State<Arc<MockState>>, request: Request) -> Respon
                 },
             );
             ([(CONTENT_TYPE, content_type)], Body::from_stream(chunks)).into_response()
+        }
+        Script::Quiet { chunks } => {
+            let chunks = stream::unfold(
+                (chunks.into_iter(), guard),
+                |(mut chunks, guard)| async move {
+                    match chunks.next() {
+                        Some(chunk) => Some((Ok::<_, Infallible>(chunk), (chunks, guard))),
+                        None => std::future::pending().await,
+                    }
+                },
+            );
+            event_stream(Body::from_stream(chunks))
         }
         Script::Endless { chunk, gap } => {
             let chunks = stream::unfold(guard, move |guard| {
