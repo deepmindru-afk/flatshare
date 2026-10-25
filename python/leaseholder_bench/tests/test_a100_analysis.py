@@ -147,3 +147,25 @@ def test_a_report_says_what_its_records_lack(tmp_path: Path) -> None:
     assert "| block1/frozen-kv-1 | kv | 1600 | 1700 |" in text
     assert "## 4. E2 within the A100\n\nNot measured: no E2 point" in text
     assert "## 5. Across cards (different hardware)" in text
+
+
+def test_the_core_section_reads_the_core_rounds_alone(tmp_path: Path) -> None:
+    # §4 is the core's E2 within the A100: its rounds a100-r1 to -r5, not the optional arms' campaigns, whose names
+    # also begin a100-r (a100-resubmit-r3 to -r5); A' (a100-aprime-*) and C' have their own.
+    host = tmp_path / "host"
+    probe_runs(host / "runs" / "a100")
+    for campaign, label, share in (
+        ("a100-r1", "frozen", 0.12),
+        ("a100-r2", "frozen", 0.14),
+        ("a100-resubmit-r3", "stock, preempt-resubmit", 0.50),
+        ("a100-aprime-r1", "the box's pool", 0.18),
+    ):
+        point = host / "results" / "e2" / campaign / "w5-disc-frozen-s24"
+        write(point / "run.json", json.dumps({"arm": {"label": label}}))
+        write(point / "summary.json", json.dumps({"kv": {"running_share": share}}))
+    text = analysis.report(
+        host, tmp_path / "corpus", tmp_path / "no-lh-sim", tmp_path / "out", None
+    ).read_text()
+    section = text.split("## 4. E2 within the A100", 1)[1].split("## 5.", 1)[0]
+    assert "- frozen: 12%, 14%" in section
+    assert "preempt-resubmit" not in section and "the box's pool" not in section

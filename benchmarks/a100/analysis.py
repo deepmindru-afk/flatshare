@@ -13,7 +13,7 @@ deploy/a100/pull.sh copies them.
    GPU, CPU and computed shares of the prompt tokens.
 3. The probes (probe_results.py): every run, then the KV case's wait and the prefill case's token gap on stock and on
    the PRs' values, and the calls' tail at each stock setting, beside the forecast and the box.
-4. E2 within the A100: `lh-bench e2 report` over the core's points (results/e2/a100-r*) into OUT/e2, its frontier
+4. E2 within the A100: `lh-bench e2 report` over the core's points (results/e2/a100-r1 to -r5) into OUT/e2, its frontier
    quoted, and each configuration's measured running share against the forecast's.
 5. Across cards: the regime coordinates the box measured and the forecast gives the A100, beside the A100's measured
    running share, labeled different hardware.
@@ -288,7 +288,8 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
     else:
         lines.append("Not measured: no probe block (runs/a100/block1-3).")
     lines += ["", "## 4. E2 within the A100", ""]
-    points = sorted(p.parent for p in host.glob("results/e2/a100-r*/*/run.json"))
+    # The core's rounds alone (a100-r1 to -r5): the optional arms' campaigns begin a100- too (a100-resubmit-r3 ...).
+    points = sorted(p.parent for p in host.glob("results/e2/a100-r[0-9]*/*/run.json"))
     if points:
         shares = running_shares(points)
         if lh_bench is not None:
@@ -308,7 +309,7 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
             for label, values in shares.items()
         ] or ["- Not measured: no point's summary.json has a running share (kv.running_share)."]
     else:
-        lines.append("Not measured: no E2 point (results/e2/a100-r*).")
+        lines.append("Not measured: no E2 point (results/e2/a100-r1 to -r5).")
     lines += [
         "",
         "## 5. Across cards (different hardware)",
