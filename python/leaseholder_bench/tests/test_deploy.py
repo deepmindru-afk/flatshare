@@ -471,3 +471,13 @@ def test_smgs_arm_listens_on_no_tcp_port_of_cyans_network() -> None:
     assert smg_arms
     for arm in smg_arms:
         assert 'upstream = "unix:/run/user/1007/lh/smg.sock"' in arm.read_text(), arm.name
+
+
+def test_the_gpu_nodes_servers_keep_idle_connections_for_60_s() -> None:
+    # Through the tunnel each new connection is a new SSH session, so the servers keep theirs between turns.
+    systemd = DEPLOY / "phastform" / "systemd"
+    for unit in ("lh-engine", "lh-stt"):
+        text = (systemd / f"{unit}.service").read_text()
+        assert "Environment=VLLM_HTTP_TIMEOUT_KEEP_ALIVE=60" in text.splitlines(), unit
+    [start] = exec_lines((systemd / "lh-tts.service").read_text(), "ExecStart")
+    assert "--timeout-keep-alive 60" in start
