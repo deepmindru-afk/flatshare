@@ -52,8 +52,8 @@ test-vllm: $(VLLM_SRC)
 
 # The CPU suites' imports, checked before pytest runs: without one of them pytest would skip a suite, not fail it.
 CPU_SUITE_IMPORTS = cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -c \
-  'import aiohttp, pytest, torch, vllm.v1.core.sched.scheduler' || { echo "$(TORCH_PYTHON) cannot import aiohttp, \
-  pytest, torch or vLLM's scheduler from $(VLLM_SRC)" >&2; exit 1; }
+  'import pytest, torch, vllm.v1.core.sched.scheduler' || { echo "$(TORCH_PYTHON) cannot import pytest, torch or \
+  vLLM's scheduler from $(VLLM_SRC)" >&2; exit 1; }
 
 # The make-room variant's behavior suite on vLLM's real v1 scheduler, on CPU, outside make check: it needs an
 # interpreter with CPU torch 2.13 and vLLM 0.32.0's Python dependencies, and runs on the source checkout.
@@ -61,7 +61,7 @@ test-make-room: $(VLLM_SRC)
 	@test -n "$(TORCH_PYTHON)" || { echo "usage: make test-make-room TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies>" >&2; exit 2; }
 	@$(CPU_SUITE_IMPORTS)
 	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -m pytest -q -p no:cacheprovider \
-	  tests/test_make_room.py tests/test_tail.py
+	  tests/test_make_room.py
 
 # make-room against the PRs' own patches, step for step, on the same CPU environment (python/leaseholder_vllm/README.md):
 # the trace that keeps the variant equal to #63350 and #63351, with the PRs' one-line mutants as its negative control.

@@ -29,7 +29,7 @@ def model(tmp_path_factory) -> str:
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """With LH_NO_SKIPS set, as CI's make-room job sets it, any skipped test fails the session. The CPU suites skip
-    only when their environment lacks torch, aiohttp or vLLM's scheduler, and a suite that skips checks nothing."""
+    when their environment lacks torch or vLLM's scheduler, and a suite that skips checks nothing."""
     if not os.environ.get("LH_NO_SKIPS"):
         return
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
