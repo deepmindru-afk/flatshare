@@ -110,7 +110,7 @@ The configurations the docs' tables report, by the arm file each ran from and th
 | 4 and 6 callers: #63350 + #63351, a 48-token window | | `w5-disc-pr-ab48-c4-s24`, `w5-disc-pr-ab48-c6-s24`: w5-cap-r1 to w5-cap-r3 | |
 | 4 and 6 callers: voice alone | | `w5-a1-voice-c4`, `w5-a1-voice-c6`: w5-cap-r1 to w5-cap-r3 | |
 
-The points on two GPU nodes (PLAN §3.4: a voice node and an agent node, against two pooled nodes under tuned stock and under Leaseholder) never ran: no second GPU is free before v1.0. Their arm files and campaigns, with the code that runs them (the gateway's `[nodes]` and `[placement]`, the voice worker's `LH_NODES`, `lh-bench e2 run`'s points on several nodes and `campaign.sh`'s several GPU nodes), are on the `two-node` branch.
+The points on two GPU nodes (PLAN §3.4: a voice node and an agent node, against two pooled nodes on tuned vLLM and two running arm 9, make-room with the lifecycle policy) never ran: no second GPU is free before v1.0. Their arm files and campaigns, with the code that runs them (the gateway's `[nodes]` and `[placement]`, the voice worker's `LH_NODES`, `lh-bench e2 run`'s points on several nodes and `campaign.sh`'s several GPU nodes), are on the `two-node` branch.
 
 ## Results
 

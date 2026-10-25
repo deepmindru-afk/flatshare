@@ -5,7 +5,7 @@ How Leaseholder's measurements were made. Every experiment runs on one frozen bo
 | # | Experiment | Question | State |
 |---|---|---|---|
 | E0 | **The tier cost model** | What does resuming an agent turn cost from the GPU cache, from host RAM and recomputed? | Done ([BENCHMARKS.md](BENCHMARKS.md#tier-cost-model-resuming-an-agent-turn-e0)); `lh-core` carries the fits |
-| E2 | **Voice under agent load** | How close does each configuration an operator can deploy bring the voice tail to its SLO, at what cost to background agents, and what does each mechanism of Leaseholder's arm 9 contribute? | Done on one GPU node; the two-node points never ran, and their code is parked on the `two-node` branch |
+| E2 | **Voice under agent load** | How close does each configuration an operator can deploy bring the voice tail to its SLO, at what cost to background agents, and what does each mechanism of arm 9 (make-room with the lifecycle policy) contribute? | Done on one GPU node; the two-node points never ran, and their code is parked on the `two-node` branch |
 | E1 | **Parking** | How much of the gap between LRU plus CPU offload and a clairvoyant reference does each level of lifecycle information close, on resume latency? | Done in the simulator: negative at the median, and for the information a deployment has |
 | E3 | **The background tier's cost of make-room** | What does make-room take from the agents, and through which rule: the budget cap's hold on their prefill, or the KV preemption's victims and their restores? | Done on W5's points ([BENCHMARKS.md](BENCHMARKS.md#e3-what-make-room-takes-from-the-agents)), from the engine's own counts; what a victim recomputes when it resumes is not measured |
 
