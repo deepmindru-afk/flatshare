@@ -999,6 +999,29 @@ def test_lower_priority_prefill_sits_out_a_requests_first_tokens(module, model, 
     assert all(tokens["decode"] == tokens["voice"] == 1 for tokens in steps)
 
 
+def test_under_async_scheduling_the_first_tokens_hold_as_many_steps(module, model):
+    """As the engine runs on the frozen box, a step is scheduled before the output of the step before it is processed.
+    The priority-0 request's first tokens count those in flight, so the running priority-2 prefill sits out the steps
+    of its first 4 tokens and goes on in the step of its fifth, as with a synchronous engine."""
+    sched = scheduler(
+        module.AsyncScheduler,
+        model,
+        400,
+        {"budget_cap": True, "budget_cap_tokens": 4},
+        long_prefill_token_threshold=256,
+        max_model_len=4096,
+    )
+    run(sched, request("decode", 40, priority=2, arrival=0))
+    sched.add_request(request("prefill", 3000, priority=2, arrival=1))
+    assert step(sched).num_scheduled_tokens == {"decode": 1, "prefill": 256}
+    sched.add_request(request("voice", 100, priority=0, arrival=2))
+    engine = Pipelined(sched)
+    steps = [engine.step().num_scheduled_tokens for _ in range(5)]
+    assert steps[0] == {"decode": 1, "voice": 100}
+    assert steps[1:4] == [{"decode": 1, "voice": 1}] * 3
+    assert steps[4] == {"decode": 1, "voice": 1, "prefill": 256}
+
+
 def test_the_budget_cap_counts_deferred_frees(module, model):
     """With deferred frees, the blocks of the runner preempted to make room, the latest arrival, are free once the
     step in flight is processed, and the priority-0 request runs after that. It fits meanwhile, as the deferred
