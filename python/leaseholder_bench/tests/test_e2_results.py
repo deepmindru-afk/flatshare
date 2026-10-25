@@ -822,10 +822,15 @@ def test_a_failed_turn_is_censored_and_keeps_its_configuration_off_the_frontier(
     )
 
 
-def test_policy_leaseholder_shows_what_it_deferred_and_what_it_capped(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name", ["leaseholder", "lifecycle"]
+)  # as E2's arm files spell it, and its own
+def test_policy_leaseholder_shows_what_it_deferred_and_what_it_capped(
+    tmp_path: Path, name: str
+) -> None:
     a9 = point(tmp_path, "disc-a9-s24", "9", 3400, 2057)
     run = json.loads((a9 / "run.json").read_text())
-    run["arm"]["gateway"] = {"admission": {"policy": "leaseholder", "headroom_tokens": 1024}}
+    run["arm"]["gateway"] = {"admission": {"policy": name, "headroom_tokens": 1024}}
     (a9 / "run.json").write_text(json.dumps(run))
     counters = {
         'lh_gateway_admission_admitted_total{class="realtime"}': 60,

@@ -124,6 +124,9 @@ ADMISSION_COLUMNS = (
     "realtime_replies",
     "degraded_share",
 )
+LIFECYCLE_POLICY = ("lifecycle", "leaseholder")
+"""The names the gateway's ``[admission] policy`` gives the lifecycle policy: its own, and the one
+E2's arm files spell."""
 WINDOW_COLUMNS = ("fixed_window_tokens_per_s", "fixed_window_s")
 """The background goodput over the calls' first GOODPUT_WINDOW_S, and that window's seconds: fewer for a
 point whose calls lasted less, which frontier.md marks with †."""
@@ -270,7 +273,7 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
     policy = ((arm.get("gateway") or {}).get("admission") or {}).get("policy")
     row |= (
         leaseholder_counts(gateway.get("counters") or {})
-        if policy == "leaseholder"
+        if policy in LIFECYCLE_POLICY
         else dict.fromkeys(ADMISSION_COLUMNS)
     )
     # What frontier.csv leaves out: the corpus, the hardware and the warm-up turns, from which
