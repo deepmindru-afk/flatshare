@@ -156,7 +156,7 @@ def pick_stock(
         (
             str(cap),
             "block2",
-            f"stock{cap}",
+            f"stock{cap}-{cap // 2}",  # by cap and threshold: 2,048/1,024 is not 2,048/0's stock2048
             ("--max-num-batched-tokens", str(cap), "--long-prefill-token-threshold", str(cap // 2)),
         ),
     ]

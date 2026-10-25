@@ -89,7 +89,7 @@ def probe_runs(runs: Path) -> None:
     for prefix, block, p95s in (
         ("frozen-tail", "block1", (1800, 1900)),
         ("stock2048-tail", "block2", (1500, 1700)),
-        ("stock1536-tail", "block2", (1400, 1600)),
+        ("stock1536-768-tail", "block2", (1400, 1600)),
         ("pr-tail", "block3", (300, 340)),
     ):
         for i, p95 in enumerate(p95s, 1):
@@ -169,3 +169,14 @@ def test_the_core_section_reads_the_core_rounds_alone(tmp_path: Path) -> None:
     section = text.split("## 4. E2 within the A100", 1)[1].split("## 5.", 1)[0]
     assert "- frozen: 12%, 14%" in section
     assert "preempt-resubmit" not in section and "the box's pool" not in section
+
+
+def test_the_tail_line_names_each_stock_setting_by_its_cap_and_threshold(tmp_path: Path) -> None:
+    # --cap 2048, the forecast's low value: its runs (2,048/1,024) beside vLLM's default 2,048/0, each its own.
+    probe_runs(tmp_path)
+    for i, p95 in enumerate((1100, 1300), 1):
+        write(tmp_path / "block2" / f"stock2048-1024-tail-{i}.txt", TAIL.format(p95=p95))
+    text = "\n".join(analysis.probe_lines(tmp_path))
+    assert f"stock, 2,048/0 1,600 ms (1,500{DASH}1,700, 2 runs)" in text
+    assert f"stock, 1,536/768 1,500 ms (1,400{DASH}1,600, 2 runs)" in text
+    assert f"stock, 2,048/1,024 1,200 ms (1,100{DASH}1,300, 2 runs)" in text

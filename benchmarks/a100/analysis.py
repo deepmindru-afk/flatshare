@@ -200,16 +200,23 @@ def probe_lines(runs: Path) -> list[str]:
         f"| Prefill case, the PRs' values: the token gap | {median_range(pf_pr)} | 6.6 ms (4.9{DASH}6.6) "
         f"| {BOX['prefill_pr_gap_ms']} |",
     ]
+    # The time-equivalent caps' runs, by cap and threshold (stock1536-768-tail-N); vLLM's default is stock2048-.
     caps = sorted(
-        int(cap)
-        for p in (runs / "block2").glob("stock*-tail-1.txt")
-        if (cap := p.stem.split("-")[0].removeprefix("stock")).isdigit() and cap != "2048"
+        (int(cap), int(threshold))
+        for p in (runs / "block2").glob("stock*-*-tail-1.txt")
+        if (parts := p.stem.removeprefix("stock").split("-"))[0].isdigit()
+        and len(parts) == 4
+        and (cap := parts[0]).isdigit()
+        and (threshold := parts[1]).isdigit()
     )
     tails = []
     for label, block, prefix in (
         ("frozen, 512/256", "block1", "frozen-tail"),
         ("stock, 2,048/0", "block2", "stock2048-tail"),
-        *((f"stock, {cap:,}/{cap // 2:,}", "block2", f"stock{cap}-tail") for cap in caps),
+        *(
+            (f"stock, {cap:,}/{threshold:,}", "block2", f"stock{cap}-{threshold}-tail")
+            for cap, threshold in caps
+        ),
         ("the PRs' values", "block3", "pr-tail"),
     ):
         p95 = [

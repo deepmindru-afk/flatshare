@@ -8,7 +8,8 @@
 # stopped.
 #   1  frozen, the box's flags: E0 (--reps 3), kv x3, prefill x3, tail x2
 #   2  stock at vLLM's default here, 2,048/0: kv x3, tail x2; then stock at the time-equivalent step cap (R4; --cap,
-#      1,536 by default, the threshold at half): kv x1, tail x2
+#      1,536 by default, the threshold at half): kv x1, tail x2, its runs named by cap and threshold (stock1536-768-*),
+#      so that a cap of 2,048, the forecast's low value, is not taken for vLLM's default (stock2048-*)
 #   3  the PRs' values (make-room with no reserve and a 48-token window): kv x3, prefill x3, tail x2
 set -euo pipefail
 usage() { echo "usage: probes.sh 1|2|3 [--cap TOKENS]" >&2; exit 2; }
@@ -97,8 +98,8 @@ case $block in
     runs stock2048 kv 3
     runs stock2048 tail 2
     use frozen --max-num-batched-tokens "$cap" --long-prefill-token-threshold $((cap / 2))
-    runs "stock$cap" kv 1
-    runs "stock$cap" tail 2
+    runs "stock$cap-$((cap / 2))" kv 1
+    runs "stock$cap-$((cap / 2))" tail 2
     ;;
   3)
     use make-room --additional-config.make_room.reserve_tokens 0 --additional-config.make_room.budget_cap_tokens 48

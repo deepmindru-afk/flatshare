@@ -233,7 +233,10 @@ def test_the_core_runs_in_order_resumes_after_each_stop_and_reads_back(
     assert len(lines(home / "probe-calls")) == 25
     for block, names in (
         ("block1", ["frozen-kv-1", "frozen-kv-3", "frozen-prefill-3", "frozen-tail-2"]),
-        ("block2", ["stock2048-kv-3", "stock2048-tail-2", "stock1536-kv-1", "stock1536-tail-2"]),
+        (
+            "block2",
+            ["stock2048-kv-3", "stock2048-tail-2", "stock1536-768-kv-1", "stock1536-768-tail-2"],
+        ),
         ("block3", ["pr-kv-3", "pr-prefill-3", "pr-tail-2"]),
     ):
         for name in names:
@@ -341,7 +344,7 @@ def test_the_core_runs_in_order_resumes_after_each_stop_and_reads_back(
         f"| KV case, stock: the voice turn's wait | 1,652 ms (1,651{DASH}1,653, 3 runs) |",
         f"| KV case, stock at 2,048/0 | 1,660 ms (1,659{DASH}1,662, 3 runs) |",
         f"| KV case, the PRs' values: first token | 169 ms (168{DASH}170, 3 runs) |",
-        "| block2/stock1536-kv-1 | kv | 1665 | 1765 |",
+        "| block2/stock1536-768-kv-1 | kv | 1665 | 1765 |",
     ):
         assert row in text, row
     assert (
@@ -867,3 +870,30 @@ def test_the_run_hands_its_one_deadline_to_every_campaign_and_to_cprime(
         "cprime stopped before its deadline"
         in (home / "leaseholder" / "runs" / "a100" / "blocks.log").read_text()
     )
+
+
+def test_a_cap_of_2048_is_measured_beside_vllms_default(tmp_path: Path, runtime: Path) -> None:
+    # --cap 2048, the forecast's low value: block 2's second setting is 2,048/1,024, whose runs are its own, not
+    # 2,048/0's under the same names (skipped as done, the engine restarted for nothing).
+    hosts = tmp_path / "hosts"
+    home = a100_host(hosts)
+    done = subprocess.run(
+        ["bash", str(RUN), "--cap", "2048", "2"],
+        env=dry_env(home, hosts, runtime),
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    block2 = home / "leaseholder" / "runs" / "a100" / "block2"
+    assert sorted(p.name for p in block2.glob("stock2048-1024-*.txt")) == [
+        "stock2048-1024-kv-1.txt",
+        "stock2048-1024-tail-1.txt",
+        "stock2048-1024-tail-2.txt",
+    ]
+    assert len(list(block2.glob("stock2048-kv-*.txt"))) == 3
+    switches = [s for s in lines(home / "variant.log") if s.startswith("variant.sh use ")]
+    assert switches == [
+        "variant.sh use frozen --max-num-batched-tokens 2048 --long-prefill-token-threshold 0",
+        "variant.sh use frozen --max-num-batched-tokens 2048 --long-prefill-token-threshold 1024",
+    ]

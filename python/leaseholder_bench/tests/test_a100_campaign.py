@@ -148,7 +148,10 @@ def test_c_primes_stock_arm_is_the_lowest_median_first_token_p95(tmp_path: Path,
         {
             "frozen": ["2400", "2600"],
             "stock2048": ["1900", "≥30000"],
-            "stock1536": ["2000", "2100"],
+            "stock1536-768": [
+                "2000",
+                "2100",
+            ],  # the time-equivalent cap's runs: its cap and threshold
         },
     )
     name, flags, table = results.pick_stock(tmp_path, 1536)
@@ -171,6 +174,11 @@ def test_c_primes_stock_arm_is_the_lowest_median_first_token_p95(tmp_path: Path,
     assert results.main(["pick-stock", str(tmp_path), "--cap", "1280"]) == 2
     table = results.markdown(tmp_path)
     assert "| block1/frozen-tail-1 | tail (p50) | 110 | 300 | 900 | 1000 |" in table
+    # At the forecast's low value, 2,048, the cap's own runs (2,048/1,024) stand beside vLLM's default (2,048/0).
+    write_runs(tmp_path, {"frozen": ["2400", "2600"], "stock2048-1024": ["900", "1000"]})
+    name, flags, table = results.pick_stock(tmp_path, 2048)
+    assert name == "2048" and flags[-1] == "1024"
+    assert [row[2] for row in table] == [2500, 15950, 950]
 
 
 SCRIPTS = sorted(
