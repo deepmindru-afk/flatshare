@@ -36,7 +36,7 @@ The engine change matters when background KV fills the pool: agent contexts of 1
 
 ### The priorities
 
-Voice requests go at priority 0 and background work at 2; in vLLM a lower value is served first. A client can send `priority` in the request body or the `X-Vllm-Priority` header. A gateway in front should set it from the caller's identity instead, so that a background client cannot raise its own; `lh-gateway` maps each tenant to a class and caps it with `max_class`. Nothing else in front is needed: the measured configuration ran without an admission policy. `lh-gateway` is the harness that measured it, not a production gateway: what one would add is listed in [its README](../crates/lh-gateway/README.md#what-it-does-not-do), and the engine must be reachable only through the gateway.
+Voice requests go at priority 0 and background work at 2; in vLLM a lower value is served first. A client can send `priority` in the request body or the `X-Vllm-Priority` header. A gateway in front should set it from the caller's identity instead, so that a background client cannot raise its own; `lh-gateway` maps each tenant to a class and caps it with `max_class`. Nothing else in front is needed: the measured configuration ran without an admission policy. `lh-gateway` is the harness that measured it, not a production gateway: what one would add is listed in [its README](../crates/lh-gateway/README.md#what-it-does-not-do), and the engine must be reachable only through the gateway. vLLM's `--api-key` guards only its `/v1`, `/v2`, `/inference` and `/cohere` routes, so serve the engine on a Unix socket in a directory only its user may enter (`--uds`, as [`deploy/phastform/systemd`](../deploy/phastform/systemd) does) and reach it from the gateway on that socket, or through a tunnel that may reach nothing else ([ADR-0005](adr/0005-loopback-services-and-node-sticky-kv.md#unix-sockets-end-to-end-w6-2026-10-25)).
 
 ### The reply's first tokens
 
@@ -56,7 +56,8 @@ A longer window holds background prefill for longer each turn: the agents' throu
 
 Measured in the same scenario:
 - **Lifecycle-timed protection in a gateway** (KV headroom held from speech onset, a prefill throttle while a voice turn is answered, the voice agent's events): with agents' KV filling the pool these could not act, since a gateway can only defer new requests while running ones hold the KV. Without the engine change, a gateway doing all of it leaves the p95 at 10,993 ms, as stock.
-- **vLLM's development mode** (`VLLM_SERVER_DEV_MODE=1`), which the frozen box runs for the harness's `/server_info` and cache resets: it serves routes such as `/collective_rpc` and `/sleep` that a deployment must not expose.
+- **vLLM's development mode** (`VLLM_SERVER_DEV_MODE=1`), which only a measured box runs, from the measurement drop-in (`variant.sh measure on`), for the harness's `/server_info` and cache resets: it serves routes such as `/collective_rpc`, `/sleep` and `/update_weights`, which `--api-key` does not guard ([the routes](../deploy/phastform/variants/README.md#the-measurement-drop-in)).
+- **KV cache events on TCP**: they carry every cached block's token ids and session id, and vLLM sends them to whoever binds the endpoint. The frozen box publishes none.
 - **Engine knobs**: `--watermark` (no change), `--max-num-queued-tokens` (it refuses voice turns too: 48 of 50 failed), concurrency caps (two agent contexts fill the pool), [#54530](https://github.com/vllm-project/vllm/pull/54530) (it preempts at the request-count cap, which does not bind here).
 - **Another engine**: SGLang 0.5.22's priority preemption, with or without its host tier (11,948 ms with HiCache, five runs).
 - **A static KV reservation** halves the tail (5,671 ms) but stays seconds over the SLO.
@@ -69,6 +70,7 @@ Without any engine change, aborting background requests that have no first byte 
 - **Voice**: V2V p95 per call from the voice stack, and the realtime time to first token at p95 (the gateway's request log, or vLLM's per-request metrics). The voice agent's per-turn stage times split a slow turn into endpointing, the LLM's first sentence and TTS ([the stages](BENCHMARKS.md#voice-under-agent-load-e2)).
 - **The engine**: KV usage, running and waiting requests, and preemptions; `vllm:num_preemptions_total` counts a victim when its next output reaches the frontend, so it lags. The CPU tier's hits against computed prompt tokens tell restored preemptions from recomputed ones.
 - **Background**: completed tokens a second and the agents' TTFT p99, where a preemption policy moves the cost.
+- [`ops/`](../ops) has these as code: the Prometheus scrape configuration (the gateway, and the engine through it), the SLO's burn-rate alerts on the realtime first byte (95% within 250 ms) and the gateway's overhead, health alerts, and a Grafana dashboard ([the runbook](../ops/RUNBOOK.md#monitoring)).
 
 ## How it fails
 

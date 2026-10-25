@@ -43,7 +43,7 @@ Every measurement runs on one pinned configuration with the audio models on the 
 
 | Component | Configuration | GPU memory |
 |---|---|---|
-| LLM | vLLM 0.32.0, `Qwen/Qwen3-4B-Instruct-2507-FP8`, 32k context, `--kv-cache-memory` 5 GiB (36,400 tokens), prefix caching, priority scheduling, step cap 512/256, KV cache metrics and events, the `OffloadingConnector` (20 GiB in `/dev/shm`, write-through, generated tokens included) | ≈ 10.6 GiB |
+| LLM | vLLM 0.32.0, `Qwen/Qwen3-4B-Instruct-2507-FP8`, 32k context, `--kv-cache-memory` 5 GiB (36,400 tokens), prefix caching, priority scheduling, step cap 512/256, KV cache metrics, the `OffloadingConnector` (20 GiB in `/dev/shm`, write-through, generated tokens included) | ≈ 10.6 GiB |
 | STT | vLLM 0.32.0 serving `openai/whisper-large-v3-turbo` at `/v1/audio/transcriptions` | ≈ 2.4 GiB |
 | TTS | Kokoro-82M on Kokoro-FastAPI 0.9.1-rc1 at `/v1/audio/speech` | ≈ 1.0 GiB |
 
@@ -57,34 +57,35 @@ Every measurement runs on one pinned configuration with the audio models on the 
 
 ```text
 ┌──────────────────────────────── cyan: control host, 48 threads, CPU only ───────────────────────────────┐
-│  host network (loopback only)                      │  voice plane: network namespace, no route out      │
-│  lh-gateway (Rust)                                 │  LiveKit server · LiveKit Agents voice worker      │
-│  AIPerf agent replay (pinned cores)                │  measurement callers (livekit-rtc)                 │
-│  SSH tunnels → 127.0.0.1:18000/18100/18880         │  reach out only through Unix sockets               │
+│  host network: one TCP listener, the gateway's     │  voice plane: network namespace, no route out      │
+│  lh-gateway (Rust) · 127.0.0.1:18080, with keys    │  LiveKit server · LiveKit Agents voice worker      │
+│  AIPerf agent replay (pinned cores)                │  measurement callers (livekit-rtc) · SMG (arm 8b)  │
+│  lh-tunnel@NODE → $XDG_RUNTIME_DIR/lh/NODE-*.sock  │  reach out only through Unix sockets               │
 └──────────────────────────────────────────────────────┬──────────────────────────────────────────────────┘
-                                                       │ SSH local forwards (systemd --user, restricted key)
+                                                       │ SSH sessions, one key per socket, each the bridge to it
                                                        ▼
 ┌─────────────── Phastform: RTX 5060 Ti 16 GB, 188 GiB RAM, the frozen box (Gray: the same) ──────────────┐
-│  vLLM 0.32 + make-room · Qwen3-4B-FP8 · KV pool 36,400 tokens · CPU tier 20 GiB          :8000          │
-│  vLLM Whisper large-v3-turbo (STT) :8100 · Kokoro-82M (TTS) :8880                                       │
+│  vLLM 0.32 + make-room · Qwen3-4B-FP8 · KV pool 36,400 tokens · CPU tier 20 GiB    lh/engine.sock       │
+│  vLLM Whisper large-v3-turbo (STT) lh/stt.sock · Kokoro-82M (TTS) lh/tts.sock · all in a 0700 directory │
 └─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Host | Role |
 |---|---|
 | **Phastform** | The GPU node every measurement runs on, paused when idle |
-| **Gray** | A second, identical GPU node, used in booked windows for the two-node points; cyan reaches it through `lh-tunnel-gray` |
+| **Gray** | A second, identical GPU node, used in booked windows for the two-node points; cyan reaches it through `lh-tunnel@gray` |
 | **cyan** | The control host: `lh-gateway`, LiveKit and the voice worker, the measurement callers and AIPerf, each on its own cores |
 | **peacock** | Linux release builds of `lh-gateway` and `lh-sim`, and simulator runs |
 
 ### 3.3 Network and security
 
 See [ADR-0005](adr/0005-loopback-services-and-node-sticky-kv.md).
-- **Loopback and tunnels.** Every service binds loopback. Hosts reach each other only through SSH local forwards run as `systemd --user` units, with a key that may forward only to the engine, STT and TTS ports and may open no listener. The engine publishes no KV events: they carry every cached block's token ids, and vLLM sends them to whoever binds its TCP endpoint.
+- **Unix sockets end to end.** On the GPU nodes the engine, STT and TTS serve on Unix sockets in `$XDG_RUNTIME_DIR/lh`, a directory of mode 0700, and listen on no TCP port: vLLM's `--api-key` guards only its `/v1`, `/v2`, `/inference` and `/cohere` routes, so the directory is what keeps the hosts' other users from the engine. cyan reaches each socket through `lh-tunnel@NODE`, a `systemd --user` unit: one SSH key per socket, which the node lets run one command for every session whatever its client asks, `exec nc -q0 -U SOCKET`, under `restrict`, which allows no forwarding of any kind; each connection on cyan's socket of the same name is one session, multiplexed over a few SSH connections. On cyan the gateway's 127.0.0.1:18080, with keys, is the only TCP listener in the host's network; its `/metrics`, and the engine's that it relays, need the metrics key there. SMG's arm runs in the voice plane's namespace, between two proxies. `deploy/bin/audit-listeners` checks each host after every deploy and in the smoke test: no TCP listener of the box's units outside that set, and their sockets only in `$XDG_RUNTIME_DIR`. The engine publishes no KV events: they carry every cached block's token ids, and vLLM sends them to whoever binds its TCP endpoint.
+- **Development mode for measurement only.** A production box runs vLLM without its development and RL routes (`/collective_rpc`, `/sleep`, `/update_weights` and the others); a measured box adds them with a drop-in (`variant.sh measure on`) for the harness's `/server_info` and cache resets, on the engine's socket only.
 - **The voice plane** runs in a network namespace with no route out. libwebrtc binds ICE sockets on every non-loopback interface and gathers no candidate on loopback alone, so the namespace holds loopback plus one dummy interface (10.255.0.1/32).
 - **Sanitized inputs.** The gateway strips the request fields and headers that vLLM, SGLang and SMG trust for scheduling, caching and routing, and sets its own: the class's priority, `X-Session-ID` and the tenant's `cache_salt`, an HMAC of the tenant's name under a secret only the gateway reads, so tenants never share prefix-cache entries and a client that reaches the engine directly cannot name another tenant's salt ([PROTOCOL.md](PROTOCOL.md#headers)). Sessions are scoped to the tenant: a session id from an untrusted tenant is hashed with the tenant's name.
 - **KV never crosses the network.** A session stays on the node that holds its KV; when a node fails, its sessions are placed again and re-prefill there.
-- **Known gap.** The hosts' other users share their loopback: on the GPU nodes they reach the engine (in vLLM's development mode, for the harness), STT and TTS directly, and on cyan the tunnels' TCP ports, SMG and the gateway's `/metrics`. Closing it takes Unix sockets end to end and a production unit without development mode, W6's production hardening ([ADR-0005](adr/0005-loopback-services-and-node-sticky-kv.md#co-tenants-2026-10-24)).
+- **What stays open** ([ADR-0005](adr/0005-loopback-services-and-node-sticky-kv.md#unix-sockets-end-to-end-w6-2026-10-25)). The sockets keep the hosts' other users out, not the deploying user's other processes: on the GPU nodes, other work under the same user (which `gpu-guard` tells from the box's units) reaches the servers, and the voice plane's processes keep the deploying user's uid and reach its systemd bus. While variant `sglang` runs, SGLang listens on 127.0.0.1:8000, which every user of the node reaches: it serves no Unix socket.
 
 ## 4. The measurement harness
 
