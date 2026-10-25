@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# campaign.sh [--dry-run] [--pause] CAMPAIGN: measure the E2 points a campaign file lists, from a workstation with SSH
-# to the hosts, like deploy/deploy.sh. CAMPAIGN names arm files, one per line, relative to itself; a line
+# campaign.sh [--dry-run] [--pause] [--local] [--until HH:MM] CAMPAIGN: measure the E2 points a campaign file lists,
+# from a workstation with SSH to the hosts, like deploy/deploy.sh. CAMPAIGN names arm files, one per line, relative to itself; a line
 # `agents-seed N` sets AIPerf's seed for all of its points (lh-bench e2 run --agents-seed), in place of each arm
 # file's [agents] seed. For each point whose run directory on cyan is not complete, in order, it
 #   1. switches each GPU node to the arm's engine (deploy/phastform/variant.sh use, with what lh-bench e2 engine prints),
@@ -16,23 +16,51 @@
 # as for deploy.sh; LH_CYAN names cyan, and LH_GPU the GPU nodes every point of the campaign runs on: one host, or
 # several separated by commas for the points on several GPU nodes. A node is named after its host's first label
 # (gray for gray.cis.upenn.edu), as the arm files' [gateway.nodes] name it. LH_PROFILE names the GPU nodes' hardware
-# profile (deploy/profiles) for lh-bench e2 run's engine check, when it is not the one cyan's host settings name.
+# profile (deploy/profiles) for lh-bench e2 run's engine check, when it is not the one cyan's host settings name, and
+# LH_NODE_DIR the GPU node's directory under its home, whose variant.sh switches the engine (default
+# leaseholder/src/deploy/phastform; a node rendered from another profile has its own, leaseholder/node).
+# --local runs the campaign on a single host that is cyan and the GPU node at once (docs/HARDWARE.md): every command
+# runs here (deploy/bin/lh-local in place of ssh), the node is localhost, and the results go to ~/leaseholder/results/e2
+# unless LH_E2_RESULTS says otherwise. --until HH:MM (UTC; tomorrow's when today's has passed) starts no point that
+# cannot end before then, by W5's durations: 13 minutes for a point with agents, 7 without, and 2 more for an engine
+# switch.
 set -euo pipefail
-usage() { echo "usage: campaign.sh [--dry-run] [--pause] CAMPAIGN" >&2; exit 2; }
-dry_run=false pause=false
+usage() { echo "usage: campaign.sh [--dry-run] [--pause] [--local] [--until HH:MM] CAMPAIGN" >&2; exit 2; }
+dry_run=false pause=false local=false until=""
 while [[ ${1:-} == --* ]]; do
   case $1 in
     --dry-run) dry_run=true ;;
     --pause) pause=true ;;
+    --local) local=true ;;
+    --until)
+      [[ ${2:-} =~ ^([01][0-9]|2[0-3]):([0-5][0-9])$ ]] || usage
+      until=$2
+      shift
+      ;;
     *) usage ;;
   esac
   shift
 done
 (($# == 1)) || usage
 [[ -f $1 ]] || { echo "campaign: no such file: $1" >&2; exit 2; }
-ssh=${LH_SSH:-ssh}
-cyan=${LH_CYAN:-cyan.cis.upenn.edu}
-IFS=', ' read -r -a gpus <<<"${LH_GPU:-phastform.cis.upenn.edu}"
+if $local; then
+  ssh=$(cd "$(dirname "$0")/../../deploy/bin" && pwd)/lh-local
+  cyan=localhost
+  gpus=(localhost)
+else
+  ssh=${LH_SSH:-ssh}
+  cyan=${LH_CYAN:-cyan.cis.upenn.edu}
+  IFS=', ' read -r -a gpus <<<"${LH_GPU:-phastform.cis.upenn.edu}"
+fi
+node_dir=${LH_NODE_DIR:-leaseholder/src/deploy/phastform}
+[[ $node_dir =~ ^[A-Za-z0-9._/-]+$ && $node_dir != /* ]] ||
+  { echo "campaign: LH_NODE_DIR is a directory under the GPU node's home: '$node_dir'" >&2; exit 2; }
+deadline=""
+if [[ -n $until ]]; then
+  now=$(date -u +%s)
+  deadline=$((now - now % 86400 + 10#${until%:*} * 3600 + 10#${until#*:} * 60))
+  ((deadline > now)) || deadline=$((deadline + 86400))
+fi
 bad_gpus() { echo "campaign: LH_GPU names each GPU node's host once, separated by commas: '${LH_GPU-}'" >&2; exit 2; }
 ((${#gpus[@]})) || bad_gpus
 named=" "
@@ -47,7 +75,11 @@ if [[ -n ${LH_PROFILE:-} ]]; then
 fi
 name=$(basename "$1" .campaign)
 here=$(cd "$(dirname "$1")" && pwd)
-results=${LH_E2_RESULTS:-$HOME/leaseholder/runs/e2}/$name
+if $local; then
+  results=${LH_E2_RESULTS:-$HOME/leaseholder/results/e2}/$name # beside the runs, not over them
+else
+  results=${LH_E2_RESULTS:-$HOME/leaseholder/runs/e2}/$name
+fi
 runs=leaseholder/runs/e2/$name # on cyan, under the home directory, as every path given to ssh here
 bench=leaseholder/venvs/bench/bin/lh-bench
 complete() { echo "grep -qs '\"status\": \"complete\"' $runs/$1/run.json"; } # run.json as e2 run writes it
@@ -127,19 +159,38 @@ stop_gpus() { # stop_gpus POINT: end the sampling and put the samples into the p
     fi
   done
 }
+# A point's budget for --until: W5's longest agent point (11 min 34 s) and voice-alone point (5 min 54 s), rounded up,
+# and an engine switch (1 min 41 s at most).
+minutes() { # minutes ARM ENGINE PREVIOUS
+  local m=7
+  awk '/^\[/ { table = $0 } table == "[agents]" && /^sessions *= *[1-9]/ { found = 1 } END { exit !found }' "$1" &&
+    m=13
+  [[ $2 == "$3" ]] || m=$((m + 2))
+  echo "$m"
+}
+previous=""
 for i in "${!points[@]}"; do
   point=${points[$i]}
   if $ssh "$cyan" "$(complete "$point")"; then
     fetch "$point"
+    previous=${engines[$i]}
     continue
   fi
+  if [[ -n $deadline ]]; then
+    need=$(minutes "${arms[$i]}" "${engines[$i]}" "$previous")
+    if (($(date -u +%s) + need * 60 > deadline)); then
+      log "$point: $need minutes would end after $until UTC; stopping before it (--until)"
+      break
+    fi
+  fi
+  previous=${engines[$i]}
   # A point whose ssh session dropped may still be running on cyan; switching the engine would spoil it.
   $ssh "$cyan" flock -n leaseholder/runs/.lh-bench-e2.lock true ||
     die "a point is still running on cyan (its pid is in leaseholder/runs/.lh-bench-e2.lock); run again once it ends"
   sources=""
   for gpu in "${gpus[@]}"; do
     log "$point: ${gpu%%.*} runs ${engines[$i]}"
-    variant="bash leaseholder/src/deploy/phastform/variant.sh"
+    variant="bash $node_dir/variant.sh"
     $ssh "$gpu" "$variant measure on && $variant use ${engines[$i]}" 2>&1 |
       tee -a "$results/campaign.log" || die "$point: ${gpu%%.*} did not start ${engines[$i]} (journalctl there)"
     # The node's deployed revision as the point starts (deploy/deploy.sh writes it), for run.json beside cyan's; empty

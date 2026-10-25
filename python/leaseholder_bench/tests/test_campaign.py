@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -194,3 +195,87 @@ def test_campaign_sh_reads_each_w5_round(hosts: Hosts, round: int) -> None:
     assert f"w5-disc-pr-ab48-v03-s24: pending, engine make-room-v03 {window}" in done.stdout
     assert f"w5-disc-pr-ab48-s24: pending, engine make-room {window}" in done.stdout
     assert "w5-a1-voice: pending, engine frozen" in done.stdout
+
+
+def local_host(hosts: Hosts, node_dir: str = "leaseholder/node") -> Path:
+    """This host as cyan and the GPU node at once: lh-bench, the node's variant.sh under ``node_dir``, DEPLOYED."""
+    home = hosts.home("localhost")
+    (home / node_dir).mkdir(parents=True)
+    shutil.copy(FAKES / "variant.sh", home / node_dir / "variant.sh")
+    (home / "leaseholder" / "src").mkdir(parents=True, exist_ok=True)
+    (home / "leaseholder" / "src" / "DEPLOYED").write_text(DEPLOYED + "\n")
+    bench = home / "leaseholder" / "venvs" / "bench" / "bin"
+    bench.mkdir(parents=True)
+    shutil.copy(FAKES / "lh-bench", bench / "lh-bench")
+    return home
+
+
+def test_a_local_campaign_runs_every_step_on_this_host(hosts: Hosts) -> None:
+    home = local_host(hosts)
+    campaign = hosts.campaign("c7", ["arms/a1.toml", "arms/a2.toml"], {"a1": VOICE, "a2": VOICE})
+    done = hosts.run(campaign, "--local", HOME=str(home), LH_NODE_DIR="leaseholder/node")
+    assert done.returncode == 0, done.stdout + done.stderr
+    # The node's own variant.sh switched the engine, with the measurement drop-in on, lh-bench measured here, and
+    # nothing went over ssh.
+    assert (
+        hosts.calls("localhost", "variant")
+        == ["variant.sh measure on", "variant.sh use frozen"] * 2
+    )
+    runs_of = (
+        "lh-bench e2 run leaseholder/runs/e2/c7/arms/{0}.toml --out leaseholder/runs/e2/c7/{0}"
+    )
+    assert [
+        c for c in hosts.calls("localhost", "lh-bench") if c.startswith("lh-bench e2 run ")
+    ] == [f"{runs_of.format(point)} --gpu-source localhost={DEPLOYED}" for point in ("a1", "a2")]
+    assert not (hosts.root / "ssh.log").exists()
+    for point in ("a1", "a2"):
+        assert (hosts.results / "c7" / point / "run.json").exists()
+        assert (hosts.results / "c7" / point / "gpu.csv").read_text()
+    bad = hosts.run(campaign, "--local", HOME=str(home), LH_NODE_DIR="/etc")
+    assert (
+        bad.returncode == 2 and "LH_NODE_DIR is a directory under the GPU node's home" in bad.stderr
+    )
+
+
+def test_until_starts_no_point_that_would_end_after_it(hosts: Hosts) -> None:
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c8", ["arms/a1.toml"], {"a1": VOICE})
+    # A voice-alone point and its engine switch take 9 minutes by W5's durations.
+    soon = (datetime.now(UTC) + timedelta(minutes=5)).strftime("%H:%M")
+    done = hosts.run(campaign, "--until", soon)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert runs(hosts) == []
+    assert (
+        f"a1: 9 minutes would end after {soon} UTC"
+        in (hosts.results / "c8" / "campaign.log").read_text()
+    )
+    later = (datetime.now(UTC) + timedelta(minutes=60)).strftime("%H:%M")
+    done = hosts.run(campaign, "--until", later)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(runs(hosts)) == 1
+    assert hosts.run(campaign, "--until", "25:00").returncode == 2
+
+
+def test_pull_copies_a_single_hosts_results_and_runs(hosts: Hosts, tmp_path: Path) -> None:
+    home = hosts.home("a100")
+    (home / "leaseholder" / "results" / "e2" / "core").mkdir(parents=True)
+    (home / "leaseholder" / "results" / "e2" / "core" / "campaign.log").write_text("done\n")
+    (home / "leaseholder" / "runs" / "probes").mkdir(parents=True)
+    (home / "leaseholder" / "runs" / "probes" / "kv.log").write_text("kv: priority-0 TTFT 140 ms\n")
+    env = os.environ | {
+        "PATH": f"{FAKES}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_HOSTS": str(hosts.root),
+        "LH_SSH": str(FAKES / "ssh"),
+    }
+    out = tmp_path / "pulled"
+    done = subprocess.run(
+        ["bash", str(REPO / "deploy" / "a100" / "pull.sh"), "--once", "a100", str(out)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (out / "results" / "e2" / "core" / "campaign.log").read_text() == "done\n"
+    assert (out / "runs" / "probes" / "kv.log").read_text().startswith("kv:")
+    assert "pull: a100 up to date" in (out / "pull.log").read_text()
