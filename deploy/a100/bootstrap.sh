@@ -12,7 +12,8 @@
 #          vLLM's own parse of the node's configs, and the preflight with the GPU's checks
 #   warm   one engine start for each compile configuration (cache/warm.json), so that the campaign starts warm
 # LH_GPU_ID names the GPU the host lends, by nvidia-smi's index or its UUID, on a host with several (the preflight
-# refuses several and none named): detect resolves it to its UUID, which the GPU units run on alone and env.sh keeps.
+# refuses several and none named): detect resolves it to its UUID, which the GPU units run on alone and env.sh keeps;
+# LH_ALLOW_MIG=1 measures on a MIG slice, which the preflight otherwise refuses, and env.sh keeps it too.
 # LH_PROFILE names another profile; LH_MODELS adds MODEL@REVISION words to download (the 14B, for C'); LH_WARM is a
 # file of the configurations to warm (host.py warm --configs). The first stage chooses what runs the units, the user
 # manager where it outlives the session (lingering, which it enables where a user may) or else deploy/bin/lh-svc, and
@@ -46,6 +47,11 @@ choose_gpu() { # LH_GPU_ID, checked before anything is written: unset, an earlie
   [[ -z ${LH_GPU_ID:-} || $LH_GPU_ID =~ ^([0-9]+|GPU-[0-9A-Za-z-]+)$ ]] ||
     { echo "bootstrap: LH_GPU_ID is a GPU's index or UUID (nvidia-smi -L), not '$LH_GPU_ID'" >&2; exit 2; }
   [[ -z ${LH_GPU_ID:-} ]] || export LH_GPU_ID
+  # LH_ALLOW_MIG=1, measuring on a MIG slice (the preflight refuses one without it), is kept so too.
+  if [[ -z ${LH_ALLOW_MIG:-} && -f $node/env.sh ]]; then
+    LH_ALLOW_MIG=$(sed -n 's/^export LH_ALLOW_MIG=//p' "$node/env.sh")
+  fi
+  [[ -z ${LH_ALLOW_MIG:-} ]] || export LH_ALLOW_MIG
 }
 
 choose_hub_cache() { # the Hugging Face hub cache, resolved once: an earlier stage's (env.sh), else as huggingface_hub

@@ -293,6 +293,8 @@ def _gpu_line(host: dict) -> str:
     # gpu stage's facts resolve.
     chosen = lent_gpu(host) or (None if host.get("gpu") else os.environ.get("LH_GPU_ID"))
     lines = f"export LH_GPU_ID={chosen}\n" if chosen else ""
+    if os.environ.get("LH_ALLOW_MIG") == "1":  # the operator's choice to measure on a MIG slice
+        lines += "export LH_ALLOW_MIG=1\n"
     if cache := host.get("hf_hub_cache"):
         lines += f"export HF_HUB_CACHE={shlex.quote(cache)}\n"
     return lines

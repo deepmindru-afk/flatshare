@@ -648,6 +648,11 @@ def test_bootstrap_keeps_the_lent_gpu_that_the_first_stage_named(ubuntu: dict) -
         assert done.returncode == 0, done.stdout + done.stderr
     bad = bootstrap(ubuntu, "true", LH_GPU_ID="all")
     assert bad.returncode == 2 and "LH_GPU_ID is a GPU's index or UUID" in bad.stderr
+    # LH_ALLOW_MIG=1, a choice like the GPU's, is kept for the later stages and the run's block 0 too.
+    for env in ({"LH_ALLOW_MIG": "1"}, {}):
+        done = bootstrap(ubuntu, "render", "shell_env", **env)
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert "export LH_ALLOW_MIG=1\n" in (node / "env.sh").read_text(), env
 
 
 def test_the_gpu_stage_stops_the_gpu_units_before_it_reads_the_facts(ubuntu: dict) -> None:
