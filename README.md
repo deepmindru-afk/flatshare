@@ -98,6 +98,8 @@ make reproduce-calibration EXPORTS=DIR CORPUS=DIR  # lh-sim's calibration, from 
 
 ## Repository layout
 
+**The engine change** is vLLM [#63350](https://github.com/vllm-project/vllm/pull/63350/files) and [#63351](https://github.com/vllm-project/vllm/pull/63351/files) (stacked on #63350). E2 ran it on vLLM 0.32.0 as the [`make-room` variant](deploy/phastform/variants/make-room), which `python/leaseholder_vllm` tests.
+
 ```text
 crates/lh-proto/          wire types and their JSON Schemas
 crates/lh-core/           the cost and step-time models and KV geometry, shared with the simulator; admission and placement policies
