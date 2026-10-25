@@ -108,6 +108,9 @@ AIPERF_STOP_S = 120.0
 """How long AIPerf may take to cancel its requests and write its exports after SIGINT."""
 CALL_TURN_S = 130.0
 """The longest a call's turn can take: the line, a reply, a barge-in and a reply, the quiet wait."""
+CALLERS_EXIT_S = 120.0
+"""The longest the callers may take to exit once their calls ended: with --save-audio they write each
+call's audio then."""
 POLL_S = 1.0
 """How often a run checks on the tools and services it waits for."""
 SESSIONS_END_S = 30.0
@@ -953,10 +956,11 @@ def _measure(
     if aiperf is not None and kv_sample_s is not None:
         sampler = _KvSampler(engines, out / "metrics", kv_sample_s)
         running.callback(sampler.stop)
-    end = _call(arm, host, out, record, running, aiperf, save_audio)
+    end, bots = _call(arm, host, out, record, running, aiperf, save_audio)
     if sampler is not None:
         sampler.stop()
     _snapshot(host, out, "end", engines)
+    _callers_exit(bots)
     record["window"] = {"start": start, "end": end}
     if aiperf is not None:
         record.say("stopping AIPerf")
@@ -1049,8 +1053,9 @@ def _call(
     running: contextlib.ExitStack,
     aiperf: Process | None,
     save_audio: bool,
-) -> float:
-    """Run the calls; returns when they ended. The replay must outlast them."""
+) -> tuple[float, Process]:
+    """Run the calls; returns when they ended, and the callers' process, which may still be writing
+    the calls' audio (:func:`_callers_exit`). The replay must outlast the calls."""
     voice = arm.voice
     warmup = f" after {voice.warmup_turns} warm-up" if voice.warmup_turns else ""
     record.say(f"calls: {voice.callers} callers, {voice.turns} turns each{warmup}")
@@ -1071,16 +1076,30 @@ def _call(
     bots = Process("lh-voice bots", command, out / "bots.log", env, tool_scope(host))
     running.callback(bots.stop, 30.0)
     deadline = time.monotonic() + CALL_TURN_S * (voice.warmup_turns + voice.turns) + 120
-    while not bots.exited():
+    # The callers write their summary as their calls end, before any call's audio.
+    ended = out / "bots" / "summary.json"
+    while not bots.exited() and not ended.exists():
         if aiperf is not None and aiperf.exited():
             raise aiperf.failure("exited while the calls ran, so its load did not cover them")
         if time.monotonic() > deadline:
             raise bots.failure("did not finish in time")
         time.sleep(POLL_S)
     end = time.time()
+    if not ended.exists():  # they exited before their calls ended
+        _callers_exit(bots)
+    return end, bots
+
+
+def _callers_exit(bots: Process) -> None:
+    """Wait for the callers to exit once their calls ended, and check how: with --save-audio they
+    write each call's audio first, which the point's window and its last metrics leave out."""
+    deadline = time.monotonic() + CALLERS_EXIT_S
+    while not bots.exited():
+        if time.monotonic() > deadline:
+            raise bots.failure("did not exit after the calls")
+        time.sleep(POLL_S)
     if bots.stop() not in (0, 3):  # 3: some turns failed, which the summary counts
         raise bots.failure("failed")
-    return end
 
 
 def _gateway_log(systemd: Systemd, out: Path, start: float, end: float) -> None:

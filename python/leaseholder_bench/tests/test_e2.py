@@ -1620,12 +1620,20 @@ def test_run_json_keeps_each_gpu_nodes_deployed_revision(cyan: Cyan, capsys) -> 
     assert not out.with_name("again").exists()
 
 
-def test_the_callers_save_their_audio_when_the_run_asks(cyan: Cyan) -> None:
+def test_the_callers_save_their_audio_when_the_run_asks(
+    cyan: Cyan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The callers write each call's audio after their calls end, and the point's window and its last
+    # metrics end with the calls, not with the writing (it took the window's end after it).
+    monkeypatch.setenv("FAKE_BOTS_SAVE_SECONDS", "1.0")
     arm_file = write(cyan.arms, "a1-voice.toml", VOICE_ALONE)
     out = cyan.host.root / "runs" / "a1-voice"
     run_point(arm_file, out, cyan.host, cyan.systemd, save_audio=True)
     assert "--save-audio" in json.loads((out / "bots.args").read_text())
     assert record(cyan, "a1-voice")["save_audio"] is True  # a run option, not the arm's
+    saved = float((out / "bots" / "saved").read_text())
+    assert record(cyan, "a1-voice")["window"]["end"] < saved - 0.5
+    assert (out / "metrics" / "gateway-end.prom").stat().st_mtime < saved - 0.5
 
 
 def test_a_point_on_two_gpu_nodes_checks_resets_and_reports_each_node(cyan: Cyan) -> None:
