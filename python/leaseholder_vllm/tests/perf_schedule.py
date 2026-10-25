@@ -426,6 +426,19 @@ def check(measured: dict[str, dict], baseline: dict) -> list[str]:
     return failures
 
 
+def load_warning(load: list[dict], baseline_load: list[dict]) -> str | None:
+    """A warning when the 1-minute load during a run went past the highest it reached as the baseline was measured by
+    half of that or more, so that a state failing under such load reads as possibly the load's; None otherwise."""
+    here = max(max(rep["before"][0], rep["after"][0]) for rep in load)
+    there = max(max(rep["before"][0], rep["after"][0]) for rep in baseline_load)
+    if here <= 1.5 * there:
+        return None
+    return (
+        f"the 1-minute load reached {here:.1f} during this run, against at most {there:.1f} as the baseline was "
+        "measured: a state that fails under such load may fail for it"
+    )
+
+
 def confirm(result: dict, baseline: dict, again) -> tuple[dict[str, dict], list[str], list[str]]:
     """The check of ``result``'s processes against ``baseline``, a state that fails measured again first: ``again``
     runs the failing states for twice as many processes more, and a state fails only if its ratio over all of its
@@ -688,6 +701,9 @@ def command() -> int:
         },
         "failures": failures,
     } | ({"machine_differs": warning} if warning else {})
+    busy = load_warning(result["load"], baseline["load"])
+    if busy:
+        record["load_warning"] = busy
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(dumps(record) + "\n")
@@ -696,6 +712,8 @@ def command() -> int:
         f"\nagainst the baseline of {baseline['machine']['host']}, {baseline['date']} "
         f"(tolerance {baseline['tolerance']:.0%}):"
     )
+    if busy:
+        print(f"warning: {busy}")
     if failures:
         print(f"FAIL: the change costs more than it did in {len(failures)} states:")
         print("\n".join(f"  {failure}" for failure in failures))

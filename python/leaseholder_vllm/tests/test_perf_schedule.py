@@ -121,6 +121,21 @@ def test_a_cell_records_the_median_step_too_which_sees_work_on_half_the_steps():
     assert cell["ratio"] == 0.6 and cell["median_ratio"] == 1.4
 
 
+def test_a_run_busier_than_its_baseline_by_half_says_so():
+    base = [
+        {"before": [2.2, 3.0, 3.1], "after": [3.6, 3.2, 3.1]},
+        {"before": [3.6, 3.2, 3.1], "after": [3.1, 3, 3]},
+    ]
+    calm = [{"before": [3.0, 3.0, 3.0], "after": [5.3, 3.4, 3.1]}]
+    assert P.load_warning(calm, base) is None  # 5.3 is under 1.5 x 3.6
+    busy = [
+        {"before": [3.0, 3.0, 3.0], "after": [5.5, 3.4, 3.1]},
+        {"before": [5.5, 3, 3], "after": [9.1, 4, 3]},
+    ]
+    warning = P.load_warning(busy, base)
+    assert "reached 9.1" in warning and "at most 3.6" in warning
+
+
 def test_the_table_shows_off_on_the_change_and_the_ratio_against_the_baseline():
     measured = P.cells([process("B64", 1000, 1620), process("C16", 250, 450)])
     baseline = {"tolerance": 0.09, "cells": {"B64": {"ratio": 0.62}, "C16": {"ratio": 0.6}}}
