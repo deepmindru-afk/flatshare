@@ -1,4 +1,5 @@
-//! The gateway's Prometheus metrics, in a registry it owns (no global state), rendered at `GET /metrics`.
+//! The gateway's Prometheus metrics, in a registry it owns (no global state), rendered at `GET /metrics`, and, with an
+//! admission policy, the harness's after them (`harness`).
 //!
 //! Every label takes its values from a fixed set or from the configuration (tenant names), so the number of series
 //! is bounded. Every series except those of requests (labeled with a status) and lifecycle events is created at
@@ -6,10 +7,8 @@
 
 use std::hash::Hash;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
-use lh_core::admission::Deferral;
 use lh_proto::SloClass;
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::encoding::text::encode;
@@ -19,7 +18,7 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::{Registry, Unit};
 
-use crate::realtime::Phase;
+use crate::harness;
 use crate::usage::Usage;
 
 /// The API routes, as the `route` label.
@@ -141,33 +140,13 @@ impl UpstreamError {
     }
 }
 
-/// Why the admission point refused a request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    /// Its class's queue was full (429).
-    QueueFull,
-    /// It waited `queue_timeout_s` without being admitted (503).
-    Timeout,
-}
-
-impl Refusal {
-    const ALL: [Self; 2] = [Self::QueueFull, Self::Timeout];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::QueueFull => "queue_full",
-            Self::Timeout => "timeout",
-        }
-    }
-}
-
 /// Buckets of the gateway's own overhead, from 50 us. 2 ms, the SLO, is a bucket bound.
 const OVERHEAD_BUCKETS: [f64; 12] = [
     50e-6, 100e-6, 200e-6, 300e-6, 500e-6, 750e-6, 1e-3, 1.5e-3, 2e-3, 5e-3, 10e-3, 50e-3,
 ];
 
 /// Buckets of time to first byte and total duration: from realtime turns to long agent turns.
-const LATENCY_BUCKETS: [f64; 16] = [
+pub(crate) const LATENCY_BUCKETS: [f64; 16] = [
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 ];
 
@@ -226,28 +205,7 @@ struct UsageLabels {
     kind: &'static str,
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct RefusalLabels {
-    class: &'static str,
-    reason: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ReasonLabels {
-    reason: &'static str,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct OversizeLabels {
-    oversize: bool,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct StateLabels {
-    state: &'static str,
-}
-
-type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
+pub(crate) type Histograms<L> = Family<L, Histogram, fn() -> Histogram>;
 
 /// The gateway's metrics: cloning a handle shares every series.
 #[derive(Clone, Debug)]
@@ -266,26 +224,22 @@ pub(crate) struct Metrics {
     error_events: Family<ErrorEventLabels, Counter>,
     events: Family<EventLabels, Counter>,
     usage_tokens: Family<UsageLabels, Counter>,
-    admitted: Family<ClassLabels, Counter>,
-    waiting: Family<ClassLabels, Gauge>,
-    admission_wait: Histograms<ClassLabels>,
-    refused: Family<RefusalLabels, Counter>,
-    resubmits: Family<ClassLabels, Counter>,
-    discarded_tokens: Family<ClassLabels, Counter>,
-    deferred: Family<ReasonLabels, Counter>,
-    deferral: Histograms<ReasonLabels>,
-    aged: Family<OversizeLabels, Counter>,
-    degraded: Counter,
-    false_alarms: Counter,
-    false_alarm_token_seconds: Counter<f64, AtomicU64>,
-    realtime_sessions: Family<StateLabels, Gauge>,
-    state_timeouts: Family<StateLabels, Counter>,
     /// Whether the engine is ready.
     node_ready: Gauge,
 }
 
 impl Metrics {
+    /// The metrics of a gateway without an admission policy.
     pub fn new() -> Self {
+        Self::build(None)
+    }
+
+    /// The metrics of a gateway with an admission point, whose series `harness` holds.
+    pub fn with_harness(harness: &harness::Metrics) -> Self {
+        Self::build(Some(harness))
+    }
+
+    fn build(harness: Option<&harness::Metrics>) -> Self {
         let metrics = Self {
             registry: Arc::new(Registry::default()),
             requests: Family::default(),
@@ -301,20 +255,6 @@ impl Metrics {
             error_events: Family::default(),
             events: Family::default(),
             usage_tokens: Family::default(),
-            admitted: Family::default(),
-            waiting: Family::default(),
-            admission_wait: Family::new_with_constructor(|| Histogram::new(LATENCY_BUCKETS)),
-            refused: Family::default(),
-            resubmits: Family::default(),
-            discarded_tokens: Family::default(),
-            deferred: Family::default(),
-            deferral: Family::new_with_constructor(|| Histogram::new(LATENCY_BUCKETS)),
-            aged: Family::default(),
-            degraded: Counter::default(),
-            false_alarms: Counter::default(),
-            false_alarm_token_seconds: Counter::default(),
-            realtime_sessions: Family::default(),
-            state_timeouts: Family::default(),
             node_ready: Gauge::default(),
         };
         for class in SloClass::ALL.map(SloClass::as_str) {
@@ -324,21 +264,12 @@ impl Metrics {
             for kind in ["prompt", "completion", "cached"] {
                 create(&metrics.usage_tokens, UsageLabels { class, kind });
             }
-            for reason in Refusal::ALL.map(Refusal::as_str) {
-                create(&metrics.refused, RefusalLabels { class, reason });
-            }
             create(&metrics.first_byte, ClassLabels { class });
             create(&metrics.duration, ClassLabels { class });
             create(&metrics.streams_active, ClassLabels { class });
             for r#type in ErrorEvent::ALL.map(ErrorEvent::as_str) {
                 create(&metrics.error_events, ErrorEventLabels { class, r#type });
             }
-            let labels = ClassLabels { class };
-            create(&metrics.admitted, labels.clone());
-            create(&metrics.waiting, labels.clone());
-            create(&metrics.admission_wait, labels.clone());
-            create(&metrics.resubmits, labels.clone());
-            create(&metrics.discarded_tokens, labels);
         }
         for route in [Route::ChatCompletions, Route::Completions, Route::Responses] {
             let route = route.as_str();
@@ -348,27 +279,14 @@ impl Metrics {
         for kind in UpstreamError::ALL.map(UpstreamError::as_str) {
             create(&metrics.upstream_errors, KindLabels { kind });
         }
-        for reason in Deferral::ALL.map(Deferral::as_str) {
-            create(&metrics.deferred, ReasonLabels { reason });
-            create(&metrics.deferral, ReasonLabels { reason });
-        }
-        for oversize in [false, true] {
-            create(&metrics.aged, OversizeLabels { oversize });
-        }
-        for state in Phase::ALL.map(Phase::as_str) {
-            create(&metrics.realtime_sessions, StateLabels { state });
-            if state != Phase::Idle.as_str() {
-                create(&metrics.state_timeouts, StateLabels { state });
-            }
-        }
         for field in crate::sanitize::sanitized_fields() {
             create(&metrics.sanitized, FieldLabels { field });
         }
-        metrics.register()
+        metrics.register(harness)
     }
 
-    /// Registers every series, in the order of the exposition.
-    fn register(mut self) -> Self {
+    /// Registers every series, in the order of the exposition: the harness's after the usage tokens.
+    fn register(mut self, harness: Option<&harness::Metrics>) -> Self {
         let mut registry = Registry::with_prefix("lh_gateway");
         let r = &mut registry;
         r.register(
@@ -443,85 +361,9 @@ impl Metrics {
             "Tokens reported in response usage, by class and kind",
             self.usage_tokens.clone(),
         );
-        r.register(
-            "admission_admitted",
-            "Requests the admission point let go upstream, by class (none without an admission policy)",
-            self.admitted.clone(),
-        );
-        r.register(
-            "admission_waiting",
-            "Requests waiting at the admission point",
-            self.waiting.clone(),
-        );
-        r.register_with_unit(
-            "admission_wait",
-            "Time from reaching the admission point to being admitted",
-            Unit::Seconds,
-            self.admission_wait.clone(),
-        );
-        r.register(
-            "admission_refused",
-            "Requests the admission point refused, by class and reason",
-            self.refused.clone(),
-        );
-        r.register(
-            "admission_resubmits",
-            "Requests sent upstream again after a preemption dropped their attempt",
-            self.resubmits.clone(),
-        );
-        r.register(
-            "admission_discarded_tokens",
-            "Estimated prompt tokens of the upstream attempts preemptions dropped: at most the prefill they \
-             discarded",
-            self.discarded_tokens.clone(),
-        );
-        r.register(
-            "admission_deferred",
-            "Background requests policy leaseholder deferred, by what held them back when they arrived: the \
-             headroom of the armed realtime sessions, or the critical window's prefill budget",
-            self.deferred.clone(),
-        );
-        r.register_with_unit(
-            "admission_deferral",
-            "Time from arrival to admission of the background requests policy leaseholder deferred, by what \
-             held them back when they arrived",
-            Unit::Seconds,
-            self.deferral.clone(),
-        );
-        r.register(
-            "admission_aged",
-            "Deferred requests admitted regardless after max_defer_s; oversize: their estimate alone was over \
-             what the headroom leaves background requests",
-            self.aged.clone(),
-        );
-        r.register(
-            "admission_degraded",
-            "Realtime requests whose reply policy leaseholder capped, because the background requests in flight \
-             left less than one turn's headroom free",
-            self.degraded.clone(),
-        );
-        r.register(
-            "admission_false_alarms",
-            "Headroom armings that no realtime request of their session followed: the session left the armed \
-             states, timed out or closed first",
-            self.false_alarms.clone(),
-        );
-        r.register(
-            "admission_false_alarm_token_seconds",
-            "Estimated background tokens the headroom held back during false alarms, times how long",
-            self.false_alarm_token_seconds.clone(),
-        );
-        r.register(
-            "realtime_sessions",
-            "Realtime sessions policy leaseholder follows, by the state of their turn",
-            self.realtime_sessions.clone(),
-        );
-        r.register(
-            "realtime_state_timeouts",
-            "Realtime sessions that stayed in a state of their turn for state_timeout_s without an event, by the \
-             state: a lost or missing event",
-            self.state_timeouts.clone(),
-        );
+        if let Some(harness) = harness {
+            harness.register(r);
+        }
         r.register(
             "node_ready",
             "Whether the engine is ready (1), or a request found it broken and its /health has not answered since \
@@ -605,90 +447,6 @@ impl Metrics {
         }))
     }
 
-    /// Counts a request as waiting at the admission point until the returned guard drops.
-    pub fn waiting(&self, class: SloClass) -> GaugeGuard {
-        GaugeGuard::new(self.waiting.get_or_create_owned(&class_labels(class)))
-    }
-
-    /// A request was admitted after waiting `wait`.
-    pub fn admitted(&self, class: SloClass, wait: Duration) {
-        let labels = class_labels(class);
-        self.admitted.get_or_create(&labels).inc();
-        self.admission_wait
-            .get_or_create(&labels)
-            .observe(wait.as_secs_f64());
-    }
-
-    /// A preemption dropped an upstream attempt of `tokens` estimated prompt tokens.
-    pub fn preempted(&self, class: SloClass, tokens: u64) {
-        let labels = class_labels(class);
-        self.discarded_tokens.get_or_create(&labels).inc_by(tokens);
-    }
-
-    /// A preempted request was sent upstream again.
-    pub fn resubmitted(&self, class: SloClass) {
-        let labels = class_labels(class);
-        self.resubmits.get_or_create(&labels).inc();
-    }
-
-    /// Policy leaseholder deferred a background request.
-    pub fn deferred(&self, reason: Deferral) {
-        let labels = ReasonLabels {
-            reason: reason.as_str(),
-        };
-        self.deferred.get_or_create(&labels).inc();
-    }
-
-    /// A deferred background request was admitted after waiting `wait`.
-    pub fn deferral(&self, reason: Deferral, wait: Duration) {
-        let labels = ReasonLabels {
-            reason: reason.as_str(),
-        };
-        self.deferral
-            .get_or_create(&labels)
-            .observe(wait.as_secs_f64());
-    }
-
-    /// A deferred request was admitted regardless.
-    pub fn aged(&self, oversize: bool) {
-        self.aged.get_or_create(&OversizeLabels { oversize }).inc();
-    }
-
-    /// A realtime request's reply was capped.
-    pub fn degraded(&self) {
-        self.degraded.inc();
-    }
-
-    /// A headroom arming ended with no realtime request, having held back `token_seconds` of background work.
-    pub fn false_alarm(&self, token_seconds: f64) {
-        self.false_alarms.inc();
-        self.false_alarm_token_seconds
-            .inc_by(token_seconds.max(0.0));
-    }
-
-    /// The gauge of the realtime sessions in `phase`.
-    pub fn realtime_sessions(&self, phase: Phase) -> Gauge {
-        self.realtime_sessions.get_or_create_owned(&StateLabels {
-            state: phase.as_str(),
-        })
-    }
-
-    /// A realtime session's `phase` timed out.
-    pub fn state_timeout(&self, phase: Phase) {
-        let labels = StateLabels {
-            state: phase.as_str(),
-        };
-        self.state_timeouts.get_or_create(&labels).inc();
-    }
-
-    pub fn refused(&self, class: SloClass, reason: Refusal) {
-        let labels = RefusalLabels {
-            class: class.as_str(),
-            reason: reason.as_str(),
-        };
-        self.refused.get_or_create(&labels).inc();
-    }
-
     /// The gauge of whether the engine is ready.
     pub fn node_ready(&self) -> Gauge {
         self.node_ready.clone()
@@ -746,36 +504,10 @@ impl Metrics {
             .get(&FieldLabels { field })
             .map_or(0, |counter| counter.get())
     }
-
-    /// The false alarms, and their token-seconds.
-    #[cfg(test)]
-    pub fn false_alarms(&self) -> (u64, f64) {
-        (
-            self.false_alarms.get(),
-            self.false_alarm_token_seconds.get(),
-        )
-    }
-
-    #[cfg(test)]
-    pub fn state_timeouts(&self, phase: Phase) -> u64 {
-        let labels = StateLabels {
-            state: phase.as_str(),
-        };
-        self.state_timeouts
-            .get(&labels)
-            .map_or(0, |counter| counter.get())
-    }
-}
-
-/// The labels of `class`.
-fn class_labels(class: SloClass) -> ClassLabels {
-    ClassLabels {
-        class: class.as_str(),
-    }
 }
 
 /// Creates a series at zero, so it is exported before its first event.
-fn create<S, M, C>(family: &Family<S, M, C>, labels: S)
+pub(crate) fn create<S, M, C>(family: &Family<S, M, C>, labels: S)
 where
     S: Clone + Hash + Eq,
     C: MetricConstructor<M>,
@@ -788,7 +520,7 @@ where
 pub(crate) struct GaugeGuard(Gauge);
 
 impl GaugeGuard {
-    fn new(gauge: Gauge) -> Self {
+    pub(crate) fn new(gauge: Gauge) -> Self {
         gauge.inc();
         Self(gauge)
     }
@@ -849,13 +581,13 @@ mod tests {
         out
     }
 
-    /// `metrics.txt` is the exposition of a gateway with one upstream before any traffic, its series in the order
-    /// of their labels: every metric's name, type, help and labels, which the dashboards' and alerts' checks
-    /// (`ops/`) read. `LH_GATEWAY_WRITE_METRICS=1` writes it anew (`make metrics`).
+    /// `metrics.txt` is the exposition of a gateway with an admission point before any traffic, every family the
+    /// gateway exports, its series in the order of their labels: every metric's name, type, help and labels, which
+    /// the dashboards' and alerts' checks (`ops/`) read. `LH_GATEWAY_WRITE_METRICS=1` writes it anew (`make metrics`).
     #[test]
     fn the_checked_in_exposition_is_current() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("metrics.txt");
-        let metrics = Metrics::new();
+        let metrics = Metrics::with_harness(&harness::Metrics::new());
         // Requests by status and lifecycle events by type have no series before traffic, and a family without
         // one is left out of the exposition: one of each at zero, so that the file names them and their labels.
         create(

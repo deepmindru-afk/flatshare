@@ -438,11 +438,37 @@ async fn metrics_expose_every_series() {
         "lh_gateway_upstream_errors_total{kind=\"timeout\"} 0",
         "lh_gateway_events_total{type=\"turn_started\",source=\"client\",duplicate=\"false\"} 1",
         "lh_gateway_usage_tokens_total{class=\"background\",kind=\"prompt\"} 0",
-        // Policy none has no admission point; its series exist all the same.
+        "lh_gateway_node_ready 1",
+    ] {
+        assert!(
+            text.lines().any(|line| line.starts_with(series)),
+            "missing {series}\n{text}"
+        );
+    }
+    // Policy none has no admission point, and none of the harness's series: a count it does not keep is absent,
+    // not zero.
+    for family in ["lh_gateway_admission_", "lh_gateway_realtime_"] {
+        let found: Vec<&str> = text.lines().filter(|line| line.contains(family)).collect();
+        assert!(found.is_empty(), "{found:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_admission_point_exposes_the_harness_series() {
+    let mock = Mock::start(Script::Json("{}")).await;
+    let cap = "[admission]\npolicy = \"static-cap\"\nbackground_max_in_flight = 4";
+    let leaseholder = "[admission]\npolicy = \"leaseholder\"\nheadroom_tokens = 1024\n\
+                       critical_prefill_budget_ms = 150\ndegrade_max_tokens = 16";
+    // Every admission point's, and those of policy leaseholder's mechanisms and of the turns it follows.
+    let admission = [
         "lh_gateway_admission_admitted_total{class=\"background\"} 0",
         "lh_gateway_admission_waiting{class=\"realtime\"} 0",
         "lh_gateway_admission_wait_seconds_count{class=\"interactive\"} 0",
         "lh_gateway_admission_refused_total{class=\"background\",reason=\"timeout\"} 0",
+        "lh_gateway_admission_resubmits_total{class=\"background\"} 0",
+        "lh_gateway_admission_discarded_tokens_total{class=\"background\"} 0",
+    ];
+    let lifecycle = [
         "lh_gateway_admission_deferred_total{reason=\"headroom\"} 0",
         "lh_gateway_admission_deferral_seconds_count{reason=\"critical\"} 0",
         "lh_gateway_admission_aged_total{oversize=\"true\"} 0",
@@ -451,11 +477,16 @@ async fn metrics_expose_every_series() {
         "lh_gateway_admission_false_alarm_token_seconds_total 0",
         "lh_gateway_realtime_sessions{state=\"critical\"} 0",
         "lh_gateway_realtime_state_timeouts_total{state=\"playback\"} 0",
-    ] {
-        assert!(
-            text.lines().any(|line| line.starts_with(series)),
-            "missing {series}\n{text}"
-        );
+    ];
+    for (top, expected) in [(cap, &admission[..]), (leaseholder, &lifecycle[..])] {
+        let gw = Gateway::start(mock.addr, top).await;
+        let text = gw.metrics().await;
+        for series in expected {
+            assert!(
+                text.lines().any(|line| line.starts_with(series)),
+                "{top}: missing {series}\n{text}"
+            );
+        }
     }
 }
 

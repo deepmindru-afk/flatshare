@@ -13,7 +13,8 @@ use lh_core::admission::Deferral;
 use lh_proto::{SessionId, SloClass};
 use tracing::Level;
 
-use crate::metrics::{Metrics, Outcome, Refusal, Route};
+use crate::harness::Refusal;
+use crate::metrics::{Metrics, Outcome, Route};
 use crate::sanitize::{REQUEST_ID, RESOLVED_SESSION_ID, request_id, session_header};
 use crate::usage::Summary;
 

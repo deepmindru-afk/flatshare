@@ -36,10 +36,10 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
-use crate::admission::Ticket;
 use crate::config::UpstreamAddr;
 use crate::exchange::Exchange;
-use crate::metrics::{ErrorEvent, Outcome, Refusal, Route, UpstreamError};
+use crate::harness::{Refusal, Ticket};
+use crate::metrics::{ErrorEvent, Outcome, Route, UpstreamError};
 use crate::sanitize::{
     REQUEST_ID, cap_reply, resolve_class, resolve_session, rewrite_body, sanitize_headers,
     set_engine_headers, strip_hop_by_hop,

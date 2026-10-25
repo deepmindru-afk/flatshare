@@ -300,7 +300,7 @@ lh_gateway_usage_tokens_total{class="interactive",kind="prompt"} 0
 lh_gateway_usage_tokens_total{class="realtime",kind="cached"} 0
 lh_gateway_usage_tokens_total{class="realtime",kind="completion"} 0
 lh_gateway_usage_tokens_total{class="realtime",kind="prompt"} 0
-# HELP lh_gateway_admission_admitted Requests the admission point let go upstream, by class (none without an admission policy).
+# HELP lh_gateway_admission_admitted Requests the admission point let go upstream, by class.
 # TYPE lh_gateway_admission_admitted counter
 lh_gateway_admission_admitted_total{class="background"} 0
 lh_gateway_admission_admitted_total{class="interactive"} 0

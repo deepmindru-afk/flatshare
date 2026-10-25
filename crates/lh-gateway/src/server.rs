@@ -22,11 +22,11 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use crate::admission::Admission;
 use crate::auth::{self, Tenants};
 use crate::config::{Config, ListenAddr, MetricsKey, PrioritySignals};
 use crate::events::{self, EventSink, Events};
 use crate::exchange::Exchange;
+use crate::harness::{self, Admission};
 use crate::metrics::{Metrics, Route};
 use crate::proxy::{self, Upstream};
 use crate::systemd::Inherited;
@@ -214,16 +214,21 @@ impl Server {
             };
             listeners.push((listener, tenant));
         }
-        let metrics = Arc::new(Metrics::new());
+        // The harness's metric families, only with an admission point.
+        let harness = config
+            .admission
+            .as_ref()
+            .map(|admission| (admission, Arc::new(harness::Metrics::new())));
+        let metrics = Arc::new(match &harness {
+            Some((_, harness)) => Metrics::with_harness(harness),
+            None => Metrics::new(),
+        });
         let upstream = Upstream::new(
             config.upstream,
             config.upstream_idle_timeout,
             metrics.node_ready(),
         );
-        let admission = config
-            .admission
-            .as_ref()
-            .map(|admission| Admission::new(admission, Arc::clone(&metrics)));
+        let admission = harness.map(|(admission, metrics)| Admission::new(admission, metrics));
         let shared = Shared {
             tenants,
             upstream,

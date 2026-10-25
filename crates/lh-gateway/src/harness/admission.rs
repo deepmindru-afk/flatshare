@@ -22,9 +22,9 @@ use lh_core::admission::{
 use lh_proto::{LifecycleEvent, SessionId, SloClass};
 use tokio::sync::watch;
 
-use crate::config;
-use crate::metrics::{Metrics, Refusal};
-use crate::realtime::Realtime;
+use super::config;
+use super::metrics::{Metrics, Refusal};
+use super::realtime::Realtime;
 
 /// Sessions whose last usage is kept for token estimates.
 const SESSIONS: usize = 4096;

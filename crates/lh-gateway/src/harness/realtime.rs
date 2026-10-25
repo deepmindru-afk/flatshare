@@ -24,7 +24,7 @@ use lh_core::admission::{Trigger, Turns};
 use lh_proto::{EventKind, SessionId};
 use prometheus_client::metrics::gauge::Gauge;
 
-use crate::metrics::Metrics;
+use super::metrics::Metrics;
 
 /// Realtime sessions followed at most, a bound on what emitters can make the gateway hold. A new session that
 /// finds the table full first forgets the idle ones; if every session is in a turn, it is not followed.
