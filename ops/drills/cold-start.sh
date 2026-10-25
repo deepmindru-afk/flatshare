@@ -30,9 +30,16 @@ mkdir -p "$out"
 log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$out/drill.log"; }
 
 $ssh "$gpu" 'systemctl --user is-active --quiet lh-engine' || { log "the engine is not running"; exit 1; }
-# The restart would break an E2 point or a drill: they hold this lock on cyan while they run.
+# The restart would break an E2 point or a drill: they hold this lock on cyan while they run. The check is advisory:
+# the lock is not held through the restart, so start nothing else meanwhile.
 $ssh "$cyan" 'flock -n ~/leaseholder/runs/.lh-bench-e2.lock true' || { log "an E2 point or a drill is running"; exit 1; }
+restore() { # with --cold: remove the drop-in and its caches, and start the engine warm, whatever happened before
+  $ssh "$gpu" "rm -f $dropin && rm -rf $caches && systemctl --user daemon-reload && systemctl --user restart lh-engine" &&
+    log "the drop-in and its caches removed; the engine restarted warm" ||
+    log "removing the drop-in or the warm restart failed: check $dropin on ${gpu%%.*}"
+}
 if $cold; then
+  trap restore EXIT
   # Every cache directory the engine's JIT and compile steps read, emptied by pointing them at a new directory.
   $ssh "$gpu" "rm -rf $caches && mkdir -p ${dropin%/*} $caches && cat >$dropin" <<EOF
 [Service]
@@ -47,16 +54,21 @@ units=lh-engine target=lh-engine
 if [[ $what == box ]]; then
   units="lh-stt lh-tts lh-engine" target=leaseholder.target
 fi
+# The journals are fetched whatever the start did: for a start that fails they are the record that matters.
+before=$(date +%s)
+status=0
 event=$($ssh "$gpu" "date +%s.%N; systemctl --user reset-failed $units 2>/dev/null || true
-  systemctl --user stop $target; systemctl --user start $target" | sed -n 1p)
-log "$what restarted at $event$caches_note"
-for unit in $units; do
-  $ssh "$gpu" "journalctl --user -u $unit -o short-unix --no-pager --since @${event%.*}" >"$out/$unit-journal.txt"
-done
-if $cold; then
-  $ssh "$gpu" "rm -f $dropin && rm -rf $caches && systemctl --user daemon-reload && systemctl --user restart lh-engine"
-  log "the drop-in and its caches removed; the engine restarted warm"
+  systemctl --user stop $target; systemctl --user start $target" | sed -n 1p) || status=$?
+event=${event:-$before}
+if ((status)); then
+  log "$what restarted at $event$caches_note, and its start FAILED (exit status $status)"
+else
+  log "$what restarted at $event$caches_note"
 fi
+for unit in $units; do
+  $ssh "$gpu" "journalctl --user -u $unit -o short-unix --no-pager --since @${event%.*}" >"$out/$unit-journal.txt" || true
+done
 $ssh "$cyan" "mkdir -p $remote"
 rsync -a -e "$ssh" "$out/" "$cyan:$remote/"
 $ssh "$cyan" "cd $remote && ~/$bench drill start $(for u in $units; do printf '%s ' "$u-journal.txt"; done)" | tee "$out/report.txt"
+exit "$status"

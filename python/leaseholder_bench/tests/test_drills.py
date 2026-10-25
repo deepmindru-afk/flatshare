@@ -299,3 +299,42 @@ def test_a_full_cpu_tier_evicts_the_oldest_prompt_and_keeps_the_latest(tmp_path:
     assert (
         json.loads((tmp_path / "tier.json").read_text())["fill_requests"] == record["fill_requests"]
     )
+
+
+class StalledTier(FakeEngine):
+    """An engine whose CPU tier stores nothing, so its store counter never moves."""
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        stored = self.stored
+        response = super().handler(request)
+        self.stored = stored
+        return response
+
+
+def test_the_fills_stop_when_the_cpu_tier_stores_nothing(tmp_path: Path) -> None:
+    record = asyncio.run(
+        fill_cpu_tier(client(StalledTier().handler), tmp_path / "tier.json", tokens=1000)
+    )
+    assert (record["passed"], record["fill_requests"]) == (False, 3)
+    assert record["failure"] == "the CPU tier's store counter did not move in 3 fills"
+    assert [s["tier"] for s in record["samples"]] == ["recompute"]
+
+
+def test_the_fills_stop_at_twice_what_the_tiers_rate_needs(tmp_path: Path) -> None:
+    class Slowing(FakeEngine):
+        """A tier that stores its first three fills, then nothing."""
+
+        def handler(self, request: httpx.Request) -> httpx.Response:
+            stored = self.stored
+            response = super().handler(request)
+            if json.loads(request.content or b"{}").get("prompt") and self.fills >= 4:
+                self.stored = stored
+            self.fills += 1 if json.loads(request.content or b"{}").get("prompt") else 0
+            return response
+
+    engine = Slowing(pool=20_000, tier_bytes=1_000_000, kv=2)
+    engine.fills = 0
+    record = asyncio.run(fill_cpu_tier(client(engine.handler), tmp_path / "tier.json", tokens=1000))
+    assert record["passed"] is False and record["failure"].startswith("the CPU tier stored ")
+    # Three fills store 98,304 bytes against a target of 2,000,000: the limit is 2 * 62 + 2 fills.
+    assert record["fill_requests"] == 2 * 62 + 2

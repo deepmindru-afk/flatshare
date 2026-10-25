@@ -13,6 +13,7 @@ summarizes a drill's record.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import time
@@ -341,7 +342,8 @@ async def fill_cpu_tier(
     ``factor`` times the tier's bytes were stored after it must be recomputed (the tier evicted it), and
     one sent after them restores from the tier once the GPU pool is flushed. ``client`` reaches the
     engine (on cyan, through the tunnel), which nothing else may use meanwhile; every request must
-    succeed. Writes and returns the record."""
+    succeed. The fills stop, failing the check, if the tier's store counter has not moved after three
+    of them or once they number twice what its rate over those needs. Writes and returns the record."""
     from leaseholder_bench.tiers import TierProbe, TiersConfig, pool_tokens
 
     config = TiersConfig(url=str(client.base_url), model=DEFAULT_MODEL, lengths=(), priority=None)
@@ -362,17 +364,27 @@ async def fill_cpu_tier(
         first = random_prompt(probe.rng, tokens)
         rows = [await probe.measure(0, "recompute", first)]
         start = stored(await probe.metrics())
-        fills, fill_ms = 0, []
-        while (now := stored(await probe.metrics())) - start < factor * capacity:
+        target = factor * capacity
+        fills, fill_ms, limit, failure = 0, [], None, None
+        while (now := stored(await probe.metrics())) - start < target:
+            if limit is None and fills >= 3:
+                if now <= start:
+                    failure = f"the CPU tier's store counter did not move in {fills} fills"
+                    break
+                limit = 2 * math.ceil(target / ((now - start) / fills)) + 2
+            if limit is not None and fills >= limit:
+                failure = f"the CPU tier stored {now - start:,.0f} of {target:,.0f} bytes in {fills} fills"
+                break
             began = time.perf_counter()
             await probe.complete(random_prompt(probe.rng, 16_384))
             fill_ms.append((time.perf_counter() - began) * 1000)
             fills += 1
-        last = random_prompt(probe.rng, tokens)
-        rows.append(await probe.measure(0, "recompute", last))
-        await probe.flush()
-        rows.append(await probe.measure(0, "cpu", last))  # the latest prompt restores from the tier
-        rows.append(await probe.measure(0, "recompute", first))  # the first was evicted from it
+        if failure is None:
+            last = random_prompt(probe.rng, tokens)
+            rows.append(await probe.measure(0, "recompute", last))
+            await probe.flush()
+            rows.append(await probe.measure(0, "cpu", last))  # the latest restores from the tier
+            rows.append(await probe.measure(0, "recompute", first))  # the first was evicted from it
         healthy = (await client.get("/health")).status_code == 200
     record = {
         "kind": "drill-cpu-tier",
@@ -382,7 +394,8 @@ async def fill_cpu_tier(
         "fill_ms": summarize(fill_ms),
         "samples": [asdict(s) | {"computed": s.computed_tokens} for s in rows],
         "healthy": healthy,
-        "passed": healthy and all(s.valid for s in rows),
+        "failure": failure,
+        "passed": healthy and failure is None and all(s.valid for s in rows),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(orjson.dumps(record, option=orjson.OPT_INDENT_2) + b"\n")

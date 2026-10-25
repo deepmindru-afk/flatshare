@@ -141,7 +141,7 @@ The failure drills run from a workstation with SSH to the hosts, on the variant 
 - `ops/drills/drill.sh engine-kill` opens two realtime streams (the voice plane's socket) and four background ones (the TCP port, the agents tenant's key) through the gateway, then sends SIGKILL to every process of `lh-engine`, as an OOM kill or a crash would end it. It records how each stream ended and when, what a new request gets meanwhile, how long until one succeeds again (systemd starts the engine again after 15 s), the engine's restart from its journal, and `/dev/shm` before and after, where the CPU tier lives.
 - `ops/drills/drill.sh gateway-restart` does the same with `systemctl --user restart lh-gateway` on cyan, and records the engine's running requests 2 s after it: a gateway that dies must not leave its requests running in the engine.
 - `~/leaseholder/venvs/bench/bin/lh-bench drill cpu-tier --out FILE`, on cyan with the engine otherwise idle, stores twice the CPU tier's capacity of unique prompts and checks that the tier evicted the oldest prompt and still restores the latest.
-- `ops/drills/cold-start.sh engine|box` restarts the engine alone or the whole box and times each server's start from its journal; `--cold` empties the compile and JIT caches first, as on a new host.
+- `ops/drills/cold-start.sh engine|box` restarts the engine alone or the whole box and times each server's start from its journal; `--cold` empties the compile and JIT caches first, as on a new host, and puts them back after, even when the start fails. A failed start still leaves its journals. The script refuses to start while an E2 point or a drill holds cyan's lock, but does not hold the lock itself: start nothing else meanwhile.
 
 ## Checks before heavy work on a shared host
 
