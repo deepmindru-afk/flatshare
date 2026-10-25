@@ -27,7 +27,10 @@ fail at the stop, with the unit's processes running.
 
 Each started unit has a runner (`lh-svc run UNIT`, in a session of its own) that runs its commands, with
 LH_SVC_UNIT=UNIT in their environment where systemd would put them in the unit's cgroup, relays their output into
-the unit's journal with UTC times, restarts it as Restart says and stops it on SIGTERM. `start` returns
+the unit's journal with UTC times, restarts it as Restart says and stops it on SIGTERM. When the main process
+exits on its own, what is left of its group is ended as a stop ends it (KillSignal, then SIGKILL after
+TimeoutStopSec) before ExecStopPost and any restart, as systemd ends what is left of the unit's cgroup: an engine
+core that outlived its server would otherwise hold the GPU, and the restart's gpu-guard refuse to start beside it. `start` returns
 once a unit's ExecStartPost commands have succeeded, as systemd's does, and fails as systemd's does when it cannot;
 `stop` returns only once every process it stops has exited: the unit's own (ExecStop, then KillSignal, then SIGKILL
 after TimeoutStopSec, the signals and ExecStopPost also when ExecStop fails or cannot run, the unit then ending
@@ -589,6 +592,7 @@ class Runner:
             return None
         status = self.main.returncode
         self.say(f"Main process exited, status={status}")
+        self.terminate(unit)  # what is left of its group
         self.control(unit, "ExecStopPost", env, time.time() + 30)
         return 0 if status == 0 else 1
 
@@ -605,19 +609,22 @@ class Runner:
         return True
 
     def terminate(self, unit: Unit) -> None:
-        """KillSignal to the main process's group, then SIGKILL after TimeoutStopSec; returns once it is gone."""
-        if self.main is None or self.main.poll() is not None:
-            group_gone(self.main.pid if self.main else None, 0)
+        """KillSignal to the main process's group, what is left of it too once the main process has exited, then
+        SIGKILL after TimeoutStopSec; returns once the group is gone."""
+        if self.main is None:
             return
         signum = getattr(signal, unit.last("KillSignal", "SIGTERM"), signal.SIGTERM)
+        timeout = unit.seconds("TimeoutStopSec", 90.0)
         kill_group(self.main.pid, signum)
-        try:
-            self.main.wait(timeout=unit.seconds("TimeoutStopSec", 90.0))
-        except subprocess.TimeoutExpired:
-            self.say("stop timed out: killing")
-            kill_group(self.main.pid, signal.SIGKILL)
-            self.main.wait()
-        group_gone(self.main.pid, 5.0)
+        if self.main.poll() is None:
+            try:
+                self.main.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self.say("stop timed out: killing")
+                kill_group(self.main.pid, signal.SIGKILL)
+                self.main.wait()
+            timeout = 5.0
+        group_gone(self.main.pid, timeout)
 
     def stop(self) -> None:
         self.stopping.set()

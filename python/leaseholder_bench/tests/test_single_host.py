@@ -343,6 +343,45 @@ def test_the_host_python_runs_the_hosts_scripts(host: dict) -> None:
             )
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc (Linux)")
+def test_a_unit_whose_main_process_exits_leaves_no_process_of_its_group(host: dict) -> None:
+    # systemd ends what is left of a unit's cgroup once its main process has exited, before ExecStopPost and a restart:
+    # an engine core that outlives its server (killed by the OOM killer, say) holds the GPU, and every restart's
+    # gpu-guard would refuse to start beside it. Each start of this unit leaves a child in its group as its main
+    # process fails; lh-svc ends each before the next start.
+    children = host["tmp"] / "children"
+    (host["units"] / "leaves.service").write_text(
+        "[Service]\n"
+        f"ExecStart=/bin/sh -c 'sleep 300 & echo $! >> {children}; sleep 0.3; exit 1'\n"
+        "Restart=on-failure\nRestartSec=0.1\nStartLimitBurst=2\nTimeoutStopSec=5\n"
+    )
+
+    def ended(pid: int) -> bool:
+        """Exited: gone, or a zombie its new parent has yet to reap."""
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].startswith("Z")
+        except FileNotFoundError:
+            return True
+
+    pids: list[int] = []
+    try:
+        assert ctl(host, "--user", "start", "leaves.service").returncode == 0
+        deadline = time.monotonic() + 30
+        while ctl(host, "--user", "is-failed", "leaves.service").stdout.strip() != "failed":
+            assert time.monotonic() < deadline, "the unit failed after its restarts"
+            time.sleep(0.1)
+        pids = [int(pid) for pid in children.read_text().split()]
+        assert len(pids) == 2, pids  # StartLimitBurst
+        deadline = time.monotonic() + 10
+        while not all(ended(pid) for pid in pids):
+            assert time.monotonic() < deadline, [pid for pid in pids if not ended(pid)]
+            time.sleep(0.05)
+    finally:
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
 def test_a_start_whose_server_dies_fails_at_once_not_at_its_timeout(host: dict) -> None:
     # As the GPU units: ExecStartPost waits for the server with wait-healthy --pid=${MAINPID}, which lh-svc sets for
     # its control commands as systemd does; a server that dies in its start fails the start in seconds.
