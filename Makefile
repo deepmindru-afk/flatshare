@@ -96,7 +96,7 @@ test-python:
 	done
 
 # The engine change's upkeep checks, outside make check (python/leaseholder_vllm/README.md says how to read them).
-.PHONY: perf-make-room
+.PHONY: perf-make-room compat-upstream
 
 # make-room's cost per step: Scheduler.schedule() on CPU with the switches off and at the PRs' values, in the 13 steady
 # states of the PRs' cost tables (tests/perf_schedule.py; 10 minutes on a 2.1 GHz Xeon, its negative control included).
@@ -111,6 +111,15 @@ perf-make-room: $(VLLM_SRC)
 	  $(if $(UPDATE),baseline $(abspath $(PERF_BASELINE)) --beside "$(PERF_BESIDE)",check $(abspath $(PERF_BASELINE)) --out $(abspath $(PERF_OUT)))
 	cd python/leaseholder_vllm && LH_PERF=1 VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -m pytest -q -s -p no:cacheprovider \
 	  tests/test_perf_control.py
+
+# Whether #63350 and #63351 merge into vLLM's main and, with TORCH_PYTHON (an interpreter for vLLM main's scheduler and
+# tests), pass their tests there on CPU; and whether make-room's patches apply to vLLM's newest release. It keeps a
+# blobless vLLM clone in VLLM_UPSTREAM, and needs the network and git 2.38 or newer (GIT names one).
+VLLM_UPSTREAM ?= $(HOME)/.cache/leaseholder/vllm-upstream
+GIT ?= git
+compat-upstream:
+	uv run -q --no-project --python 3.12 python python/leaseholder_vllm/scripts/compat_upstream.py --clone $(VLLM_UPSTREAM) \
+	  --git $(GIT) $(if $(TORCH_PYTHON),--python $(TORCH_PYTHON))
 
 schema:
 	cargo run -q -p lh-proto --bin lh-proto-schema

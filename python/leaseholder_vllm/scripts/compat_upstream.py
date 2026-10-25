@@ -1,0 +1,369 @@
+"""Whether the engine change still fits vLLM upstream: #63350 and #63351 against vLLM's moving main, and make-room's
+patches against vLLM's newest release.
+
+    python scripts/compat_upstream.py [--clone DIR] [--python TORCH_PYTHON] [--git GIT] [--remote URL]
+
+It keeps a bare blobless clone of vLLM in DIR (``~/.cache/leaseholder/vllm-upstream``, beside the Makefile's v0.32.0
+checkout) and its sparse worktrees in DIR.work, fetches vLLM's main, the PRs' heads (``refs/pull/N/head``) and the
+release tags into it, and reports:
+
+- for each PR, whether it merges into main cleanly (``git merge-tree --write-tree``, git 2.38 or newer), or the files
+  that conflict;
+- with ``--python``, an interpreter with CPU torch and the Python dependencies of vLLM's main: on each clean merge, the
+  test files the PR adds or changes (``tests/**/test_*.py`` in its diff), run on CPU from the merge's source; a test
+  that fails on main too is main's, not the PR's. An interpreter that cannot import main's scheduler is reported as
+  such, and runs nothing;
+- make-room's patches on a sparse checkout of the newest release, and of a newer release candidate if there is one
+  (``build.py make-room OUT --source-tree``): they apply, or the first hunk that does not.
+
+Exit status 1 for a conflict or a failed test; 2 when it could not check (no network, an older git, an interpreter
+that cannot import main's scheduler); 0 otherwise, also when a release does not take the patches: the variant is
+written against 0.32.0, the pinned and deployed version, and says so.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+REMOTE = "https://github.com/vllm-project/vllm"
+PRS = (63350, 63351)
+PINNED = "v0.32.0"
+SCHEDULER = "vllm/v1/core/sched/scheduler.py"
+BUILD = Path(__file__).resolve().parents[1] / "src/leaseholder_vllm/build.py"
+RELEASE = re.compile(r"v(\d+(?:\.\d+)+)(?:rc(\d+))?")
+# What a test run needs to import, from the source tree it runs on.
+IMPORTS = "import pytest, torch, vllm.v1.core.sched.scheduler"
+
+
+class CannotCheck(Exception):
+    """The check could not run: the network, git or the interpreter, not the PRs."""
+
+
+class Git:
+    def __init__(self, git: str, clone: Path):
+        self.git, self.clone = git, clone
+
+    def __call__(self, *args: str, cwd: Path | None = None, check: bool = True) -> str:
+        proc = self.run(*args, cwd=cwd)
+        if check and proc.returncode:
+            raise CannotCheck(f"git {' '.join(args[:3])} failed: {last_line(proc.stderr)}")
+        return proc.stdout
+
+    def run(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+        where = ["-C", str(cwd or self.clone)]
+        return subprocess.run([self.git, *where, *args], capture_output=True, text=True)
+
+
+def last_line(text: str) -> str:
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    return lines[-1] if lines else "(no output)"
+
+
+def git_version(git: str) -> tuple[int, ...]:
+    try:
+        out = subprocess.run([git, "version"], capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise CannotCheck(f"no git at {git!r}: {error}") from error
+    match = re.search(r"(\d+)\.(\d+)", out)
+    return tuple(map(int, match.groups())) if match else (0, 0)
+
+
+def fetch(git: Git, remote: str) -> None:
+    """The clone, made on first use, with main, the PRs' heads and the release tags fetched into it."""
+    offline = (
+        f"cannot fetch from {remote}: compat-upstream fetches vLLM's main, the PRs' heads and its release tags "
+        "from there, so it needs the network"
+    )
+    if not (git.clone / "HEAD").exists():
+        git.clone.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [git.git, "clone", "-q", "--bare", "--single-branch", "--branch", "main"]
+        cmd += ["--filter=blob:none", remote, str(git.clone)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode:
+            raise CannotCheck(f"{offline} ({last_line(proc.stderr)})")
+    git("config", "remote.origin.url", remote)
+    refspecs = ["+refs/heads/main:refs/remotes/origin/main", "+refs/tags/v*:refs/tags/v*"]
+    refspecs += [f"+refs/pull/{pr}/head:refs/remotes/origin/pull/{pr}" for pr in PRS]
+    proc = git.run("fetch", "-q", "--filter=blob:none", "origin", *refspecs)
+    if proc.returncode:
+        raise CannotCheck(f"{offline} ({last_line(proc.stderr)})")
+
+
+def merge(git: Git, pr: int) -> tuple[str | None, list[str]]:
+    """The tree of the PR merged into main, or None and the files that conflict."""
+    proc = git.run(
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        "origin/main",
+        f"origin/pull/{pr}",
+    )
+    lines = proc.stdout.splitlines()
+    if proc.returncode == 0:
+        return lines[0], []
+    if proc.returncode == 1:
+        return None, sorted(set(lines[1:]) - {""})
+    raise CannotCheck(f"git merge-tree failed for #{pr}: {last_line(proc.stderr)}")
+
+
+def changed_tests(git: Git, pr: int) -> list[str]:
+    """The test files the PR adds or changes, against where it leaves main."""
+    base = git("merge-base", "origin/main", f"origin/pull/{pr}").strip()
+    out = git(
+        "diff", "--name-only", "--diff-filter=AM", base, f"origin/pull/{pr}", "--",
+        ":(glob)tests/**/test_*.py",
+    )  # fmt: skip
+    return out.split()
+
+
+def worktree(git: Git, name: str, rev: str, paths: list[str]) -> Path:
+    """A sparse worktree of ``rev`` with ``paths``, in the clone's work directory, made on first use."""
+    tree = git.clone.with_name(git.clone.name + ".work") / name
+    if not (tree / ".git").exists():
+        git("worktree", "prune")
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        git("worktree", "add", "-q", "--detach", "--no-checkout", str(tree), rev)
+    git("sparse-checkout", "set", "--cone", *paths, cwd=tree)
+    git("checkout", "-q", "--detach", "--force", rev, cwd=tree)
+    return tree
+
+
+def source_env(tree: Path) -> dict[str, str]:
+    return os.environ | {
+        "PYTHONPATH": str(tree),
+        "VLLM_TARGET_DEVICE": "cpu",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
+def can_import(python: str, tree: Path) -> str | None:
+    """None if ``python`` imports pytest, torch and the scheduler from ``tree``, or why not."""
+    try:
+        proc = subprocess.run(
+            [python, "-c", IMPORTS], cwd=tree, env=source_env(tree), capture_output=True, text=True
+        )
+    except OSError as error:
+        return str(error)
+    return None if proc.returncode == 0 else last_line(proc.stderr)
+
+
+def harness_error(python: str, tree: Path, dirs: list[str]) -> str | None:
+    """None if pytest collects ``dirs`` from ``tree``: its conftest files and test modules import. Or why not."""
+    proc = subprocess.run(
+        [python, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", *dirs],
+        cwd=tree,
+        env=source_env(tree),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode in (0, 5):  # 5: no tests collected
+        return None
+    output = proc.stdout + proc.stderr
+    errors = [line[1:].strip() for line in output.splitlines() if line.startswith("E ")]
+    return errors[-1] if errors else last_line(output)
+
+
+def run_tests(python: str, tree: Path, files: list[str]) -> tuple[set[str], str]:
+    """``files`` run with pytest from ``tree``, on CPU: the node IDs of the tests that failed or erred, and pytest's
+    summary line."""
+    with tempfile.TemporaryDirectory() as tmp:
+        report = Path(tmp) / "junit.xml"
+        cmd = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={report}"]
+        cmd += ["-o", "junit_family=xunit1", *files]
+        proc = subprocess.run(
+            cmd,
+            cwd=tree,
+            env=source_env(tree),
+            capture_output=True,
+            text=True,
+        )
+        if not report.exists():
+            return {f"{' '.join(files)}: pytest did not run"}, last_line(proc.stdout + proc.stderr)
+        failed = {
+            node_id(case)
+            for case in ET.parse(report).iter("testcase")
+            if case.find("failure") is not None or case.find("error") is not None
+        }
+    summary = next(
+        (
+            line
+            for line in reversed(proc.stdout.splitlines())
+            if re.search(r"\d+ (passed|failed|error)", line)
+        ),
+        last_line(proc.stdout),
+    )
+    return failed, summary.strip("= ")
+
+
+def node_id(case: ET.Element) -> str:
+    """A JUnit test case's pytest node ID: its file, its class if any, its name."""
+    file, classname, name = case.get("file"), case.get("classname") or "", case.get("name")
+    if not file:  # a module that failed to collect
+        return name
+    module = file.removesuffix(".py").replace("/", ".")
+    cls = (
+        classname[len(module) + 1 :].replace(".", "::")
+        if classname.startswith(module + ".")
+        else ""
+    )
+    return "::".join(part for part in (file, cls, name) if part)
+
+
+def newest(tags: list[str]) -> list[str]:
+    """Of ``tags``, the newest release and, if one is newer, the newest release candidate."""
+    finals, candidates = [], []
+    for tag in tags:
+        match = RELEASE.fullmatch(tag)
+        if match:
+            version = tuple(map(int, match[1].split(".")))
+            if match[2] is None:
+                finals.append((version, tag))
+            else:
+                candidates.append((version, int(match[2]), tag))
+    if not finals:
+        return []
+    final = max(finals)
+    newer = [c for c in candidates if c[0] > final[0]]
+    return [final[1]] + ([max(newer)[2]] if newer else [])
+
+
+def builds(git: Git, tag: str) -> str | None:
+    """None if make-room builds on ``tag``'s scheduler, or build.py's reason: the first hunk that does not apply."""
+    tree = worktree(git, "release", tag, ["vllm/v1/core/sched"])
+    with tempfile.TemporaryDirectory() as out:
+        proc = subprocess.run(
+            [sys.executable, str(BUILD), "make-room", out, "--source-tree"],
+            env=os.environ | {"PYTHONPATH": str(tree)},
+            capture_output=True,
+            text=True,
+        )
+    return None if proc.returncode == 0 else last_line(proc.stderr).removeprefix("build.py: ")
+
+
+def check(clone: Path, python: str | None, git_cmd: str, remote: str) -> int:
+    if git_version(git_cmd) < (2, 38):
+        raise CannotCheck(
+            f"git merge-tree --write-tree needs git 2.38 or newer, and {git_cmd} is "
+            f"{'.'.join(map(str, git_version(git_cmd)))}: GIT=<a newer git> points the target at one"
+        )
+    git = Git(git_cmd, clone)
+    fetch(git, remote)
+    heads = {pr: git("rev-parse", "--short=10", f"origin/pull/{pr}").strip() for pr in PRS}
+    main = git("rev-parse", "--short=10", "origin/main").strip()
+    date = git("log", "-1", "--format=%cs", "origin/main").strip()
+    print(f"vLLM main {main} ({date}); " + ", ".join(f"#{pr} {heads[pr]}" for pr in PRS))
+
+    failed = False
+    merges = {}
+    for pr in PRS:
+        if (
+            git.run("merge-base", "--is-ancestor", f"origin/pull/{pr}", "origin/main").returncode
+            == 0
+        ):
+            print(f"#{pr}: merged into main")
+            continue
+        tree, conflicts = merge(git, pr)
+        if tree is None:
+            failed = True
+            print(f"#{pr}: CONFLICTS with main in " + ", ".join(conflicts))
+        else:
+            merges[pr] = tree
+            print(f"#{pr}: merges into main cleanly")
+
+    cannot = None
+    if not python and merges:
+        print("the PRs' tests: not run (TORCH_PYTHON=<an interpreter for vLLM main> runs them)")
+    if python and merges:
+        main_tree = worktree(git, "main", "origin/main", ["vllm", "tests"])
+        tests = {pr: changed_tests(git, pr) for pr in merges}
+        dirs = {str(Path(f).parent) for files in tests.values() for f in files}
+        dirs = sorted(d for d in dirs if (main_tree / d).is_dir())
+        why = can_import(python, main_tree)
+        if why:
+            cannot = f"{python} cannot import vLLM main's scheduler on CPU ({why}): no test ran"
+        elif dirs and (why := harness_error(python, main_tree, dirs)):
+            cannot = (
+                f"{python} cannot run vLLM main's tests in {', '.join(dirs)} ({why}): no test ran"
+            )
+        print(cannot or f"the PRs' tests on their merges into main, on CPU ({python}):")
+        for pr, tree_id in ({} if cannot else merges).items():
+            files = tests[pr]
+            if not files:
+                print(f"  #{pr}: no test file added or changed")
+                continue
+            commit = git(
+                "-c", "user.name=compat-upstream", "-c", "user.email=compat-upstream@localhost",
+                "commit-tree", tree_id, "-p", "origin/main", "-p", f"origin/pull/{pr}",
+                "-m", f"#{pr} merged into main",
+            ).strip()  # fmt: skip
+            tree = worktree(git, f"merge-{pr}", commit, ["vllm", "tests"])
+            failures, summary = run_tests(python, tree, files)
+            mains = set()
+            on_main = [f for f in files if (main_tree / f).exists()]
+            if failures and on_main:
+                mains = run_tests(python, main_tree, on_main)[0] & failures
+            line = f"  #{pr}: {', '.join(files)}: {summary}"
+            if mains:
+                line += f" ({len(mains)} of them fail on main too)"
+            print(line)
+            for name in sorted(failures - mains):
+                failed = True
+                print(f"    FAILED {name}")
+
+    tags = newest(git("tag", "-l", "v*").split())
+    if not tags:
+        raise CannotCheck("no release tag fetched")
+    for tag in tags:
+        why = builds(git, tag)
+        what = f"make-room's patches on {tag}"
+        if tag == PINNED:
+            print(
+                f"{what}, the pinned version: " + ("they apply" if why is None else f"FAIL: {why}")
+            )
+            failed |= why is not None
+        elif why is None:
+            print(f"{what}: they apply")
+        else:
+            diff = git.run("diff", "--shortstat", PINNED, tag, "--", SCHEDULER)
+            stat = f"; its scheduler.py against {PINNED}: {diff.stdout.strip() or 'unchanged'}"
+            print(
+                f"{what}: do not apply ({why}){stat if diff.returncode == 0 else ''}. "
+                f"The variant is written against {PINNED}, the pinned and deployed version"
+            )
+    if failed:
+        return 1
+    if cannot:
+        return 2
+    return 0
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    default = Path.home() / ".cache/leaseholder/vllm-upstream"
+    parser.add_argument(
+        "--clone", type=Path, default=default, help=f"the clone (default {default})"
+    )
+    parser.add_argument(
+        "--python", help="an interpreter with CPU torch and vLLM main's dependencies"
+    )
+    parser.add_argument("--git", default="git")
+    parser.add_argument("--remote", default=REMOTE)
+    args = parser.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
+    try:
+        sys.exit(check(args.clone, args.python, args.git, args.remote))
+    except CannotCheck as error:
+        print(f"compat-upstream: {error}", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
