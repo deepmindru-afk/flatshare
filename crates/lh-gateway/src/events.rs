@@ -181,7 +181,7 @@ pub(crate) async fn post(State(app): State<App>, request: Request) -> Response {
         shared
             .events
             .ingest(&tenant.name, events, &shared.metrics, |fresh| {
-                shared.lifecycle(fresh)
+                shared.lifecycle(tenant, fresh)
             });
     let body = serde_json::json!({"accepted": accepted, "duplicates": duplicates});
     ex.respond(StatusCode::ACCEPTED, &body)

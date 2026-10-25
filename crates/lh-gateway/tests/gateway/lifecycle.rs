@@ -324,6 +324,37 @@ async fn without_events_a_realtime_request_is_its_own_critical_window() {
 }
 
 #[tokio::test]
+async fn a_new_session_in_a_full_table_takes_the_place_of_one_idle_session() {
+    let mock = Mock::start(Script::Json("{}")).await;
+    let gw = Gateway::start(mock.addr, &lifecycle(HEADROOM)).await;
+    post(&gw, &[("vw-1", "user_speech_started")]).await;
+    // 4,095 more sessions, idle, fill the table.
+    let idle: Vec<String> = (1..4096)
+        .map(|n| {
+            format!(
+                r#"{{"event_id":"idle-{n}","session_id":"voice-{n}","at_ms":1792650010000,"source":"voice-worker",
+                    "type":"playback_ended","played_ms":0}}"#
+            )
+        })
+        .collect();
+    let batch = format!("[{}]", idle.join(","));
+    let reply = call(&gw.unix, "POST", "/v1/events", &[], &batch).await;
+    assert_eq!(reply.status, 202, "{:?}", reply.body);
+    gw.await_metric(&sessions("idle"), 4095.0).await;
+    // A new session's turn takes the place of one idle session, not of all of them.
+    let new = r#"{"event_id":"new-1","session_id":"voice-new","at_ms":1792650010000,"source":"voice-worker",
+                  "type":"user_turn_ended"}"#;
+    let reply = call(&gw.unix, "POST", "/v1/events", &[], new).await;
+    assert_eq!(reply.status, 202, "{:?}", reply.body);
+    let metrics = gw.metrics().await;
+    let count = |state: &str| metric(&metrics, &sessions(state));
+    assert_eq!(
+        [count("idle"), count("user_speaking"), count("critical")],
+        [Some(4094.0), Some(1.0), Some(1.0)]
+    );
+}
+
+#[tokio::test]
 async fn realtime_is_never_queued_or_refused() {
     let mock = Mock::start(Script::Json("{}")).await;
     let gw = Gateway::start(

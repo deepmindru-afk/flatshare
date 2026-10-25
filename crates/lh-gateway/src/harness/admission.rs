@@ -7,11 +7,15 @@
 //! A held request owns a [`Ticket`] from its arrival to the end of its response, and dropping the ticket is
 //! leaving: a client that goes away while it waits, or before its response ends, frees its place at once.
 //!
+//! What the admission point remembers of a session, by tenant and session id, is in one bounded table
+//! ([`Sessions`]): the usage its last background request reported, from which the next one's tokens are estimated,
+//! and its turn.
+//!
 //! Under the lifecycle policy the admission point also follows the realtime sessions' turns ([`Realtime`]), from
 //! lifecycle events and realtime requests, and tells the core how many sessions are in each phase whenever that
 //! changes. A task ends the phases that time out.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -25,9 +29,8 @@ use tokio::sync::watch;
 use super::config;
 use super::metrics::{LifecycleMetrics, Metrics, Refusal};
 use super::realtime::Realtime;
-
-/// Sessions whose last usage is kept for token estimates.
-const SESSIONS: usize = 4096;
+use super::sessions::{Key, Sessions};
+use crate::auth::Tenant;
 
 /// The gateway's admission point.
 #[derive(Debug)]
@@ -44,6 +47,7 @@ struct State {
     core: admission::Admission,
     /// Where each held request learns what was decided for it.
     signals: HashMap<RequestId, watch::Sender<Signal>>,
+    /// The sessions the admission point remembers: their usage, and under the lifecycle policy their turns.
     sessions: Sessions,
     /// The lifecycle policy's realtime sessions.
     realtime: Option<Realtime>,
@@ -101,10 +105,11 @@ impl Admission {
         admission
     }
 
-    /// Takes a request of `class` through the admission point. Returns its ticket once it is admitted, `None`
-    /// for a class the policy does not hold (it goes upstream at once), or why it was refused.
+    /// Takes a request of `tenant` and `class` through the admission point. Returns its ticket once it is
+    /// admitted, `None` for a class the policy does not hold (it goes upstream at once), or why it was refused.
     pub async fn admit(
         self: &Arc<Self>,
+        tenant: &Tenant,
         class: SloClass,
         session: &SessionId,
         body_bytes: usize,
@@ -120,20 +125,22 @@ impl Admission {
             self.policy,
             Policy::TokenReservation { .. } | Policy::PreemptResubmit | Policy::Lifecycle(_)
         );
-        let estimated =
-            (priced && class == SloClass::Background).then(|| (session.clone(), body_bytes as u64));
+        let estimated = (priced && class == SloClass::Background).then_some(body_bytes as u64);
         // The lifecycle policy follows a realtime request's session into its critical window.
-        let turn = (class == SloClass::Realtime && self.lifecycle()).then(|| session.clone());
+        let turn = class == SloClass::Realtime && self.lifecycle();
+        let key = (estimated.is_some() || turn).then(|| Key {
+            tenant: Arc::clone(&tenant.name),
+            session: session.clone(),
+        });
         // Every held request takes the lock, so what can be done before it is. Most requests are admitted at
         // once, so only one that waits has its signal changed under the lock.
         let (sender, signal) = watch::channel(Signal::Admitted);
         let (id, tokens, deferred, reply_cap) = {
             let mut state = self.lock();
-            let estimate = estimated
-                .as_ref()
-                .map_or(Estimate::default(), |(session, body_bytes)| {
-                    state.sessions.estimate(session, *body_bytes)
-                });
+            let estimate = match (&key, estimated) {
+                (Some(key), Some(body_bytes)) => state.sessions.estimate(key, body_bytes),
+                _ => Estimate::default(),
+            };
             let Ok(arrival) = state.core.arrive(class, estimate) else {
                 drop(state);
                 self.metrics.refused(class, Refusal::QueueFull);
@@ -144,13 +151,9 @@ impl Admission {
             }
             state.signals.insert(arrival.id, sender);
             state.apply(arrival.actions);
-            if let Some(session) = &turn
-                && let Some(realtime) = &mut state.realtime
-            {
-                realtime.request_started(session, Instant::now());
-                state.turns_changed();
-            } else {
-                state.settle();
+            match &key {
+                Some(key) if turn => state.request_started(key, tenant.trusted, Instant::now()),
+                _ => state.settle(),
             }
             (
                 arrival.id,
@@ -171,6 +174,8 @@ impl Admission {
             class,
             signal,
             tokens,
+            session: key,
+            trusted: tenant.trusted,
             estimated,
             turn,
             deferred,
@@ -191,20 +196,17 @@ impl Admission {
         Ok(Some(ticket))
     }
 
-    /// Lifecycle events the gateway accepted, in the order it received them: the lifecycle policy follows the
-    /// realtime sessions' turns by them.
-    pub fn events<'a>(&self, events: impl IntoIterator<Item = &'a LifecycleEvent>) {
+    /// Lifecycle events of `tenant`'s sessions that the gateway accepted, in the order it received them: the
+    /// lifecycle policy follows the realtime sessions' turns by them.
+    pub fn events<'a>(
+        &self,
+        tenant: &Tenant,
+        events: impl IntoIterator<Item = &'a LifecycleEvent>,
+    ) {
         if !self.lifecycle() {
             return;
         }
-        let mut state = self.lock();
-        if let Some(realtime) = &mut state.realtime {
-            let now = Instant::now();
-            for event in events {
-                realtime.event(&event.session_id, &event.kind, now);
-            }
-            state.turns_changed();
-        }
+        self.lock().events(tenant, events, Instant::now());
     }
 
     /// The policy; `Debug` shows its parameters.
@@ -235,14 +237,8 @@ async fn expire(admission: Weak<Admission>, timeout: Duration) {
         let Some(admission) = admission.upgrade() else {
             return;
         };
-        let mut state = admission.lock();
         let now = Instant::now();
-        let soonest = state
-            .realtime
-            .as_mut()
-            .and_then(|realtime| realtime.expire(now));
-        state.turns_changed();
-        next = soonest.unwrap_or(now + timeout);
+        next = admission.lock().expire(now).unwrap_or(now + timeout);
     }
 }
 
@@ -276,6 +272,73 @@ impl State {
         self.signals.remove(&id)
     }
 
+    /// A background request of the session `key`, of a `trusted` tenant or not, reported `usage`: the session's next
+    /// estimate starts from it.
+    fn observe(&mut self, key: &Key, trusted: bool, usage: SessionUsage, now: Instant) {
+        let (entry, forgotten) = self.sessions.remember(key, trusted, now);
+        if let Some(entry) = entry {
+            entry.usage = Some(usage);
+        }
+        // The session whose place it took may have been followed out of its turn.
+        if let (Some(turn), Some(realtime)) =
+            (forgotten.and_then(|entry| entry.turn), &mut self.realtime)
+        {
+            realtime.forgotten(turn, now);
+        }
+    }
+
+    /// The lifecycle policy: a realtime request of the session `key`, of a `trusted` tenant or not, arrived.
+    fn request_started(&mut self, key: &Key, trusted: bool, now: Instant) {
+        match &mut self.realtime {
+            Some(realtime) => {
+                realtime.request_started(&mut self.sessions, key, trusted, now);
+                self.turns_changed();
+            }
+            None => self.settle(),
+        }
+    }
+
+    /// The lifecycle policy: a realtime request of the session `key` ended.
+    fn request_ended(&mut self, key: &Key, now: Instant) {
+        match &mut self.realtime {
+            Some(realtime) => {
+                realtime.request_ended(&mut self.sessions, key, now);
+                self.turns_changed();
+            }
+            None => self.settle(),
+        }
+    }
+
+    /// The lifecycle policy: lifecycle events of `tenant`'s sessions.
+    fn events<'a>(
+        &mut self,
+        tenant: &Tenant,
+        events: impl IntoIterator<Item = &'a LifecycleEvent>,
+        now: Instant,
+    ) {
+        let Some(realtime) = &mut self.realtime else {
+            return;
+        };
+        for event in events {
+            let key = Key {
+                tenant: Arc::clone(&tenant.name),
+                session: event.session_id.clone(),
+            };
+            realtime.event(&mut self.sessions, &key, tenant.trusted, &event.kind, now);
+        }
+        self.turns_changed();
+    }
+
+    /// The lifecycle policy: ends the realtime sessions' phases that timed out, and returns when the next one will.
+    fn expire(&mut self, now: Instant) -> Option<Instant> {
+        let soonest = self
+            .realtime
+            .as_mut()
+            .and_then(|realtime| realtime.expire(&mut self.sessions, now));
+        self.turns_changed();
+        soonest
+    }
+
     /// The lifecycle policy: tells the core how many realtime sessions are in each phase, and carries out what that
     /// frees.
     fn turns_changed(&mut self) {
@@ -303,11 +366,16 @@ pub(crate) struct Ticket {
     signal: watch::Receiver<Signal>,
     /// The request's estimated prompt tokens; 0 where its policy does not price it.
     tokens: u64,
-    /// The session and body size of a request whose tokens were estimated: its usage informs the next
-    /// estimate for the session.
-    estimated: Option<(SessionId, u64)>,
-    /// The session of a realtime request under the lifecycle policy, whose critical window its end may close.
-    turn: Option<SessionId>,
+    /// The request's session, where the admission point remembers its usage or its turn.
+    session: Option<Key>,
+    /// Whether the request's tenant is trusted.
+    trusted: bool,
+    /// The body size of a request whose tokens were estimated: its usage informs the next estimate for the
+    /// session.
+    estimated: Option<u64>,
+    /// Whether it is a realtime request under the lifecycle policy, whose end may close its session's critical
+    /// window.
+    turn: bool,
     /// Why the lifecycle policy deferred the request.
     deferred: Option<Deferral>,
     /// Whether it was admitted regardless, after `max_defer_s`.
@@ -439,79 +507,22 @@ impl Drop for Ticket {
             return;
         }
         let mut state = self.admission.lock();
-        if let (Some((session, body_bytes)), Some(prompt_tokens)) =
-            (&self.estimated, self.prompt_tokens)
+        let now = Instant::now();
+        if let (Some(key), Some(body_bytes), Some(prompt_tokens)) =
+            (&self.session, self.estimated, self.prompt_tokens)
         {
             let usage = SessionUsage {
                 prompt_tokens,
-                body_bytes: *body_bytes,
+                body_bytes,
             };
-            state.sessions.observe(session, usage);
+            state.observe(key, self.trusted, usage, now);
         }
         let signal = state.leave(self.id);
-        if let Some(session) = &self.turn
-            && let Some(realtime) = &mut state.realtime
-        {
-            realtime.request_ended(session, Instant::now());
-            state.turns_changed();
-        } else {
-            state.settle();
+        match &self.session {
+            Some(key) if self.turn => state.request_ended(key, now),
+            _ => state.settle(),
         }
         drop(state);
         drop(signal);
-    }
-}
-
-/// The last usage of recent sessions, for token estimates. It holds at most [`SESSIONS`] sessions, whatever
-/// clients send, and forgets the earliest first.
-#[derive(Debug, Default)]
-struct Sessions {
-    usage: HashMap<SessionId, SessionUsage>,
-    order: VecDeque<SessionId>,
-}
-
-impl Sessions {
-    fn estimate(&self, session: &SessionId, body_bytes: u64) -> Estimate {
-        admission::estimate_tokens(body_bytes, self.usage.get(session).copied())
-    }
-
-    fn observe(&mut self, session: &SessionId, usage: SessionUsage) {
-        if let Some(last) = self.usage.get_mut(session) {
-            *last = usage;
-            return;
-        }
-        if self.order.len() == SESSIONS
-            && let Some(earliest) = self.order.pop_front()
-        {
-            self.usage.remove(&earliest);
-        }
-        self.order.push_back(session.clone());
-        self.usage.insert(session.clone(), usage);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sessions_are_bounded_and_forget_the_earliest_first() {
-        let mut sessions = Sessions::default();
-        let usage = |prompt_tokens| SessionUsage {
-            prompt_tokens,
-            body_bytes: 400,
-        };
-        for n in 0..=SESSIONS {
-            let session = SessionId::new(format!("s-{n}")).unwrap();
-            sessions.observe(&session, usage(n as u64 + 1));
-        }
-        assert_eq!(sessions.usage.len(), SESSIONS);
-        let first = SessionId::new("s-0").unwrap();
-        let last = SessionId::new(format!("s-{SESSIONS}")).unwrap();
-        // Forgotten: a quarter token per byte again.
-        assert_eq!(sessions.estimate(&first, 400).tokens, 100);
-        assert_eq!(sessions.estimate(&last, 400).tokens, SESSIONS as u64 + 1);
-        sessions.observe(&last, usage(7));
-        assert_eq!(sessions.estimate(&last, 800).tokens, 107);
     }
 }

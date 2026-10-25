@@ -310,7 +310,7 @@ pub(crate) async fn inference(app: App, route: Route, request: Request) -> Respo
             let admitted = tokio::select! {
                 biased;
                 () = server::cut(&mut cut) => None,
-                admitted = admission.admit(class, session, body.json.len()) => Some(admitted),
+                admitted = admission.admit(tenant, class, session, body.json.len()) => Some(admitted),
             };
             let Some(admitted) = admitted else {
                 ex.admission_wait = Some(arrived.elapsed());

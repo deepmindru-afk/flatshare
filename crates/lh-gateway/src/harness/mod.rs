@@ -12,6 +12,7 @@ mod admission;
 pub(crate) mod config;
 mod metrics;
 mod realtime;
+mod sessions;
 
 pub(crate) use admission::{Admission, Ticket};
 pub(crate) use metrics::{Metrics, Refusal};

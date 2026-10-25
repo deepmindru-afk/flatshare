@@ -22,7 +22,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use crate::auth::{self, Tenants};
+use crate::auth::{self, Tenant, Tenants};
 use crate::config::{Config, ListenAddr, MetricsKey, PrioritySignals};
 use crate::events::{self, EventSink, Events};
 use crate::exchange::Exchange;
@@ -62,10 +62,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Accepted lifecycle events, in the order they were received, to the admission point.
-    pub fn lifecycle(&self, events: &[LifecycleEvent]) {
+    /// Accepted lifecycle events of `tenant`'s sessions, in the order they were received, to the admission point.
+    pub fn lifecycle(&self, tenant: &Tenant, events: &[LifecycleEvent]) {
         if let Some(admission) = &self.admission {
-            admission.events(events);
+            admission.events(tenant, events);
         }
     }
 }
