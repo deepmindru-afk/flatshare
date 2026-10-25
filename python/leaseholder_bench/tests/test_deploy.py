@@ -1022,6 +1022,47 @@ def test_a_reload_fails_while_the_old_process_is_still_the_main_one(tmp_path: Pa
     assert "main process is still" in done.stderr and "after 1 s" in done.stderr
 
 
+def test_a_stop_during_a_reload_does_not_fail_the_unit(tmp_path: Path) -> None:
+    # A stop that arrives while the reload waits for the successor signals the unit's whole cgroup, the script and
+    # the command it waits in included, and both gateways drain under systemd's wait for the cgroup: the script exits
+    # 0 at the SIGTERM. It died of it before, and the unit ended failed (result 'signal') with both drained.
+    marked = tmp_path / "sighup"
+    gateway = subprocess.Popen(
+        [sys.executable, "-c", GATEWAY, str(marked)], stdout=subprocess.PIPE, text=True
+    )
+    assert gateway.stdout is not None and gateway.stdout.readline() == "up\n"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "systemctl").write_text(f"#!/bin/sh\necho {gateway.pid}\n")  # no successor yet
+    (bin_dir / "systemctl").chmod(0o755)
+    env = os.environ | {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "LH_GATEWAY_RELOAD_WAIT_S": "30",
+    }
+    reload = subprocess.Popen(
+        [DEPLOY / "bin" / "lh-gateway-reload", "lh-gateway.service", str(gateway.pid)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not marked.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert marked.exists(), "the gateway got its SIGHUP"
+        time.sleep(0.3)  # the script waits for the successor
+        os.killpg(reload.pid, signal.SIGTERM)  # as systemd's stop signals the unit's cgroup
+        _, stderr = reload.communicate(timeout=10)
+        assert reload.returncode == 0, stderr
+    finally:
+        reload.kill()
+        reload.wait()
+        gateway.kill()
+        gateway.wait()
+
+
 DRAINING = """\
 import signal, sys, time
 def drain(*_):
