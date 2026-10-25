@@ -82,12 +82,12 @@ tools() { # uv, its Python 3.12 (py), the compilers and ss
   # Triton builds its launchers with a C compiler and nvcc needs a host C++ compiler.
   if ! command -v cc >/dev/null || ! command -v c++ >/dev/null; then
     log "no C or C++ compiler: build-essential"
-    apt_install build-essential || log "build-essential not installed (no sudo or apt): the preflight refuses"
+    apt_install build-essential || log "build-essential not installed (neither root nor sudo, or no apt): the preflight refuses"
   fi
   # smoke.sh's listener audit (deploy/bin/audit-listeners) reads the host's sockets with ss.
   if ! command -v ss >/dev/null; then
     log "no ss: iproute2"
-    apt_install iproute2 || log "iproute2 not installed (no sudo or apt): the preflight refuses"
+    apt_install iproute2 || log "iproute2 not installed (neither root nor sudo, or no apt): the preflight refuses"
   fi
 }
 host_py() { "$py" "$src/deploy/a100/host.py" "$@"; }
@@ -98,10 +98,13 @@ for k in sys.argv[2:]:
     v = v.get(k) if isinstance(v, dict) else None
 print("" if v is None else v)' "$@"
 }
-with_sudo() { sudo -n true 2>/dev/null && command -v apt-get >/dev/null; }
-apt_install() { # apt_install PACKAGE...: where sudo and apt work; fails otherwise
+as_root() { # as_root COMMAND...: as it is where this user is root (a container's), else through sudo -n
+  if (($(id -u) == 0)); then "$@"; else sudo -n "$@"; fi
+}
+with_sudo() { { (($(id -u) == 0)) || sudo -n true 2>/dev/null; } && command -v apt-get >/dev/null; }
+apt_install() { # apt_install PACKAGE...: where root or sudo, and apt, work; fails otherwise
   with_sudo || return 1
-  sudo -n apt-get update -q >/dev/null && sudo -n apt-get install -y -q "$@" >/dev/null
+  as_root apt-get update -q >/dev/null && as_root apt-get install -y -q "$@" >/dev/null
 }
 
 detect() { # the host's facts, as the host's own systemctl answers (not the shims, should env.sh be sourced)
@@ -129,7 +132,7 @@ render() {
       detect
       "$py" "$src/deploy/profile.py" render "$profile" --host "$node/host.json" --out "$node"
     else
-      log "cuda-compat-13-0 not installed (no sudo, apt or NVIDIA's repository): the cu129 lock"
+      log "cuda-compat-13-0 not installed (neither root nor sudo, no apt, or no NVIDIA repository): the cu129 lock"
     fi
   fi
   log "install path: $(field "$node/node.json" install path): $(field "$node/node.json" install reason)"

@@ -932,3 +932,22 @@ def test_pull_keeps_the_units_logs_as_the_run_goes(tmp_path: Path, runtime: Path
     )
     until = first.split("--until ")[1].split()[0]
     assert second.startswith(f"journal --user {units} --since {until} --until @")
+
+
+def test_bootstrap_installs_as_root_without_sudo(ubuntu: dict) -> None:
+    # A container whose user is root and that has no sudo: apt-get runs as it is (build-essential, iproute2, git),
+    # where it once needed `sudo -n`; a user who is not root still needs sudo.
+    tools = Path(ubuntu["env"]["PATH"].split(os.pathsep)[0])
+    log = ubuntu["state"] / "apt.log"
+    (tools / "apt-get").write_text(f'#!/bin/sh\necho "apt-get $*" >>{log}\n')
+    (tools / "apt-get").chmod(0o755)
+    (tools / "id").write_text(
+        '#!/bin/sh\nif [ "$1" = -u ]; then echo "${FAKE_UID:-0}"; else echo root; fi\n'
+    )
+    (tools / "id").chmod(0o755)
+    done = bootstrap(ubuntu, "apt_install iproute2")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert lines(log) == ["apt-get update -q", "apt-get install -y -q iproute2"]
+    refused = bootstrap(ubuntu, "apt_install iproute2 || echo refused", FAKE_UID="1000")
+    assert refused.returncode == 0 and refused.stdout.strip().endswith("refused")
+    assert len(lines(log)) == 2  # sudo -n fails: nothing installed
