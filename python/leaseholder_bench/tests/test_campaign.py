@@ -177,6 +177,43 @@ def test_a_campaign_refuses_a_seed_it_cannot_read(
     assert runs(hosts) == []
 
 
+def test_a_campaign_sets_its_points_kv_sampler(hosts: Hosts) -> None:
+    hosts.gpu(PHASTFORM)
+    lines = ["kv-sample-s 0  # as W5's points ran", "arms/a1.toml", "arms/a2.toml"]
+    campaign = hosts.campaign("c8", lines, {"a1": VOICE, "a2": VOICE})
+    done = hosts.run(campaign)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert [run.split(" --gpu-source")[0].split()[-2:] for run in runs(hosts)] == [
+        ["--kv-sample-s", "0"]
+    ] * 2
+    assert (
+        "c8: 2 points, arm files at ?, no KV sampler"
+        in (hosts.results / "c8" / "campaign.log").read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    ("lines", "error"),
+    [
+        (
+            ["kv-sample-s 0", "kv-sample-s 1"],
+            "'kv-sample-s 1': a campaign sets the KV sampler's interval once",
+        ),
+        (
+            ["kv-sample-s fast"],
+            "'kv-sample-s fast': a campaign sets the KV sampler's interval once",
+        ),
+    ],
+)
+def test_a_campaign_refuses_a_sampler_interval_it_cannot_read(
+    hosts: Hosts, lines: list[str], error: str
+) -> None:
+    campaign = hosts.campaign("c9", [*lines, "arms/a1.toml"], {"a1": VOICE})
+    done = hosts.run(campaign, "--dry-run")
+    assert done.returncode == 1 and error in done.stdout
+    assert runs(hosts) == []
+
+
 def test_without_a_seed_line_each_point_keeps_its_arm_files_seed(hosts: Hosts) -> None:
     hosts.gpu(PHASTFORM)
     done = hosts.run(hosts.campaign("c5", ["arms/a1.toml"], {"a1": VOICE}))

@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import signal
 import socketserver
 import stat
 import subprocess
@@ -859,6 +860,50 @@ class UnixService(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         return f"unix:{self.path}"
 
 
+class CountingEngine(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """An engine's /metrics on a Unix socket, as the tunnel's on cyan, that counts the connections it accepts and
+    keeps each one open between requests (HTTP/1.1), as vLLM does for 60 s; the requests numbered in ``drop`` get
+    no answer, and lose their connection."""
+
+    daemon_threads = True
+
+    def __init__(self, drop: frozenset[int] = frozenset()) -> None:
+        self.accepted = self.requests = 0
+        self.drop = drop
+        # A short path: a socket's must fit sun_path, which a test's tmp_path may not.
+        self.path = Path(tempfile.mkdtemp(prefix="lh-kv-")) / "s.sock"
+        super().__init__(str(self.path), _KeepAlive)
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+    def get_request(self):
+        request = super().get_request()
+        self.accepted += 1
+        return request
+
+
+class _KeepAlive(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server: CountingEngine
+
+    def do_GET(self) -> None:
+        self.server.requests += 1
+        if self.server.requests in self.server.drop:
+            self.close_connection = True
+            return
+        body = (
+            b'vllm:kv_cache_usage_perc{engine="0"} 0.5\n'
+            b'vllm:num_requests_running{engine="0"} 2\n'
+            b'vllm:num_requests_waiting{engine="0"} 0\n'
+        )
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
 class _Handler(BaseHTTPRequestHandler):
     server: Service | UnixService
 
@@ -1187,6 +1232,7 @@ def test_an_agent_point_samples_the_engines_kv(cyan: Cyan) -> None:
     arm_file = write(cyan.arms, "a2-stock-s4.toml", ARM)
     out = cyan.host.root / "runs" / "a2-stock-s4"
     summary = run_point(arm_file, out, cyan.host, cyan.systemd, kv_sample_s=0.02)
+    assert record(cyan, "a2-stock-s4")["kv_sample_s"] == 0.02
     lines = (out / "metrics" / "engine-kv.csv").read_text().splitlines()
     assert lines[0] == "time,kv_cache_usage,running,waiting"
     window = record(cyan, "a2-stock-s4")["window"]
@@ -1209,6 +1255,61 @@ def test_an_agent_point_samples_the_engines_kv(cyan: Cyan) -> None:
         alone["kv"] is None
         and not (cyan.host.root / "runs" / "a1-voice" / "metrics" / "engine-kv.csv").exists()
     )
+    assert record(cyan, "a1-voice")["kv_sample_s"] is None
+    # An interval of 0 samples nothing, as W5's points ran.
+    cyan.scheduler.update(STOCK_SCHEDULER)
+    unsampled = cyan.host.root / "runs" / "a2-stock-s4-w5"
+    plain = run_point(
+        write(cyan.arms, "a2-stock-s4-w5.toml", ARM),
+        unsampled,
+        cyan.host,
+        cyan.systemd,
+        kv_sample_s=0,
+    )
+    assert plain["kv"] is None and not (unsampled / "metrics" / "engine-kv.csv").exists()
+    assert record(cyan, "a2-stock-s4-w5")["kv_sample_s"] is None
+
+
+def test_the_kv_sampler_keeps_one_connection_to_each_engine(tmp_path: Path) -> None:
+    # Through cyan's tunnel each new connection is a new SSH session on the GPU node: the sampler holds one per
+    # engine for its run, and opens another only after a request failed (engine a's 4th, which loses its own).
+    engines = {"a": CountingEngine(drop=frozenset({4})), "b": CountingEngine()}
+    sampler = e2._KvSampler({node: f"unix:{e.path}" for node, e in engines.items()}, tmp_path, 0.01)
+    deadline = time.monotonic() + 20
+    while min(e.requests for e in engines.values()) < 10 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    sampler.stop()
+    for engine in engines.values():
+        engine.shutdown()
+    assert min(e.requests for e in engines.values()) >= 10
+    assert (engines["a"].accepted, engines["b"].accepted) == (2, 1)
+    for node, engine in engines.items():
+        rows = (tmp_path / f"engine-{node}-kv.csv").read_text().splitlines()[1:]
+        assert len(rows) == engine.requests - len(
+            engine.drop
+        )  # every answered sample, the failed one left out
+
+
+def test_e2_run_takes_the_kv_samplers_interval(tmp_path: Path, monkeypatch) -> None:
+    seen: list[float] = []
+
+    def recorded(arm_file, out, host, **options):
+        seen.append(options["kv_sample_s"])
+        raise E2Error("recorded")
+
+    monkeypatch.setattr(e2, "run_point", recorded)
+    monkeypatch.setenv("HOME", str(tmp_path))  # Host.load reads the host's settings from the home
+    handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGHUP, signal.SIGTERM)}
+    arm = write(tmp_path, "a2-stock-s4.toml", ARM)
+    try:
+        for extra in ([], ["--kv-sample-s", "0"], ["--kv-sample-s", "2.5"]):
+            assert main(["e2", "run", str(arm), "--out", str(tmp_path / "out"), *extra]) == 1
+        with pytest.raises(SystemExit):
+            main(["e2", "run", str(arm), "--out", str(tmp_path / "out"), "--kv-sample-s", "-1"])
+    finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+    assert seen == [0.5, 0.0, 2.5]
 
 
 def test_a_campaign_sets_the_agents_seed_and_run_json_keeps_it(cyan: Cyan) -> None:

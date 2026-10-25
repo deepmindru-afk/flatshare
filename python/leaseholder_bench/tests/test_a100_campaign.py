@@ -44,9 +44,23 @@ def campaign(path: Path) -> tuple[int | None, list[Path]]:
             continue
         if m := re.fullmatch(r"agents-seed\s+(\d+)", line):
             seed = int(m.group(1))
-        else:
+        elif not re.fullmatch(r"kv-sample-s\s+[\d.]+", line):
             arms.append(path.parent / line)
     return seed, arms
+
+
+def sampling(path: Path) -> str | None:
+    """A campaign file's KV sampler interval line's value, if it has one."""
+    found = re.findall(r"^kv-sample-s\s+([\d.]+)", path.read_text(), re.M)
+    return found[0] if found else None
+
+
+def test_the_marlin_point_runs_as_w5s_did_and_the_core_samples() -> None:
+    # The Marlin point is read against W5's, which ran without the KV sampler; the A100's own points sample it,
+    # for the running share its analysis reads.
+    assert sampling(A100 / "marlin-dry.campaign") == "0"
+    for path in A100.glob("a100-*.campaign"):
+        assert sampling(path) is None, path.name
 
 
 def test_the_cores_rounds_rotate_the_engines_with_no_switch_between_rounds() -> None:

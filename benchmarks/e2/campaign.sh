@@ -2,7 +2,8 @@
 # campaign.sh [--dry-run] [--pause] [--local] [--until HH:MM] CAMPAIGN: measure the E2 points a campaign file lists,
 # from a workstation with SSH to the hosts, like deploy/deploy.sh. CAMPAIGN names arm files, one per line, relative to itself; a line
 # `agents-seed N` sets AIPerf's seed for all of its points (lh-bench e2 run --agents-seed), in place of each arm
-# file's [agents] seed. For each point whose run directory on cyan is not complete, in order, it
+# file's [agents] seed, and a line `kv-sample-s SECONDS` the KV sampler's interval (lh-bench e2 run --kv-sample-s;
+# 0 samples nothing, as W5's points ran). For each point whose run directory on cyan is not complete, in order, it
 #   1. switches each GPU node to the arm's engine (deploy/phastform/variant.sh use, with what lh-bench e2 engine prints),
 #      with the measurement drop-in on (variant.sh measure on: vLLM's development routes, which lh-bench e2 run reads),
 #   2. measures the point on cyan (lh-bench e2 run) into ~/leaseholder/runs/e2/CAMPAIGN/POINT, with each GPU node's
@@ -87,8 +88,9 @@ mkdir -p "$results"
 log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$results/campaign.log"; }
 die() { log "campaign: $*"; exit 1; }
 
-# The points in order, each named after its arm file, and the agents' seed the campaign sets, if it sets one.
-arms=() points=() seed=""
+# The points in order, each named after its arm file, and the agents' seed and the KV sampler's interval the
+# campaign sets, if it sets them.
+arms=() points=() seed="" sampling=""
 while IFS= read -r line || [[ -n $line ]]; do
   line=${line%%#*}
   line=${line#"${line%%[![:space:]]*}"}
@@ -98,6 +100,12 @@ while IFS= read -r line || [[ -n $line ]]; do
     [[ -z $seed && $line =~ ^agents-seed[[:space:]]+([0-9]+)$ ]] ||
       die "$1: '$line': a campaign sets the agents' seed once, as agents-seed N"
     seed=${BASH_REMATCH[1]}
+    continue
+  fi
+  if [[ $line == kv-sample-s* ]]; then
+    [[ -z $sampling && $line =~ ^kv-sample-s[[:space:]]+([0-9]+(\.[0-9]+)?)$ ]] ||
+      die "$1: '$line': a campaign sets the KV sampler's interval once, as kv-sample-s SECONDS"
+    sampling=${BASH_REMATCH[1]}
     continue
   fi
   [[ -f $here/$line ]] || die "$1 names $line, which is not a file"
@@ -110,6 +118,9 @@ done <"$1"
 ((${#points[@]})) || die "$1 names no point"
 seeded=""
 if [[ -n $seed ]]; then seeded=", the agents' seed $seed"; fi
+if [[ -n $sampling ]]; then
+  if [[ $sampling =~ ^0+(\.0+)?$ ]]; then seeded+=", no KV sampler"; else seeded+=", the KV sampler every $sampling s"; fi
+fi
 log "campaign $name: ${#points[@]} points, arm files at $(git -C "$here" describe --always --dirty 2>/dev/null || echo '?')$seeded"
 
 # Copy the arm files to cyan, where lh-bench reads them, and check each one there.
@@ -203,7 +214,7 @@ for i in "${!points[@]}"; do
   log "$point: measuring"
   sample_gpus "$point"
   status=0
-  $ssh "$cyan" "$bench e2 run $runs/arms/$point.toml --out $runs/$point${seed:+ --agents-seed $seed}$sources$profile" 2>&1 |
+  $ssh "$cyan" "$bench e2 run $runs/arms/$point.toml --out $runs/$point${seed:+ --agents-seed $seed}${sampling:+ --kv-sample-s $sampling}$sources$profile" 2>&1 |
     tee -a "$results/campaign.log" || status=$?
   stop_gpus "$point"
   if ((status == 255)); then

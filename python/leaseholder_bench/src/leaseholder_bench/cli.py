@@ -455,6 +455,7 @@ def _e2(args: argparse.Namespace) -> int:
                     save_audio=args.save_audio,
                     gpu_source=sources,
                     agents_seed=args.agents_seed,
+                    kv_sample_s=args.kv_sample_s,
                 )
             except KeyboardInterrupt:
                 print(f"lh-bench e2: {args.arm.stem} interrupted", file=sys.stderr)
@@ -495,6 +496,17 @@ def _interrupted(signum: int, _frame: object) -> None:
     raise KeyboardInterrupt(signal.Signals(signum).name)
 
 
+def _seconds(text: str) -> float:
+    """An interval in seconds, 0 or more."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not 0 <= value < float("inf"):
+        raise argparse.ArgumentTypeError(f"{text!r}: an interval is 0 or more seconds")
+    return value
+
+
 def _add_e2(commands: Commands) -> None:
     e2 = commands.add_parser(
         "e2",
@@ -523,6 +535,15 @@ def _add_e2(commands: Commands) -> None:
         metavar="N",
         help="AIPerf's seed in place of the arm file's [agents] seed, as a campaign file's "
         "agents-seed line sets it for its points; run.json keeps the seed the replay ran with",
+    )
+    run.add_argument(
+        "--kv-sample-s",
+        type=_seconds,
+        default=0.5,
+        metavar="SECONDS",
+        help="how often an agent point samples each engine's KV use and requests from its /metrics "
+        "while the calls run, for the measured running share (default %(default)s); 0 samples "
+        "nothing, as W5's points ran; run.json keeps the interval",
     )
     run.add_argument(
         "--profile",

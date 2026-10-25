@@ -12,7 +12,8 @@
 4. it snapshots the gateway's and the engine's ``/metrics``, runs ``lh-voice bots`` inside the
    voice-plane namespace (``--save-audio`` has them save each call's audio, for the demo video) and
    snapshots again: the calls are the measurement window, through which an agent point samples each
-   engine's KV use and requests every half second;
+   engine's KV use and requests every half second (``--kv-sample-s``; 0 samples nothing, as W5's points
+   ran: the sampler came after them), on one connection to each engine that it keeps for the window;
 5. it stops AIPerf, keeps the gateway's request log of the calls and the voice worker's journal of
    them (its turn lines and its sessions' event counts), and writes ``summary.json``.
 
@@ -131,7 +132,8 @@ GATEWAY_IDLE_S = 30.0
 KV_SAMPLE_S = 0.5
 """How often an agent point samples each engine's KV use and its running and waiting requests from its
 ``/metrics`` while the calls run (P-1's sampler; record.KV_GAUGES), from which the summary takes the
-measured running share."""
+measured running share; ``lh-bench e2 run --kv-sample-s`` sets another, 0 none (W5's points ran without
+it)."""
 
 SGLANG = "sglang"
 """The one engine variant that serves SGLang; every other variant serves vLLM."""
@@ -857,14 +859,18 @@ def run_point(
     reads over its SSH at the point's start and run.json keeps beside cyan's; None when unknown.
     ``agents_seed``, a campaign's (``agents-seed`` in its file), replaces the arm file's ``[agents]
     seed`` for AIPerf; run.json keeps the seed the replay ran with (``agents_seed``). An agent point
-    samples each engine's KV every ``kv_sample_s`` while the calls run; None samples nothing (tests
-    whose fake engines count their /metrics reads)."""
+    samples each engine's KV every ``kv_sample_s`` while the calls run; 0 or None samples nothing (W5's
+    points ran without the sampler, and tests whose fake engines count their /metrics reads), and
+    run.json keeps the interval the point sampled at (``kv_sample_s``, null when it did not)."""
     if not hasattr(os, "waitid"):
         raise E2Error(NEEDS_WAITID)
     if stale := _stale_install():
         raise E2Error(stale)
     if agents_seed is not None and agents_seed < 0:
         raise E2Error(f"the agents' seed cannot be negative: {agents_seed}")
+    if kv_sample_s is not None and kv_sample_s < 0:
+        raise E2Error(f"the KV sampler's interval cannot be negative: {kv_sample_s}")
+    kv_sample_s = kv_sample_s or None  # 0 samples nothing
     arm = load_arm(arm_file)
     seed = arm.agents.seed if agents_seed is None else agents_seed
     host = host or Host.load()
@@ -876,6 +882,8 @@ def run_point(
         record["save_audio"] = save_audio
         # The seed AIPerf replays with: the campaign's when it set one, else the arm file's.
         record["agents_seed"] = seed if arm.agents.sessions else None
+        # The KV sampler's interval, null where the point did not sample (voice alone, or 0).
+        record["kv_sample_s"] = kv_sample_s if arm.agents.sessions else None
         # Under the lock no other run's tools are alive: a marked process is left from a run that
         # was killed before it could stop them.
         if leftovers := kill_marked():
@@ -1159,7 +1167,11 @@ class _KvSampler:
     """Each engine's KV use and running and waiting requests (record.KV_GAUGES) from its ``/metrics``
     every ``interval`` seconds, from its start until :meth:`stop`, a line a sample (its time, then the
     three) into ``metrics``' engine-kv.csv (engine-NODE-kv.csv on several GPU nodes). A sample the
-    engine does not answer in time is left out; the summary counts the samples it has."""
+    engine does not answer in time is left out; the summary counts the samples it has. Each engine has
+    one client for the whole run, its connection kept alive between samples (the engines keep an idle
+    one 60 s): through cyan's tunnel a new connection is a new SSH session on the GPU node, about 12 ms
+    of its CPU, which a client a sample would cost it twice a second while it measures. A request
+    that fails drops its client, and the next sample opens another."""
 
     def __init__(
         self, engines: Mapping[str | None, str], metrics: Path, interval: float = KV_SAMPLE_S
@@ -1179,15 +1191,29 @@ class _KvSampler:
             thread.start()
 
     def _sample(self, address: str, path: Path) -> None:
+        http: httpx.Client | None = None
         with path.open("w") as samples:
             samples.write("time,kv_cache_usage,running,waiting\n")
-            while not self._stopped.is_set():
-                at = time.time()
-                with contextlib.suppress(httpx.HTTPError):
-                    if (values := kv_values(fetch(address, timeout=2.0))) is not None:
+            try:
+                while not self._stopped.is_set():
+                    at = time.time()
+                    values = None
+                    try:
+                        http = http or client(address, timeout=2.0)
+                        response = http.get("/metrics")
+                        response.raise_for_status()
+                        values = kv_values(response.text)
+                    except httpx.HTTPError:
+                        if http is not None:
+                            http.close()
+                        http = None
+                    if values is not None:
                         samples.write(f"{at:.6f}," + ",".join(f"{v:g}" for v in values) + "\n")
                         samples.flush()
-                self._stopped.wait(max(0.0, at + self.interval - time.time()))
+                    self._stopped.wait(max(0.0, at + self.interval - time.time()))
+            finally:
+                if http is not None:
+                    http.close()
 
     def stop(self) -> None:
         """Stop sampling once each engine's sample in flight is written; stopping twice is stopping."""

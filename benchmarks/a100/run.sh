@@ -67,7 +67,7 @@ points_done() { # points_done CAMPAIGN: whether every point of the campaign file
     line=${line%%#*}
     line=${line#"${line%%[![:space:]]*}"}
     line=${line%"${line##*[![:space:]]}"}
-    [[ -z $line || $line == agents-seed* ]] && continue
+    [[ -z $line || $line == agents-seed* || $line == kv-sample-s* ]] && continue
     grep -qs '"status": "complete"' "$root/runs/e2/$name/$(basename "$line" .toml)/run.json" || return 1
   done <"$file"
 }
