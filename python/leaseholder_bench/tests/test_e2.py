@@ -311,16 +311,22 @@ W5_EXT = {
     "w5-std-frozen-s16": "a4-b512-t256-s16",
     "w5-std-pr-ab48-s16": "a4-b512-t256-s16",
 }
-"""The W5 extension's three configurations, each with the W4 arm whose agents, gateway and router it keeps."""
+"""The W5 extension's new configurations, each with the W4 arm whose agents, gateway and router it keeps."""
+W5_EXT_GROUPS = (
+    ("w5-disc-a8c-resubmit-s24",),
+    ("w5-std-frozen-s16",),
+    ("w5-std-pr-ab48-s16", "w5-disc-pr-ab48-s24"),
+)
+"""Its engine groups, in round 1's order: the PRs' two points share their engine, the second W5's own."""
 
 
-def test_the_w5_extension_rotates_its_three_configurations_over_w5s_seeds() -> None:
+def test_the_w5_extension_rotates_its_engine_groups_over_w5s_seeds() -> None:
     rounds = [campaign_lines(BENCHMARKS / f"w5-ext-r{r}.campaign") for r in range(1, 6)]
     assert [lines[0] for lines in rounds] == [f"agents-seed {seed}" for seed in range(11, 16)]
     orders = [[Path(line).stem for line in lines[1:]] for lines in rounds]
-    assert orders[0] == list(W5_EXT)
-    for order, then in itertools.pairwise(orders):
-        assert then == [*order[1:], order[0]]  # rotated by one from round to round
+    for r, order in enumerate(orders):
+        groups = W5_EXT_GROUPS[r % 3 :] + W5_EXT_GROUPS[: r % 3]  # rotated by one group a round
+        assert order == [point for group in groups for point in group]
     for name, w4 in W5_EXT.items():
         arm, before = (
             load_arm(BENCHMARKS / "arms" / f"{name}.toml"),
@@ -332,7 +338,7 @@ def test_the_w5_extension_rotates_its_three_configurations_over_w5s_seeds() -> N
             before.gateway,
             before.router,
         )
-    # The standard scenario's PR point runs the engine of W5's discriminating one.
+    # The standard scenario's PR point runs the engine of W5's discriminating one, so the two need no switch.
     engine = load_arm(BENCHMARKS / "arms" / "w5-std-pr-ab48-s16.toml").engine
     assert engine == load_arm(BENCHMARKS / "arms" / "w5-disc-pr-ab48-s24.toml").engine
     assert (
