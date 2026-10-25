@@ -517,6 +517,49 @@ def test_a_runner_reaps_the_orphans_it_adopts_and_no_process_it_started(
     assert started.wait(timeout=5) == 3
 
 
+def test_a_runner_stops_whichever_line_of_its_wait_its_sigterm_is_handled_at(
+    tmp_path: Path,
+) -> None:
+    # A Python signal handler runs in the main thread between two of its bytecodes, wherever that is: inside the
+    # runner's wait for a stop too, which threading.Event.wait does holding the Event's lock, and there the SIGTERM
+    # handler's Event.set() waited for that lock for good, the runner frozen and its unit running on past the stop
+    # (once in nine suite runs on a loaded host). Here a trace makes the handler's call at each of the wait's first lines
+    # in turn, as a signal handled there would, in a process of its own, which a deadlock leaves hanging.
+    program = textwrap.dedent(
+        """\
+        import importlib.machinery, importlib.util, sys
+        loader = importlib.machinery.SourceFileLoader("lh_svc", sys.argv[1])
+        spec = importlib.util.spec_from_loader("lh_svc", loader)
+        lh_svc = sys.modules["lh_svc"] = importlib.util.module_from_spec(spec)
+        loader.exec_module(lh_svc)
+        for at in range(1, 13):
+            runner, lines = lh_svc.Runner("waits.service"), []
+            def handled_at(frame, event, arg):
+                if event == "line":
+                    lines.append(frame.f_lineno)
+                    if len(lines) == at:
+                        runner.stop()  # what the runner's SIGTERM handler calls
+                return handled_at
+            sys.settrace(handled_at)
+            stopped = runner.stopping.wait(5)
+            sys.settrace(None)
+            assert stopped, (at, lines)
+        print("stopped")
+        """
+    )
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", program, str(BIN / "lh-svc")],
+            env=os.environ | {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the runner froze: its SIGTERM handler waited for good on its wait's lock")
+    assert done.returncode == 0 and done.stdout.strip() == "stopped", done.stderr
+
+
 def journal_times(host: dict, unit: str, message: str) -> list[float]:
     """When the unit's journal logged each line holding ``message``."""
     out = ctl(host, "-u", unit, "-o", "short-unix", tool="journalctl").stdout

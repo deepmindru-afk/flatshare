@@ -456,11 +456,34 @@ LOOK_DELAY = "LH_SVC_LOOK_DELAY"
 first looks at it, where a busy host can deschedule it for longer than a main process that exits at once lives."""
 
 
+class Stopping:
+    """A stop asked of a runner, which its SIGTERM handler asks for: a flag, which the handler sets taking no lock. A
+    Python signal handler runs in the main thread between two of its bytecodes, inside threading.Event.wait's hold of
+    the Event's own lock too, where Event.set() would wait for that lock for good, the runner frozen and its unit left
+    running."""
+
+    def __init__(self) -> None:
+        self.asked = False
+
+    def set(self) -> None:
+        self.asked = True
+
+    def is_set(self) -> bool:
+        return self.asked
+
+    def wait(self, seconds: float) -> bool:
+        """Whether a stop is asked within ``seconds``, looked at every 50 ms."""
+        deadline = time.monotonic() + seconds
+        while not self.asked and (left := deadline - time.monotonic()) > 0:
+            time.sleep(min(left, 0.05))
+        return self.asked
+
+
 class Runner:
     def __init__(self, name: str) -> None:
         self.name = unit_name(name)
         self.journal = Journal(self.name)
-        self.stopping = threading.Event()
+        self.stopping = Stopping()
         self.main: subprocess.Popen | None = None
         self.stop_failed = False
         """Whether the last stop's ExecStop failed: the unit then ends failed, not inactive."""
