@@ -101,6 +101,9 @@ CONFIGURATION_ARMS = {
 """The arm the report gives the points of an arm file whose ``arm`` names another configuration's:
 arm 9's ablations and the vLLM PRs' configurations say ``arm = 9`` as run, but each is a
 configuration of its own, never a point on arm 9's frontier. The records stay as run."""
+PR_LABELS = (("vLLM PRs A and B", "vLLM #63350 and #63351"), ("vLLM PR A", "vLLM #63350"))
+"""The vLLM PRs as the records' labels name them, and as the report shows them: by their numbers,
+as the docs do. The records keep their labels as run."""
 STANDARD_WORKLOAD = ("weka-x32", 2)
 """The corpus and callers of an arm file that names neither (e2's Agents.data and Voice.callers):
 the workload drawn in frontier.svg."""
@@ -211,6 +214,13 @@ def _warmups(turns: int) -> str:
     return f"{turns} warm-up turn{'' if turns == 1 else 's'}"
 
 
+def _shown(label: str) -> str:
+    """A record's label as the report shows it (PR_LABELS)."""
+    for kept, shown in PR_LABELS:
+        label = label.replace(kept, shown)
+    return label
+
+
 def hardware(gpu_name: str | None, model: str | None) -> str:
     """What a point's workload names beside its corpus and callers: its GPU and its model where they
     are not the frozen box's (BOX_GPU, BOX_MODEL); nothing on the box."""
@@ -239,7 +249,7 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
         "arm": CONFIGURATION_ARMS.get(run["name"], str(arm["arm"])),
         "point": run["name"],
         "campaign": run_dir.absolute().parent.name,
-        "label": arm["label"],
+        "label": _shown(arm["label"]),
         "frontier": False,
         "callers": arm["voice"]["callers"],
         "sessions": arm["agents"]["sessions"],

@@ -879,6 +879,30 @@ def test_arm_9s_ablations_and_the_prs_are_configurations_of_their_own(tmp_path: 
     assert all(arm.startswith("9-") for arm in CONFIGURATION_ARMS.values())
 
 
+def test_the_report_names_the_prs_by_their_numbers(tmp_path: Path) -> None:
+    # The records' labels name vLLM #63350 and #63351 "PR A" and "PRs A and B", as their arm files
+    # did; the report shows the numbers, as the docs name them, and the records stay as run.
+    labels = {
+        "disc-pr-a-s24": "vLLM PR A: make-room's KV preemption alone, no gateway policy",
+        "disc-pr-ab48-s24": "vLLM PRs A and B with a 48-token window, no gateway policy",
+    }
+    dirs = []
+    for name, label in labels.items():
+        run_dir = point(tmp_path, name, "9", 3500, 2193)
+        run = json.loads((run_dir / "run.json").read_text())
+        run["arm"]["label"] = label
+        (run_dir / "run.json").write_text(json.dumps(run))
+        dirs.append(run_dir)
+    rows, _ = load_points(dirs)
+    assert {r["point"]: r["label"] for r in rows} == {
+        "disc-pr-a-s24": "vLLM #63350: make-room's KV preemption alone, no gateway policy",
+        "disc-pr-ab48-s24": "vLLM #63350 and #63351 with a 48-token window, no gateway policy",
+    }
+    table = write_report(rows, tmp_path / "report")[1].read_text()
+    assert "PR A" not in table and "| disc-pr-a-s24: vLLM #63350: make-room's" in table
+    assert json.loads((dirs[0] / "run.json").read_text())["arm"]["label"] == labels["disc-pr-a-s24"]
+
+
 def test_a_line_joins_an_arms_frontier_only_across_load_levels() -> None:
     def at(*sessions: int) -> list[dict[str, Any]]:
         return [{"runs": [{"sessions": n}]} for n in sessions]

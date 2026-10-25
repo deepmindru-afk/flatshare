@@ -37,7 +37,7 @@ The voice SLO allows a V2V p95 of 2,034 ms, 250 ms above voice alone with as man
 | w5-std-pr-ab48-s16 (w5-ext-r3) |  | 16 | 6,194 | 6,815 | 1.09 | 1,799 | 2,122 | 2,394 | 0 of 50 | 167 / 4,924 | 261 | 1 | 0 / 0 / 0 | 2,782 | 65 |
 | w5-std-pr-ab48-s16 (w5-ext-r4) |  | 16 | 6,220 | 7,523 | 1.29 | 1,721 | 2,050 | 2,222 | 0 of 50 | 129 / 2,169 | 206 | 0 | 0 / 0 / 0 | 2,782 | 65 |
 | w5-std-pr-ab48-s16 (w5-ext-r5) |  | 16 | 3,827 | 4,667 | 0.77 | 1,681 | 2,021 | 2,113 | 0 of 50 | 132 / 4,739 | 208 | 1 | 0 / 0 / 0 | 2,782 | 65 |
-| w5-std-pr-ab48-s16: vLLM PRs A and B with a 48-token window, no gateway policy, standard scenario, a warm-up turn opening each call; median (range) of 5 runs |  | 16 | 6,194 (3,827–10,620) | 6,815 (4,667–12,223) | | 1,721 (1,681–2,037) | 2,050 (2,021–2,419) | 2,280 (2,113–2,739) | 0 (0–0) | 132 (122–581) / 4,739 (2,169–11,006) | 208 (205–385) | | | | |
+| w5-std-pr-ab48-s16: vLLM #63350 and #63351 with a 48-token window, no gateway policy, standard scenario, a warm-up turn opening each call; median (range) of 5 runs |  | 16 | 6,194 (3,827–10,620) | 6,815 (4,667–12,223) | | 1,721 (1,681–2,037) | 2,050 (2,021–2,419) | 2,280 (2,113–2,739) | 0 (0–0) | 132 (122–581) / 4,739 (2,169–11,006) | 208 (205–385) | | | | |
 
 ## Workload: weka-x32, 4 callers
 
@@ -105,7 +105,7 @@ The voice SLO allows a V2V p95 of 2,034 ms, 250 ms above voice alone with as man
 | w5-disc-pr-a-s24 (w5-pr-r3) |  | 24 | 3,378 | 3,316 | 0.27 | 3,131 | 4,693 | 5,362 | 0 of 50 | 78,139 / 130,502 | 1,602 | 60 | 0 / 0 / 0 | 2,730 | 69 |
 | w5-disc-pr-a-s24 (w5-pr-r4) |  | 24 | 3,680 | 3,719 | 0.37 | 3,191 | 4,970 | 5,970 | 0 of 50 | 61,726 / 98,968 | 1,737 | 50 | 0 / 0 / 0 | 2,730 | 68 |
 | w5-disc-pr-a-s24 (w5-pr-r5) |  | 24 | 3,276 | 3,414 | 0.28 | 3,154 | 5,085 | 6,661 | 0 of 50 | 78,873 / 121,931 | 1,539 | 51 | 0 / 0 / 0 | 2,730 | 68 |
-| w5-disc-pr-a-s24: vLLM PR A: make-room's KV preemption alone, no gateway policy, a warm-up turn opening each call; median (range) of 5 runs |  | 24 | 3,378 (3,276–3,680) | 3,414 (3,103–3,719) | | 3,191 (3,131–3,630) | 5,085 (4,693–6,261) | 5,970 (5,362–7,107) | 0 (0–0) | 66,728 (61,726–78,873) / 111,737 (98,455–130,502) | 1,737 (1,539–2,407) | | | | |
+| w5-disc-pr-a-s24: vLLM #63350: make-room's KV preemption alone, no gateway policy, a warm-up turn opening each call; median (range) of 5 runs |  | 24 | 3,378 (3,276–3,680) | 3,414 (3,103–3,719) | | 3,191 (3,131–3,630) | 5,085 (4,693–6,261) | 5,970 (5,362–7,107) | 0 (0–0) | 66,728 (61,726–78,873) / 111,737 (98,455–130,502) | 1,737 (1,539–2,407) | | | | |
 
 ### Arm 9-pr-ab
 
@@ -116,7 +116,7 @@ The voice SLO allows a V2V p95 of 2,034 ms, 250 ms above voice alone with as man
 | w5-disc-pr-ab-s24 (w5-pr-r3) |  | 24 | 3,204 | 3,108 | 0.25 | 1,938 | 2,868 | 3,885 | 0 of 50 | 84,061 / 130,170 | 343 | 38 | 0 / 0 / 0 | 2,730 | 69 |
 | w5-disc-pr-ab-s24 (w5-pr-r4) |  | 24 | 3,657 | 3,497 | 0.36 | 1,983 | 3,192 | 4,858 | 0 of 50 | 62,963 / 104,866 | 364 | 52 | 0 / 0 / 0 | 2,730 | 68 |
 | w5-disc-pr-ab-s24 (w5-pr-r5) |  | 24 | 3,186 | 3,298 | 0.27 | 2,067 | 3,094 | 3,746 | 0 of 50 | 80,230 / 124,399 | 383 | 50 | 0 / 0 / 0 | 2,730 | 68 |
-| w5-disc-pr-ab-s24: vLLM PRs A and B: KV preemption and the budget cap, no gateway policy, a warm-up turn opening each call; median (range) of 5 runs |  | 24 | 3,282 (3,186–3,657) | 3,298 (3,108–3,552) | | 1,983 (1,938–2,096) | 3,094 (2,868–3,192) | 3,885 (3,530–4,858) | 0 (0–0) | 70,885 (62,963–84,061) / 105,048 (99,415–130,170) | 364 (343–383) | | | | |
+| w5-disc-pr-ab-s24: vLLM #63350 and #63351: KV preemption and the budget cap, no gateway policy, a warm-up turn opening each call; median (range) of 5 runs |  | 24 | 3,282 (3,186–3,657) | 3,298 (3,108–3,552) | | 1,983 (1,938–2,096) | 3,094 (2,868–3,192) | 3,885 (3,530–4,858) | 0 (0–0) | 70,885 (62,963–84,061) / 105,048 (99,415–130,170) | 364 (343–383) | | | | |
 
 ### Arm 9-pr-ab48
 
@@ -137,7 +137,7 @@ The voice SLO allows a V2V p95 of 2,034 ms, 250 ms above voice alone with as man
 | w5-disc-pr-ab48-s24 (w5-r3) |  | 24 | 3,168 | 3,156 | 0.24 | 1,967 | 2,298 | 2,338 | 0 of 50 | 86,754 / 130,484 | 375 | 32 | 0 / 0 / 0 | 2,730 | 69 |
 | w5-disc-pr-ab48-s24 (w5-r4) |  | 24 | 3,583 | 3,436 | 0.36 | 1,928 | 2,250 | 2,384 | 0 of 50 | 66,536 / 98,610 | 351 | 46 | 0 / 0 / 0 | 2,730 | 69 |
 | w5-disc-pr-ab48-s24 (w5-r5) |  | 24 | 3,082 | 3,115 | 0.27 | 1,985 | 2,307 | 2,445 | 0 of 50 | 83,919 / 124,827 | 376 | 45 | 0 / 0 / 0 | 2,730 | 70 |
-| w5-disc-pr-ab48-s24: vLLM PRs A and B with a 48-token window, no gateway policy, a warm-up turn opening each call; median (range) of 15 runs |  | 24 | 3,170 (3,082–3,603) | 3,203 (3,033–3,634) | | 1,967 (1,918–2,018) | 2,236 (2,132–2,397) | 2,352 (2,197–2,967) | 0 (0–0) | 72,171 (65,923–86,754) / 111,121 (94,304–131,915) | 375 (335–443) | | | | |
+| w5-disc-pr-ab48-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy, a warm-up turn opening each call; median (range) of 15 runs |  | 24 | 3,170 (3,082–3,603) | 3,203 (3,033–3,634) | | 1,967 (1,918–2,018) | 2,236 (2,132–2,397) | 2,352 (2,197–2,967) | 0 (0–0) | 72,171 (65,923–86,754) / 111,121 (94,304–131,915) | 375 (335–443) | | | | |
 
 ### Arm 9-pr-ab48-v03
 
@@ -148,7 +148,7 @@ The voice SLO allows a V2V p95 of 2,034 ms, 250 ms above voice alone with as man
 | w5-disc-pr-ab48-v03-s24 (w5-r3) |  | 24 | 3,174 | 3,129 | 0.25 | 1,921 | 2,134 | 2,387 | 0 of 50 | 86,449 / 134,131 | 382 | 32 | 0 / 0 / 0 | 2,730 | 70 |
 | w5-disc-pr-ab48-v03-s24 (w5-r4) |  | 24 | 3,470 | 3,521 | 0.35 | 1,961 | 2,241 | 2,331 | 0 of 50 | 66,882 / 106,335 | 386 | 42 | 0 / 0 / 0 | 2,730 | 70 |
 | w5-disc-pr-ab48-v03-s24 (w5-r5) |  | 24 | 3,069 | 3,124 | 0.27 | 1,924 | 2,214 | 2,293 | 0 of 50 | 83,838 / 122,430 | 383 | 41 | 0 / 0 / 0 | 2,730 | 70 |
-| w5-disc-pr-ab48-v03-s24: vLLM PRs A and B with a 48-token window as v0.3 built them, no gateway policy, a warm-up turn opening each call; median (range) of 5 runs |  | 24 | 3,174 (3,069–3,470) | 3,132 (3,124–3,521) | | 1,941 (1,921–1,992) | 2,241 (2,134–2,333) | 2,356 (2,293–2,530) | 0 (0–0) | 73,831 (66,882–86,449) / 113,090 (94,731–134,131) | 382 (343–386) | | | | |
+| w5-disc-pr-ab48-v03-s24: vLLM #63350 and #63351 with a 48-token window as v0.3 built them, no gateway policy, a warm-up turn opening each call; median (range) of 5 runs |  | 24 | 3,174 (3,069–3,470) | 3,132 (3,124–3,521) | | 1,941 (1,921–1,992) | 2,241 (2,134–2,333) | 2,356 (2,293–2,530) | 0 (0–0) | 73,831 (66,882–86,449) / 113,090 (94,731–134,131) | 382 (343–386) | | | | |
 
 ## Workload: weka-x32-long, 4 callers
 
@@ -161,7 +161,7 @@ The voice SLO allows a V2V p95 of 2,044 ms, 250 ms above voice alone with as man
 | w5-disc-pr-ab48-c4-s24 (w5-cap-r1) |  | 24 | 3,238 | 3,059 | 0.26 | 1,993 | 2,313 | 2,476 | 0 of 100 | 78,025 / 108,696 | 370 | 69 | 0 / 0 / 0 | 2,730 | 69 |
 | w5-disc-pr-ab48-c4-s24 (w5-cap-r2) |  | 24 | 3,060 | 3,055 | 0.35 | 2,017 | 2,415 | 2,920 | 0 of 100 | 73,373 / 100,786 | 385 | 60 | 0 / 0 / 0 | 2,730 | 69 |
 | w5-disc-pr-ab48-c4-s24 (w5-cap-r3) |  | 24 | 2,912 | 2,923 | 0.22 | 1,973 | 2,250 | 2,512 | 0 of 100 | 94,393 / 140,642 | 395 | 65 | 0 / 0 / 0 | 2,730 | 69 |
-| w5-disc-pr-ab48-c4-s24: vLLM PRs A and B with a 48-token window, no gateway policy, 4 callers, a warm-up turn opening each call; median (range) of 3 runs |  | 24 | 3,060 (2,912–3,238) | 3,055 (2,923–3,059) | | 1,993 (1,973–2,017) | 2,313 (2,250–2,415) | 2,512 (2,476–2,920) | 0 (0–0) | 78,025 (73,373–94,393) / 108,696 (100,786–140,642) | 385 (370–395) | | | | |
+| w5-disc-pr-ab48-c4-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy, 4 callers, a warm-up turn opening each call; median (range) of 3 runs |  | 24 | 3,060 (2,912–3,238) | 3,055 (2,923–3,059) | | 1,993 (1,973–2,017) | 2,313 (2,250–2,415) | 2,512 (2,476–2,920) | 0 (0–0) | 78,025 (73,373–94,393) / 108,696 (100,786–140,642) | 385 (370–395) | | | | |
 
 ## Workload: weka-x32-long, 6 callers
 
@@ -174,7 +174,7 @@ The voice SLO allows a V2V p95 of 2,135 ms, 250 ms above voice alone with as man
 | w5-disc-pr-ab48-c6-s24 (w5-cap-r1) |  | 24 | 3,104 | 2,921 | 0.25 | 2,036 | 2,392 | 2,502 | 0 of 150 | 83,499 / 109,724 | 379 | 70 | 0 / 0 / 0 | 2,730 | 69 |
 | w5-disc-pr-ab48-c6-s24 (w5-cap-r2) |  | 24 | 2,844 | 2,707 | 0.33 | 2,016 | 2,360 | 2,533 | 0 of 150 | 77,716 / 124,556 | 368 | 73 | 0 / 0 / 0 | 2,737 | 69 |
 | w5-disc-pr-ab48-c6-s24 (w5-cap-r3) |  | 24 | 2,759 | 2,716 | 0.21 | 2,015 | 2,468 | 2,753 | 0 of 150 | 100,979 / 145,377 | 411 | 69 | 0 / 0 / 0 | 2,737 | 69 |
-| w5-disc-pr-ab48-c6-s24: vLLM PRs A and B with a 48-token window, no gateway policy, 6 callers, a warm-up turn opening each call; median (range) of 3 runs |  | 24 | 2,844 (2,759–3,104) | 2,716 (2,707–2,921) | | 2,016 (2,015–2,036) | 2,392 (2,360–2,468) | 2,533 (2,502–2,753) | 0 (0–0) | 83,499 (77,716–100,979) / 124,556 (109,724–145,377) | 379 (368–411) | | | | |
+| w5-disc-pr-ab48-c6-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy, 6 callers, a warm-up turn opening each call; median (range) of 3 runs |  | 24 | 2,844 (2,759–3,104) | 2,716 (2,707–2,921) | | 2,016 (2,015–2,036) | 2,392 (2,360–2,468) | 2,533 (2,502–2,753) | 0 (0–0) | 83,499 (77,716–100,979) / 124,556 (109,724–145,377) | 379 (368–411) | | | | |
 
 ## Voice turn stages
 
@@ -342,14 +342,14 @@ Each configuration's voice turn as stages that follow one another, in ms, the me
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | w5-a1-voice: frozen box, voice alone, a warm-up turn opening each call | 5 | 295 | 756 | 303 | 211 | 352 | 1,623 | 1,623 | 1,796 | 80 |
 | w5-std-frozen-s16: priority, step cap 512, long-prefill threshold 256 (frozen box), a warm-up turn opening each call | 5 | 295 | 794 | 581 | 228 | 354 | 1,957 | 1,778 | 3,033 | 213 |
-| w5-std-pr-ab48-s16: vLLM PRs A and B with a 48-token window, no gateway policy, standard scenario, a warm-up turn opening each call | 5 | 295 | 798 | 416 | 229 | 357 | 1,801 | 1,751 | 2,247 | 149 |
+| w5-std-pr-ab48-s16: vLLM #63350 and #63351 with a 48-token window, no gateway policy, standard scenario, a warm-up turn opening each call | 5 | 295 | 798 | 416 | 229 | 357 | 1,801 | 1,751 | 2,247 | 149 |
 | w5-a1-voice-c4: frozen box, 4 callers, voice alone, a warm-up turn opening each call | 3 | 357 | 760 | 304 | 209 | 379 | 1,651 | 1,647 | 1,840 | 82 |
 | w5-a1-voice-c6: frozen box, 6 callers, voice alone, a warm-up turn opening each call | 3 | 546 | 772 | 302 | 212 | 377 | 1,663 | 1,653 | 1,885 | 84 |
 | w5-disc-frozen-s24: frozen box, discriminating scenario (large contexts), a warm-up turn opening each call | 10 | 590 | 825 | 3,881 | 250 | 343 | 5,299 | 4,608 | 10,609 | 2,795 |
 | w5-disc-a8c-resubmit-s24: frozen box + preempt-resubmit before the first byte, discriminating scenario, a warm-up turn opening each call | 5 | 295 | 822 | 673 | 232 | 357 | 2,084 | 2,006 | 2,717 | 275 |
-| w5-disc-pr-a-s24: vLLM PR A: make-room's KV preemption alone, no gateway policy, a warm-up turn opening each call | 5 | 295 | 820 | 1,990 | 250 | 356 | 3,415 | 3,312 | 5,290 | 771 |
-| w5-disc-pr-ab-s24: vLLM PRs A and B: KV preemption and the budget cap, no gateway policy, a warm-up turn opening each call | 5 | 295 | 822 | 738 | 236 | 355 | 2,151 | 1,992 | 3,090 | 289 |
-| w5-disc-pr-ab48-s24: vLLM PRs A and B with a 48-token window, no gateway policy, a warm-up turn opening each call | 15 | 885 | 822 | 551 | 242 | 355 | 1,971 | 1,957 | 2,268 | 282 |
-| w5-disc-pr-ab48-v03-s24: vLLM PRs A and B with a 48-token window as v0.3 built them, no gateway policy, a warm-up turn opening each call | 5 | 295 | 824 | 537 | 241 | 356 | 1,958 | 1,952 | 2,243 | 276 |
-| w5-disc-pr-ab48-c4-s24: vLLM PRs A and B with a 48-token window, no gateway policy, 4 callers, a warm-up turn opening each call | 3 | 357 | 831 | 569 | 252 | 367 | 2,018 | 1,994 | 2,330 | 279 |
-| w5-disc-pr-ab48-c6-s24: vLLM PRs A and B with a 48-token window, no gateway policy, 6 callers, a warm-up turn opening each call | 3 | 546 | 846 | 541 | 269 | 386 | 2,042 | 2,024 | 2,395 | 267 |
+| w5-disc-pr-a-s24: vLLM #63350: make-room's KV preemption alone, no gateway policy, a warm-up turn opening each call | 5 | 295 | 820 | 1,990 | 250 | 356 | 3,415 | 3,312 | 5,290 | 771 |
+| w5-disc-pr-ab-s24: vLLM #63350 and #63351: KV preemption and the budget cap, no gateway policy, a warm-up turn opening each call | 5 | 295 | 822 | 738 | 236 | 355 | 2,151 | 1,992 | 3,090 | 289 |
+| w5-disc-pr-ab48-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy, a warm-up turn opening each call | 15 | 885 | 822 | 551 | 242 | 355 | 1,971 | 1,957 | 2,268 | 282 |
+| w5-disc-pr-ab48-v03-s24: vLLM #63350 and #63351 with a 48-token window as v0.3 built them, no gateway policy, a warm-up turn opening each call | 5 | 295 | 824 | 537 | 241 | 356 | 1,958 | 1,952 | 2,243 | 276 |
+| w5-disc-pr-ab48-c4-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy, 4 callers, a warm-up turn opening each call | 3 | 357 | 831 | 569 | 252 | 367 | 2,018 | 1,994 | 2,330 | 279 |
+| w5-disc-pr-ab48-c6-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy, 6 callers, a warm-up turn opening each call | 3 | 546 | 846 | 541 | 269 | 386 | 2,042 | 2,024 | 2,395 | 267 |

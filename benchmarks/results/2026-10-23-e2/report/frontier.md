@@ -339,7 +339,7 @@ The voice SLO allows a V2V p95 of 2,017 ms, 250 ms above voice alone with as man
 | disc-pr-a-s24 (upstream) |  | 24 | 3,576 | 3,572 | 0.29 | 3,041 | 5,612 | 8,932 | 0 of 50 | 64,966 / 96,675 | 2,517 | 37 | 0 / 0 / 0 | 2,722 | 68 |
 | disc-pr-a-s24 (upstream-r1) |  | 24 | 3,660 | 3,628 | 0.29 | 3,394 | 6,063 | 8,110 | 0 of 50 | 67,310 / 98,091 | 2,785 | 40 | 0 / 0 / 0 | 2,722 | 68 |
 | disc-pr-a-s24 (upstream-r2) |  | 24 | 3,633 | 3,514 | 0.30 | 3,246 | 5,773 | 6,177 | 0 of 50 | 66,198 / 96,205 | 3,172 | 37 | 0 / 0 / 0 | 2,722 | 68 |
-| disc-pr-a-s24: vLLM PR A: make-room's KV preemption alone, no gateway policy; median (range) of 3 runs |  | 24 | 3,633 (3,576–3,660) | 3,572 (3,514–3,628) | | 3,246 (3,041–3,394) | 5,773 (5,612–6,063) | 8,110 (6,177–8,932) | 0 (0–0) | 66,198 (64,966–67,310) / 96,675 (96,205–98,091) | 2,785 (2,517–3,172) | | | | |
+| disc-pr-a-s24: vLLM #63350: make-room's KV preemption alone, no gateway policy; median (range) of 3 runs |  | 24 | 3,633 (3,576–3,660) | 3,572 (3,514–3,628) | | 3,246 (3,041–3,394) | 5,773 (5,612–6,063) | 8,110 (6,177–8,932) | 0 (0–0) | 66,198 (64,966–67,310) / 96,675 (96,205–98,091) | 2,785 (2,517–3,172) | | | | |
 
 ### Arm 9-pr-ab
 
@@ -348,7 +348,7 @@ The voice SLO allows a V2V p95 of 2,017 ms, 250 ms above voice alone with as man
 | disc-pr-ab-s24 (upstream) |  | 24 | 3,620 | 3,485 | 0.30 | 2,213 | 4,772 | 5,274 | 0 of 50 | 69,819 / 96,355 | 375 | 32 | 0 / 0 / 0 | 2,730 | 68 |
 | disc-pr-ab-s24 (upstream-r1) |  | 24 | 3,519 | 3,540 | 0.29 | 1,986 | 3,229 | 4,135 | 0 of 50 | 71,343 / 100,148 | 336 | 41 | 0 / 0 / 0 | 2,730 | 68 |
 | disc-pr-ab-s24 (upstream-r2) |  | 24 | 3,568 | 3,541 | 0.29 | 1,976 | 3,220 | 3,729 | 0 of 50 | 72,326 / 101,116 | 338 | 38 | 0 / 0 / 0 | 2,722 | 68 |
-| disc-pr-ab-s24: vLLM PRs A and B: KV preemption and the budget cap, no gateway policy; median (range) of 3 runs |  | 24 | 3,568 (3,519–3,620) | 3,540 (3,485–3,541) | | 1,986 (1,976–2,213) | 3,229 (3,220–4,772) | 4,135 (3,729–5,274) | 0 (0–0) | 71,343 (69,819–72,326) / 100,148 (96,355–101,116) | 338 (336–375) | | | | |
+| disc-pr-ab-s24: vLLM #63350 and #63351: KV preemption and the budget cap, no gateway policy; median (range) of 3 runs |  | 24 | 3,568 (3,519–3,620) | 3,540 (3,485–3,541) | | 1,986 (1,976–2,213) | 3,229 (3,220–4,772) | 4,135 (3,729–5,274) | 0 (0–0) | 71,343 (69,819–72,326) / 100,148 (96,355–101,116) | 338 (336–375) | | | | |
 
 ### Arm 9-pr-ab48
 
@@ -357,7 +357,7 @@ The voice SLO allows a V2V p95 of 2,017 ms, 250 ms above voice alone with as man
 | disc-pr-ab48-s24 (upstream) |  | 24 | 3,428 | 3,362 | 0.28 | 1,978 | 2,168 | 2,241 | 0 of 50 | 72,284 / 96,050 | 372 | 37 | 0 / 0 / 0 | 2,730 | 68 |
 | disc-pr-ab48-s24 (upstream-r1) |  | 24 | 3,493 | 3,362 | 0.28 | 1,943 | 2,286 | 2,341 | 0 of 50 | 71,729 / 97,408 | 357 | 38 | 0 / 0 / 0 | 2,730 | 68 |
 | disc-pr-ab48-s24 (upstream-r2) |  | 24 | 3,519 | 3,355 | 0.28 | 1,922 | 2,193 | 2,281 | 0 of 50 | 70,216 / 96,986 | 377 | 43 | 0 / 0 / 0 | 2,730 | 69 |
-| disc-pr-ab48-s24: vLLM PRs A and B with a 48-token window, no gateway policy; median (range) of 3 runs |  | 24 | 3,493 (3,428–3,519) | 3,362 (3,355–3,362) | | 1,943 (1,922–1,978) | 2,193 (2,168–2,286) | 2,281 (2,241–2,341) | 0 (0–0) | 71,729 (70,216–72,284) / 96,986 (96,050–97,408) | 372 (357–377) | | | | |
+| disc-pr-ab48-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy; median (range) of 3 runs |  | 24 | 3,493 (3,428–3,519) | 3,362 (3,355–3,362) | | 1,943 (1,922–1,978) | 2,193 (2,168–2,286) | 2,281 (2,241–2,341) | 0 (0–0) | 71,729 (70,216–72,284) / 96,986 (96,050–97,408) | 372 (357–377) | | | | |
 
 ### Arm 9-trigger-request
 
@@ -699,8 +699,8 @@ Each configuration's voice turn as stages that follow one another, in ms, the me
 | disc-a9-no-kv-makeroom-s24: Leaseholder, make-room without KV make-room | 3 | 177 | 821 | 432 | 217 | 357 | 1,827 | 1,820 | 2,036 | 223 |
 | disc-a9-no-reserve-s24: Leaseholder, make-room without the realtime KV reserve | 3 | 177 | 827 | 492 | 221 | 358 | 1,898 | 1,890 | 2,131 | 277 |
 | disc-a9-no-throttle-s24: Leaseholder without the critical-window throttle | 3 | 177 | 820 | 437 | 216 | 358 | 1,830 | 1,822 | 2,060 | 230 |
-| disc-pr-a-s24: vLLM PR A: make-room's KV preemption alone, no gateway policy | 3 | 177 | 826 | 2,082 | 241 | 346 | 3,496 | 3,228 | 5,846 | 959 |
-| disc-pr-ab-s24: vLLM PRs A and B: KV preemption and the budget cap, no gateway policy | 3 | 177 | 826 | 914 | 245 | 353 | 2,336 | 2,053 | 4,108 | 265 |
-| disc-pr-ab48-s24: vLLM PRs A and B with a 48-token window, no gateway policy | 3 | 177 | 824 | 526 | 249 | 353 | 1,953 | 1,939 | 2,209 | 270 |
+| disc-pr-a-s24: vLLM #63350: make-room's KV preemption alone, no gateway policy | 3 | 177 | 826 | 2,082 | 241 | 346 | 3,496 | 3,228 | 5,846 | 959 |
+| disc-pr-ab-s24: vLLM #63350 and #63351: KV preemption and the budget cap, no gateway policy | 3 | 177 | 826 | 914 | 245 | 353 | 2,336 | 2,053 | 4,108 | 265 |
+| disc-pr-ab48-s24: vLLM #63350 and #63351 with a 48-token window, no gateway policy | 3 | 177 | 824 | 526 | 249 | 353 | 1,953 | 1,939 | 2,209 | 270 |
 | disc-a9-trigger-request-s24: Leaseholder, headroom armed by the realtime request | 3 | 177 | 822 | 451 | 217 | 358 | 1,848 | 1,839 | 2,125 | 231 |
 | disc-a9-window48-s24: Leaseholder without degrade, a 48-token first-tokens window | 3 | 177 | 828 | 473 | 241 | 357 | 1,899 | 1,877 | 2,207 | 231 |
