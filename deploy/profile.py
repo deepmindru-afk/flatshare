@@ -25,12 +25,14 @@ venv's Python on a GPU host.
 The rules (docs/HARDWARE.md):
 - R2, memory budgets: vLLM refuses a start whose free memory is below gpu_memory_utilization x total, with
   kv-cache-memory set too, so the box's budgets in GiB carry over: utilization = budget / the card's memory, rounded
-  up to 0.01. Both vLLM servers fix their KV pools, so neither profiles memory and the three servers start at once:
-  each one's check passes in any order wherever starting the audio servers first passed, since the engine's worst
-  case, the audio servers resident, is that order's, and the STT's, the engine resident, holds while the two budgets
-  and the TTS's share (budgets.tts_gib) fit the card together, the engine within its budget. A profile where they
-  take more than 0.95 of it, the ceiling of one budget alone, is refused: vLLM's total is the card's memory less the
-  driver's reserve.
+  up to 0.01. Both vLLM servers fix their KV pools, so neither sizes its pool from the memory free at its start and
+  the three servers start at once: each one's check passes in any order wherever starting the audio servers first
+  passed, since the engine's worst case, the audio servers resident, is that order's, and the STT's, the engine
+  resident, holds while the two budgets and the TTS's share (budgets.tts_gib) fit the card together, the engine
+  within its budget; a server's start-up peak (profiling pass, graph capture) meets the margin they leave. A profile
+  where they take more than 0.95 of it, the ceiling of one budget alone, is refused: vLLM's total is the card's memory
+  less the driver's reserve. A node whose engine outgrows its budget (C''s 14B) starts it after the audio servers
+  instead (text.engine_order).
 - R3, the CPU tier: the box's ratio to the pool (20 GiB over 5 GiB), bounded by /dev/shm (less 2 GiB) and by the RAM
   available less what a single host keeps for its other processes, in whole GiB; below the pool's own size it is
   refused, since a tier no larger than the pool only mirrors it.

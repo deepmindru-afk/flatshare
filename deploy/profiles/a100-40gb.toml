@@ -61,6 +61,8 @@ cpu_tier_ratio = 4
 host_reserve_gib = 25
 
 [text]
+# The engine's start order beside the audio servers' (lh-engine.service): none, the three at once.
+engine_order = ''
 engine_header = '''
 # LLM engine on {{profile.node}}: vLLM 0.32.0 on one {{profile.gpu}}, beside the STT and TTS servers, rendered
 # from deploy/profiles/{{profile.name}}.toml.'''

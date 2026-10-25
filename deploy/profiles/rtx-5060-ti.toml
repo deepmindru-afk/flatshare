@@ -54,6 +54,8 @@ audio_numa = "0"
 
 # The comment lines that state the node's own facts.
 [text]
+# The engine's start order beside the audio servers' (lh-engine.service): none, the three at once.
+engine_order = ''
 engine_header = '''
 # Frozen-box LLM engine on Phastform: vLLM 0.32.0 on one RTX 5060 Ti 16 GB, beside the STT and TTS servers.'''
 stt_header = '''

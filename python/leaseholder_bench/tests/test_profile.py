@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -363,10 +364,18 @@ def test_the_second_models_profile_renders_the_cores_node_with_its_own_model_and
         tmp_path / "node" / "stt.yaml"
     ).read_text()
     assert second["plan"] == core["plan"]
+    # The 14B's engine outgrows its budget, so it starts after the audio servers (R2); the core's starts beside them.
+    order = "\nAfter=lh-stt.service lh-tts.service\n"
+    its_order = re.compile(
+        r"# On this node the engine starts after the audio servers.*?" + order, re.S
+    )
+    assert order in (tmp_path / "node-14b" / "systemd" / "lh-engine.service").read_text()
+    assert "After=lh-stt" not in (tmp_path / "node" / "systemd" / "lh-engine.service").read_text()
     for unit in ("lh-engine.service", "lh-stt.service", "lh-tts.service"):
         ours = (tmp_path / "node-14b" / "systemd" / unit).read_text()
         theirs = (tmp_path / "node" / "systemd" / unit).read_text()
         ours = ours.replace("leaseholder/node-14b/", "leaseholder/node/")
+        ours = its_order.sub("", ours)
         assert ours.replace("Qwen3-14B-FP8", "Qwen3-4B-Instruct-2507-FP8") == theirs, unit
     # The harness's engine check reads the same profile, its base's values under its own.
     flags = dict(zip(*[iter(e2run.profile_flags("a100-40gb-qwen3-14b"))] * 2, strict=True))

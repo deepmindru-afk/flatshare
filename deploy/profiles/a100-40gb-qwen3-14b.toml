@@ -26,6 +26,11 @@ extra = '''
 default-chat-template-kwargs: {"enable_thinking": false}'''
 
 [text]
+engine_order = '''
+# On this node the engine starts after the audio servers instead: its pool and weights outgrow its budget, which R2's
+# sum does not cover, so each audio server checks free memory before the engine's large allocation, and the engine's
+# own check sees them resident, as in every measured start of the box before the three started at once.
+After=lh-stt.service lh-tts.service'''
 pool = '''
 # The KV pool is Qwen3-14B-FP8's own on this card, 7,334 blocks (117,344 tokens), by lh-sim's sizing. vLLM still
 # requires utilization x total memory to be free at start: {{derived.engine_budget}} of the card's
