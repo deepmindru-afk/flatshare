@@ -897,3 +897,38 @@ def test_a_cap_of_2048_is_measured_beside_vllms_default(tmp_path: Path, runtime:
         "variant.sh use frozen --max-num-batched-tokens 2048 --long-prefill-token-threshold 0",
         "variant.sh use frozen --max-num-batched-tokens 2048 --long-prefill-token-threshold 1024",
     ]
+
+
+def test_pull_keeps_the_units_logs_as_the_run_goes(tmp_path: Path, runtime: Path) -> None:
+    # The engine's and the control plane's logs are in the host's journal (lh-svc's log files under it), which
+    # leaves with the host: each pull exports what the units logged since the last one (journalctl, the shims' under
+    # lh-svc), beside the runs it copies.
+    hosts = tmp_path / "hosts"
+    home = a100_host(hosts)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "journalctl").write_text('#!/bin/sh\necho "journal $*"\n')
+    (tools / "journalctl").chmod(0o755)
+    env = dry_env(home, hosts, runtime) | {
+        "LH_SSH": str(FAKES / "campaign" / "ssh"),
+        "PATH": f"{tools}{os.pathsep}{dry_env(home, hosts, runtime)['PATH']}",
+    }
+    pulled = tmp_path / "pulled"
+    for _ in range(2):
+        done = subprocess.run(
+            ["bash", str(REPO / "deploy" / "a100" / "pull.sh"), "--once", "localhost", str(pulled)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+    exported = lines(pulled / "runs" / "journal" / "units.log")
+    assert len(exported) == 2, exported
+    units = "-u lh-engine -u lh-stt -u lh-tts -u lh-gateway -u lh-voice-worker -u lh-livekit -u lh-voicenet"
+    first, second = exported
+    assert first.startswith(f"journal --user {units} --since @0 --until @") and first.endswith(
+        " -o short-unix"
+    )
+    until = first.split("--until ")[1].split()[0]
+    assert second.startswith(f"journal --user {units} --since {until} --until @")
