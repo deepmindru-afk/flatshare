@@ -2,7 +2,8 @@
 # marlin-session2.sh: session 2 of the Marlin dry run on the box (docs/HARDWARE.md, the Marlin dry run), from the
 # workstation, after session 1, with the GPU free and the box at a revision that has benchmarks/a100. About 30 minutes:
 #   1. the GEMMs: the engine stopped, the STT and TTS idle, bench_marlin.py at Qwen3-4B's four linear shapes for
-#      M of 1 to 1,024 (Marlin W8A16, torch BF16, DeepGEMM W8A8): Marlin's factor over BF16 on the box
+#      M of 1 to 1,024 (Marlin W8A16, torch BF16, DeepGEMM W8A8), each call's GPU time in a CUDA graph, in the engine
+#      unit's environment (DeepGEMM builds its kernels with the unit's nvcc): Marlin's factor over BF16 on the box
 #   2. the probes at a 3 GiB pool (P-1's prep 3): make-room with the PRs' values, the pool 3 GiB and the context
 #      16,384 tokens (vLLM refuses a pool that cannot hold one request at max_model_len), the KV case, the prefill
 #      case and a 120 s tail once each, which size themselves from the smaller pool and context; the context is in
@@ -35,13 +36,19 @@ probe() { # probe NAME PROGRAM ARG...
     mv $runs/pool3g/$name.partial $runs/pool3g/$name.txt && cat $runs/pool3g/$name.txt" | tee -a "$out/session.log"
 }
 
-# 1. The GEMMs, with the engine stopped (the audio servers stay, idle).
-if on_gpu "test -f $runs/gemm.csv"; then
+# 1. The GEMMs, with the engine stopped (the audio servers stay, idle), in the engine unit's environment
+#    (host.py with-engine-env: its CUDA_HOME and PATH, whose nvcc DeepGEMM's JIT needs). A gemm.csv without the timing
+#    column is the first bench's, which timed one call between two CUDA events and so its dispatch from Python: it is
+#    kept as gemm-events.csv and the GEMMs run again.
+if on_gpu "head -1 $runs/gemm.csv 2>/dev/null | grep -q ',timing,'"; then
   log "gemm.csv: done before"
 else
-  log "bench_marlin.py"
-  on_gpu "systemctl --user stop lh-engine && mkdir -p $runs && $python leaseholder/src/benchmarks/a100/bench_marlin.py \
-    --m 1,16,64,128,256,512,1024 --out $runs/gemm.csv" 2>&1 | tee -a "$out/session.log"
+  log "bench_marlin.py, in the engine unit's environment (a gemm.csv without timing kept as gemm-events.csv)"
+  on_gpu "systemctl --user stop lh-engine && mkdir -p $runs &&
+    { test ! -f $runs/gemm.csv || mv $runs/gemm.csv $runs/gemm-events.csv; } &&
+    $python leaseholder/src/deploy/a100/host.py with-engine-env leaseholder/src/deploy/phastform \
+      $python leaseholder/src/benchmarks/a100/bench_marlin.py --m 1,16,64,128,256,512,1024 --out $runs/gemm.csv" 2>&1 |
+    tee -a "$out/session.log"
 fi
 
 # 2. The probes at a 3 GiB pool and a 16,384-token context.
