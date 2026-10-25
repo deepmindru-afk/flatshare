@@ -289,7 +289,10 @@ def write_env(node: Node, home: Path | None = None) -> Path:
 def _gpu_line(host: dict) -> str:
     """env.sh's lines naming the lent GPU, for the later stages (detect reads it) and the GPU sampler, and the hub
     cache the units read, for the later stages and every script that loads a model's files."""
-    lines = f"export LH_GPU_ID={uuid}\n" if (uuid := lent_gpu(host)) else ""
+    # Its UUID once the facts chose it; before the card is visible, the operator's LH_GPU_ID as given, which the
+    # gpu stage's facts resolve.
+    chosen = lent_gpu(host) or (None if host.get("gpu") else os.environ.get("LH_GPU_ID"))
+    lines = f"export LH_GPU_ID={chosen}\n" if chosen else ""
     if cache := host.get("hf_hub_cache"):
         lines += f"export HF_HUB_CACHE={shlex.quote(cache)}\n"
     return lines

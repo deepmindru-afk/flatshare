@@ -120,8 +120,10 @@ render() {
     $(field "$node/host.json" linger) != True ]]; then
     if loginctl enable-linger "$(id -un)" 2>/dev/null; then
       detect
-    else
+    elif [[ $LH_SUPERVISOR == auto ]]; then
       log "lingering stays off (loginctl enable-linger was refused): lh-svc runs the units"
+    else
+      log "lingering stays off (loginctl enable-linger was refused): env.sh's systemd would stop with the session"
     fi
   fi
   "$py" "$src/deploy/profile.py" render "$profile" --host "$node/host.json" --out "$node"

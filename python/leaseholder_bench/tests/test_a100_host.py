@@ -908,6 +908,11 @@ def test_env_sh_is_written_for_lh_svc_with_the_override(tmp_path: Path, monkeypa
     assert "shims" not in text  # systemd runs the units
     assert "export LH_SUPERVISOR=systemd\n" in text  # the choice, kept for the later stages
     assert "export LH_GPU_ID=GPU-1\n" in text  # the lent GPU, for the later stages and the sampler
+    # Staged before the card is visible, the operator's LH_GPU_ID is kept as given, for the gpu stage to resolve.
+    early, _ = render(tmp_path / "early", facts(gpu=None))
+    monkeypatch.setenv("LH_GPU_ID", "1")
+    assert "export LH_GPU_ID=1\n" in host_py.write_env(host_py.Node.load(early), home).read_text()
+    monkeypatch.delenv("LH_GPU_ID")
     monkeypatch.setenv("LH_SUPERVISOR", "lh-svc")
     env_sh = host_py.write_env(node, home)
     text = env_sh.read_text()
