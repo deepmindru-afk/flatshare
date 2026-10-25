@@ -481,3 +481,55 @@ def test_the_gpu_nodes_servers_keep_idle_connections_for_60_s() -> None:
         assert "Environment=VLLM_HTTP_TIMEOUT_KEEP_ALIVE=60" in text.splitlines(), unit
     [start] = exec_lines((systemd / "lh-tts.service").read_text(), "ExecStart")
     assert "--timeout-keep-alive 60" in start
+
+
+FAKES = Path(__file__).parent / "fakes" / "campaign"
+"""Stand-ins for ssh and rsync between directories, one per host (the campaign tests' own)."""
+
+
+def git(repo: Path, *args: str) -> str:
+    command = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", *args]
+    return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_deploy_syncs_the_commit_alone_and_refuses_changes_it_would_not_carry(
+    tmp_path: Path,
+) -> None:
+    repo, hosts = tmp_path / "repo", tmp_path / "hosts"
+    (repo / "deploy" / "phastform").mkdir(parents=True)
+    (repo / "deploy" / "bin").mkdir()
+    (repo / "deploy" / "deploy.sh").write_text((DEPLOY / "deploy.sh").read_text())
+    (repo / "deploy" / "phastform" / "install.sh").write_text(
+        'echo installed >>"$HOME/install.log"\n'
+    )
+    (repo / "deploy" / "bin" / "audit-listeners").write_text('print("audit-listeners: ok")\n')
+    (repo / ".gitignore").write_text("__pycache__/\n")
+    git(repo, "init", "-q")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "first")
+    (repo / "deploy" / "__pycache__").mkdir()  # ignored: never synced
+    (repo / "deploy" / "__pycache__" / "x.pyc").write_bytes(b"")
+    # The host has a file of an earlier commit, which goes.
+    src = hosts / "phastform.cis.upenn.edu" / "leaseholder" / "src"
+    src.mkdir(parents=True)
+    (src / "gone.py").write_text("")
+    env = os.environ | {
+        "PATH": f"{FAKES}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_HOSTS": str(hosts),
+        "LH_SSH": str(FAKES / "ssh"),
+    }
+    deploy = ["bash", str(repo / "deploy" / "deploy.sh"), "phastform.cis.upenn.edu"]
+    done = subprocess.run(deploy, env=env, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    synced = sorted(str(p.relative_to(src)) for p in src.rglob("*") if p.is_file())
+    assert synced == sorted([*git(repo, "ls-files").splitlines(), "DEPLOYED"])
+    assert (src / "DEPLOYED").read_text() == git(repo, "describe", "--always") + "\n"
+    assert (hosts / "phastform.cis.upenn.edu" / "install.log").read_text() == "installed\n"
+    # A change the sync would not carry, committed or not, is refused before anything moves.
+    (repo / "deploy" / "phastform" / "install.sh").write_text("echo changed\n")
+    (repo / "new.txt").write_text("")
+    done = subprocess.run(deploy, env=env, capture_output=True, text=True)
+    assert done.returncode == 2
+    assert "changes the sync would not carry" in done.stderr
+    assert " M deploy/phastform/install.sh" in done.stderr and "?? new.txt" in done.stderr
+    assert (src / "deploy" / "phastform" / "install.sh").read_text().startswith("echo installed")

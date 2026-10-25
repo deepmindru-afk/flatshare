@@ -30,7 +30,7 @@ deploy/deploy.sh cyan.cis.upenn.edu
 deploy/deploy.sh gray.cis.upenn.edu            # the second GPU node
 ```
 
-`deploy.sh` writes the deployed commit to `~/leaseholder/src/DEPLOYED` on the host. Do not deploy to cyan while an E2 campaign runs: the points read their arm files and the harness from that tree.
+`deploy.sh` syncs the commit `HEAD` names (`git archive`) and nothing else, no untracked, ignored or uncommitted file, and refuses a tree that has any, so that `~/leaseholder/src/DEPLOYED`, the commit it writes there, names what the host runs. It then runs the host's `install.sh` and audits what listens there (`deploy/bin/audit-listeners`): a failure names each process of the box's units that listens over TCP outside the allowed set, or on a socket outside `/run/user/$UID`, which is what still runs from before until its unit restarts. Do not deploy to cyan while an E2 campaign runs: the points read their arm files and the harness from that tree.
 
 **First time on a host:**
 1. Enable lingering: `loginctl enable-linger $USER`.
