@@ -184,3 +184,30 @@ def test_the_run_scripts_parse_and_refuse_a_wrong_argument(script: Path, tmp_pat
     )
     assert done.returncode == 2 and "usage" in done.stderr, (done.returncode, done.stderr)
     assert not any(tmp_path.iterdir()), sorted(tmp_path.rglob("*"))  # nothing written first
+
+
+def test_bench_marlin_imports_without_a_gpu_and_writes_its_rows(tmp_path: Path) -> None:
+    bench = _module("lh_a100_bench_marlin", A100 / "bench_marlin.py")
+    # The model's four linear shapes, (N, K): qkv, o, gate_up and down of Qwen3-4B-Instruct-2507.
+    assert bench.SHAPES == (
+        ("qkv", 6144, 2560),
+        ("o", 2560, 4096),
+        ("gate_up", 19456, 2560),
+        ("down", 2560, 9728),
+    )
+    assert bench.parse_ms("1,16,1024") == [1, 16, 1024]
+    with pytest.raises(Exception, match="positive"):
+        bench.parse_ms("0,16")
+    rows = [
+        bench.Row(shape, m, kernel, us)
+        for shape, *_ in bench.SHAPES
+        for m, kernel, us in ((16, "marlin", 30.0), (16, "bf16", 20.0), (16, "deepgemm", None))
+    ]
+    rows[2].note = "RuntimeError: DeepGEMM runs on Hopper and Blackwell GPUs only"
+    assert bench.ratios(rows) == {16: 1.5}
+    bench.write_csv(rows, tmp_path / "gemm.csv")
+    lines = (tmp_path / "gemm.csv").read_text().splitlines()
+    assert lines[0] == "shape,n,k,m,kernel,us,tflops,note"
+    # 2 x 16 x 6,144 x 2,560 FLOP in 30 µs.
+    assert lines[1] == "qkv,6144,2560,16,marlin,30.00,16.8,"
+    assert lines[3].startswith("qkv,6144,2560,16,deepgemm,,,RuntimeError")
