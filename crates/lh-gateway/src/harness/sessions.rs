@@ -4,8 +4,10 @@
 //!
 //! The table holds at most [`SESSIONS`] sessions, whatever clients send. A new session that finds it full takes the
 //! place of the session seen longest ago that is not in a turn; only while every session is in a turn is it not
-//! remembered. Untrusted tenants' sessions take at most half the table, so that their requests, each of which may
-//! name a session of its own, cannot make it forget the trusted tenants' sessions.
+//! remembered. Untrusted tenants' sessions take at most half the table. Each of their requests may name a session of
+//! its own, and in a full table a flood of them takes the places of the sessions seen longest ago, trusted ones too,
+//! but only until untrusted sessions hold half: from then on they take each other's, so the trusted tenants keep up
+//! to half the table.
 
 use std::collections::HashMap;
 use std::sync::Arc;
