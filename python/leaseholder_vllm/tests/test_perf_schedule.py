@@ -2,6 +2,7 @@
 baseline, and, on vLLM's real scheduler, that each steady state is steady and runs the path it is named for. Nothing
 here times anything: tests/test_perf_control.py, the check's negative control, does, under make perf-make-room."""
 
+import importlib.util
 import json
 import os
 import statistics
@@ -252,6 +253,36 @@ def test_the_control_checks_against_the_baseline_make_passes_it(tmp_path):
         text=True,
     )
     assert proc.stdout.strip() == str(BASELINE), proc.stderr
+
+
+def test_another_machines_baseline_is_refused_unless_asked():
+    there = {
+        "host": "peacock",
+        "cpu": "Xeon",
+        "python": "3.12.15",
+        "torch": "2.13.0+cpu",
+        "os": "Linux 5.15",
+    }
+    baseline = {"machine": there}
+    assert P.machine_check(there | {"os": "Linux 6.8", "cores": 8}, baseline, False) is None
+    for key, value in (("cpu", "Apple M5 Max"), ("python", "3.12.12"), ("torch", "2.13.0")):
+        with pytest.raises(
+            P.CannotMeasure, match=f"{key}: .* there, {value} here.*measure one here"
+        ):
+            P.machine_check(there | {key: value}, baseline, False)
+        warning = P.machine_check(there | {key: value}, baseline, True)
+        assert warning.startswith("against another machine's baseline") and value in warning
+
+
+def test_a_check_against_another_cpus_baseline_exits_2_before_timing(tmp_path):
+    other = json.loads(BASELINE.read_text())
+    other["machine"]["cpu"] = "a CPU no machine has"
+    path = tmp_path / "other.json"
+    path.write_text(json.dumps(other))
+    proc = script("check", str(path), "--states", "A16", "--reps", "1")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    if importlib.util.find_spec("torch") and importlib.util.find_spec("vllm"):
+        assert "a CPU no machine has there" in proc.stderr and "measure one here" in proc.stderr
 
 
 def test_the_checked_in_baseline_is_complete_and_its_numbers_agree():

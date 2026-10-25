@@ -533,6 +533,23 @@ def read_baseline(path: Path) -> dict:
     return baseline
 
 
+def machine_check(here: dict, baseline: dict, any_machine: bool) -> str | None:
+    """Whether a check here may compare with ``baseline``: the ratios depend on the CPU, Python and torch, so another's
+    raises CannotMeasure, or with ``any_machine`` returns a warning to print. None when they agree."""
+    there = baseline["machine"]
+    keys = [k for k in ("cpu", "python", "torch") if here.get(k) != there.get(k)]
+    if not keys:
+        return None
+    diffs = "; ".join(f"{k}: {there.get(k)} there, {here.get(k)} here" for k in keys)
+    what = f"the baseline is {there.get('host')}'s and this machine differs ({diffs})"
+    if any_machine:
+        return f"against another machine's baseline: {what}; ratios are CPU-specific, so read it with care"
+    raise CannotMeasure(
+        f"{what}: ratios are CPU-specific, so measure one here (make perf-make-room UPDATE=1 "
+        "PERF_BASELINE=build/perf-baseline.json PERF_BESIDE=...) and check against it, or pass --any-machine"
+    )
+
+
 def build_module(out: Path) -> Path:
     """make-room's module, as build.py writes it at engine start, from the vLLM source on PYTHONPATH."""
     build = load(BUILD, "lh_perf_build")
@@ -558,6 +575,9 @@ def command() -> int:
         p.add_argument("--module", type=Path, help="a generated module in place of make-room's")
         p.add_argument("--raw", type=Path, help="every process's timed steps, as JSON")
     sub.choices["check"].add_argument("--out", type=Path, help="the run's JSON")
+    sub.choices["check"].add_argument(
+        "--any-machine", action="store_true", help="check against another machine's baseline"
+    )
     sub.choices["baseline"].add_argument("--beside", default="", help="what else ran meanwhile")
     m = sub.add_parser("measure")  # one process's measurement, run by run()
     m.add_argument("module", type=Path)
@@ -583,6 +603,10 @@ def command() -> int:
     why = importable(["pytest", "torch", "vllm.v1.core.sched.scheduler"])
     if why:
         raise CannotMeasure(f"this Python cannot import what the scheduler needs ({why})")
+    here = machine()
+    warning = machine_check(here, baseline, args.any_machine) if baseline else None
+    if warning:
+        print(f"perf_schedule.py: {warning}", file=sys.stderr)
     from conftest import write_model
 
     configs = ["off", "on"] + ([NOISE] if args.command == "baseline" else [])
@@ -605,7 +629,7 @@ def command() -> int:
     if args.raw:
         args.raw.write_text(json.dumps(result) + "\n")
     record = {
-        "machine": machine(),
+        "machine": here,
         "date": started.strftime("%Y-%m-%dT%H:%MZ"),
         "module": "make-room" if args.module is None else args.module.name,
         "method": METHOD,
@@ -648,7 +672,7 @@ def command() -> int:
             "tolerance": baseline["tolerance"],
         },
         "failures": failures,
-    }
+    } | ({"machine_differs": warning} if warning else {})
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(dumps(record) + "\n")
