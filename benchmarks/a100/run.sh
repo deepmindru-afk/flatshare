@@ -55,7 +55,7 @@ fi
 minutes() {
   case $1 in
     0) echo 40 ;; 1) echo 25 ;; 2) echo 26 ;; 3) echo 17 ;; 4) echo 29 ;; 5) echo 17 ;; 6 | 7 | 8 | 9) echo 28 ;;
-    10) echo 10 ;; cprime) echo 95 ;; branches) echo 45 ;; resubmit) echo 36 ;; batch) echo 20 ;; aprime) echo 80 ;;
+    10) echo 10 ;; cprime) echo 95 ;; branches) echo 45 ;; resubmit) echo 36 ;; batch) echo 15 ;; aprime) echo 80 ;;
     *) echo 0 ;;
   esac
 }

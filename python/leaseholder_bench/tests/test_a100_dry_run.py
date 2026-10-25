@@ -703,3 +703,107 @@ def test_bootstrap_keeps_the_hub_cache_the_first_stage_resolved(ubuntu: dict) ->
         assert "export HF_HUB_CACHE=/data/hf/hub\n" in (node / "env.sh").read_text(), invocation
         engine = (node / "systemd" / "lh-engine.service").read_text().splitlines()
         assert 'Environment="HF_HUB_CACHE=/data/hf/hub"' in engine, invocation
+
+
+FAKE_VLLM = """\
+#!/usr/bin/env bash
+# The engine venv's vllm in the batch arm's dry run: `vllm bench serve` logs how it was asked, holds its clients a
+# moment, and writes its result where --result-dir and --result-filename say.
+echo "vllm $*" >>"$HOME/vllm.log"
+dir="" file=""
+while (($#)); do
+  case $1 in
+    --result-dir) dir=$2; shift ;;
+    --result-filename) file=$2; shift ;;
+  esac
+  shift
+done
+sleep 1.5
+echo '{"output_throughput": 9000.0, "completed": 20}' >"$dir/$file"
+echo "Output token throughput (tok/s):  9000.0"
+"""
+
+
+class BatchEngine(http.server.BaseHTTPRequestHandler):
+    """The engine as the batch arm reads it: its model, its KV geometry (vllm:cache_config_info) and its
+    running and waiting requests, as the batch formed."""
+
+    blocks = 2275
+
+    def do_GET(self) -> None:
+        if self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": MODEL}]})
+        elif self.path == "/metrics":
+            body = (
+                f'vllm:cache_config_info{{block_size="16",engine="0",num_gpu_blocks="{self.blocks}"}} 1.0\n'
+                'vllm:num_requests_running{engine="0",model_name="m"} 256.0\n'
+                'vllm:num_requests_waiting{engine="0",model_name="m"} 0.0\n'
+            )
+        else:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(body.encode())
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+def test_the_batch_arm_holds_its_whole_batch_in_the_pool_and_records_that_it_formed(
+    tmp_path: Path,
+) -> None:
+    # vllm bench serve's 256 clients on the core's engine: each request must hold its KV beside the others' in the
+    # 5 GiB pool (2,275 blocks of 16), so that 256 run at once and the arm measures the scheduler at that batch, not
+    # a queue; the running gauge, sampled while the clients run, shows it did. A pool too small for the batch is
+    # refused before a client starts.
+    run = Path(tempfile.mkdtemp(prefix="lh-batch-"))
+    (run / "lh").mkdir(mode=0o700)
+    server = UnixServer(str(run / "lh" / "engine.sock"), BatchEngine)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        hosts = tmp_path / "hosts"
+        home = a100_host(hosts)
+        vllm = home / "leaseholder" / "venvs" / "engine" / "bin" / "vllm"
+        vllm.write_text(FAKE_VLLM)
+        vllm.chmod(0o755)
+        env = dry_env(home, hosts, run)
+        batch = REPO / "benchmarks" / "a100" / "batch.sh"
+        done = subprocess.run(
+            ["bash", str(batch), "--rounds", "1"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+        calls = lines(home / "vllm.log")
+        assert len(calls) == 6  # two clients on each of three engines
+        for call in calls:
+            assert "--random-input-len 48 --random-output-len 64 " in call, call
+        out = home / "leaseholder" / "runs" / "a100" / "batch"
+        for name in ("frozen", "off", "on"):
+            running = json.loads((out / f"{name}-running.json").read_text())
+            assert running["samples"] >= 1 and running["running_max"] == 256, running
+            assert running["blocks"] == 2275 and running["blocks_needed"] == 2048, running
+        assert "running p50 256, max 256 (the batch: 256)" in (out / "batch.log").read_text()
+        BatchEngine.blocks = 1000
+        for name in ("frozen", "off", "on"):
+            for kept in out.glob(f"{name}-*.json"):
+                kept.unlink()
+        small = subprocess.run(
+            ["bash", str(batch), "--rounds", "1"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert small.returncode == 2, small.stdout + small.stderr
+        assert (
+            "the pool holds 1000 blocks of 16; 256 requests of 112 tokens need 2048" in small.stdout
+        )
+        assert len(lines(home / "vllm.log")) == 6  # no client started
+    finally:
+        BatchEngine.blocks = 2275
+        server.shutdown()
+        shutil.rmtree(run, ignore_errors=True)
