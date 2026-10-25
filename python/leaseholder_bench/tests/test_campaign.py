@@ -230,6 +230,31 @@ def test_a_campaign_refuses_a_sampler_interval_it_cannot_read(
     assert runs(hosts) == []
 
 
+def test_a_campaign_saves_its_calls_audio(hosts: Hosts) -> None:
+    hosts.gpu(PHASTFORM)
+    lines = ["agents-seed 11", "save-audio  # for the demo", "arms/a1.toml", "arms/a2.toml"]
+    campaign = hosts.campaign("c10", lines, {"a1": VOICE, "a2": VOICE})
+    done = hosts.run(campaign)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert [run.split(" --gpu-source")[0].split()[-3:] for run in runs(hosts)] == [
+        ["--agents-seed", "11", "--save-audio"]
+    ] * 2
+    assert (
+        "c10: 2 points, arm files at ?, the agents' seed 11, the calls' audio saved"
+        in (hosts.results / "c10" / "campaign.log").read_text()
+    )
+    for line in (["save-audio", "save-audio"], ["save-audio twice"]):
+        campaign = hosts.campaign("c11", [*line, "arms/a1.toml"], {"a1": VOICE})
+        done = hosts.run(campaign, "--dry-run")
+        assert done.returncode == 1 and "a campaign saves its calls' audio once" in done.stdout
+
+
+def test_campaign_sh_reads_the_demo_campaign(hosts: Hosts) -> None:
+    done = hosts.run(REPO / "benchmarks" / "e2" / "demo.campaign", "--dry-run")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "2 points, arm files at" in done.stdout and "the calls' audio saved" in done.stdout
+
+
 def test_without_a_seed_line_each_point_keeps_its_arm_files_seed(hosts: Hosts) -> None:
     hosts.gpu(PHASTFORM)
     done = hosts.run(hosts.campaign("c5", ["arms/a1.toml"], {"a1": VOICE}))

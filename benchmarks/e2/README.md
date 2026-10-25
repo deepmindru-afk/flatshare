@@ -1,6 +1,6 @@
 # E2 campaigns
 
-An E2 point is one arm file in [`arms/`](arms): the calls, the agent replay beside them, the gateway's configuration and the engine ([the arm-file reference](../../python/leaseholder_bench/README.md#e2-points)). `lh-bench e2 run` measures one point on cyan. A campaign file lists arm files, and `campaign.sh` measures them in order from a workstation with SSH to the hosts, the way `deploy/deploy.sh` deploys. A line `agents-seed N` in it sets AIPerf's seed for all of its points, in place of each arm file's `[agents] seed`, so that each round of a repeated campaign replays a workload sample of its own while its points stay paired. A line `kv-sample-s SECONDS` sets `lh-bench e2 run --kv-sample-s` for its points: how often an agent point samples each engine's KV use and requests for the measured running share (0.5 s by default, on one connection to each engine that it keeps for the calls); `kv-sample-s 0` samples nothing, as W5's points ran, the sampler having come after them, so that a campaign read against W5's matches its instrumentation (the Marlin dry run's point, `benchmarks/a100/marlin-dry.campaign`).
+An E2 point is one arm file in [`arms/`](arms): the calls, the agent replay beside them, the gateway's configuration and the engine ([the arm-file reference](../../python/leaseholder_bench/README.md#e2-points)). `lh-bench e2 run` measures one point on cyan. A campaign file lists arm files, and `campaign.sh` measures them in order from a workstation with SSH to the hosts, the way `deploy/deploy.sh` deploys. A line `agents-seed N` in it sets AIPerf's seed for all of its points, in place of each arm file's `[agents] seed`, so that each round of a repeated campaign replays a workload sample of its own while its points stay paired. A line `kv-sample-s SECONDS` sets `lh-bench e2 run --kv-sample-s` for its points: how often an agent point samples each engine's KV use and requests for the measured running share (0.5 s by default, on one connection to each engine that it keeps for the calls); `kv-sample-s 0` samples nothing, as W5's points ran, the sampler having come after them, so that a campaign read against W5's matches its instrumentation (the Marlin dry run's point, `benchmarks/a100/marlin-dry.campaign`). A line `save-audio` has the callers save each call's audio, for [the demo video](#the-demo-video) (`lh-bench e2 run --save-audio`).
 
 ```sh
 export LH_SSH="ssh -F $HOME/.ssh/penn_config"                  # your SSH command for the hosts, as for deploy.sh
@@ -134,24 +134,23 @@ The run directories themselves, with the raw records the report does not need (t
 
 ## The demo video
 
-Two calls side by side, one stuttering and one smooth, while background agents run: [`demo.py`](demo.py) renders them from two points measured with `lh-bench e2 run --save-audio`, which has the callers save each call's audio and the times of its turns ([`lh-voice bots --save-audio`](../../python/leaseholder_voice/README.md#measurement-callers)). `campaign.sh` does not pass the option, so the two points are measured by hand, each after switching the GPU node to its engine as `campaign.sh` does (`variant.sh use` with what `lh-bench e2 engine ARM` prints), for example the frozen box and the vLLM PRs' configuration with a 48-token window in the discriminating scenario:
+Two calls side by side, one stuttering and one smooth, while background agents run: [`demo.py`](demo.py) renders them from two points measured with `lh-bench e2 run --save-audio`, which has the callers save each call's audio and the times of its turns ([`lh-voice bots --save-audio`](../../python/leaseholder_voice/README.md#measurement-callers)). [`demo.campaign`](demo.campaign) measures two such points with its `save-audio` line: the frozen box and the vLLM PRs' configuration with a 48-token window in the discriminating scenario, on W5's round-1 sample of the agents:
 
 ```sh
-lh-bench e2 run ~/leaseholder/src/benchmarks/e2/arms/disc-frozen-s24.toml --out ~/leaseholder/runs/e2/demo/disc-frozen-s24 --save-audio
-lh-bench e2 run ~/leaseholder/src/benchmarks/e2/arms/disc-pr-ab48-s24.toml --out ~/leaseholder/runs/e2/demo/disc-pr-ab48-s24 --save-audio
+benchmarks/e2/campaign.sh benchmarks/e2/demo.campaign
 ```
 
 Then, on a workstation with the two run directories fetched (`uv` installs the script's pinned numpy, matplotlib and imageio-ffmpeg, whose ffmpeg encodes):
 
 ```sh
-uv run benchmarks/e2/demo.py $LH_E2_RESULTS/demo/disc-frozen-s24 $LH_E2_RESULTS/demo/disc-pr-ab48-s24 \
+uv run benchmarks/e2/demo.py $LH_E2_RESULTS/demo/w5-disc-frozen-s24 $LH_E2_RESULTS/demo/w5-disc-pr-ab48-s24 \
   --labels "vLLM 0.32, tuned" "With #63350 and #63351" --out demo.mp4
-uv run benchmarks/e2/demo.py $LH_E2_RESULTS/demo/disc-frozen-s24 $LH_E2_RESULTS/demo/disc-pr-ab48-s24 \
+uv run benchmarks/e2/demo.py $LH_E2_RESULTS/demo/w5-disc-frozen-s24 $LH_E2_RESULTS/demo/w5-disc-pr-ab48-s24 \
   --labels "vLLM 0.32, tuned" "With #63350 and #63351" --first-turn 1 --seconds 30 --out turn1.mp4 \
   --gif docs/figures/e2-demo.gif --gif-seconds 15
 ```
 
-The v0.3 release has the video rendered so, from the two points measured on 2026-10-24 (V2V p95 10,851 and 2,202 ms; they are not in the tables, and the release has their run directories). [`docs/figures/e2-demo.gif`](../../docs/figures/e2-demo.gif) is the second command's: the calls' second turn, the first 15 s.
+The v0.3 release has the video rendered so, from two such points measured by hand on 2026-10-24 (`disc-frozen-s24` and `disc-pr-ab48-s24`, V2V p95 10,851 and 2,202 ms; they are not in the tables, and the release has their run directories). [`docs/figures/e2-demo.gif`](../../docs/figures/e2-demo.gif) is the second command's: the calls' second turn, the first 15 s.
 
 The video is 1280×720 at 30 frames a second. Each side shows its point's first call (`--caller`): its scrolling waveform, the caller above and the agent below; the current turn's wait, from the end of the caller's speech to the agent's first audio, counting live; each reply's V2V as the callers measured it, in a bar that grows while the caller waits; and the background goodput, the point's over its calls and the last 10 s of AIPerf's completed requests on the wall clock. Both calls show the same turns from `--first-turn` (default 0): `--turns` of them, by default as many as fit in `--seconds` (default 90). Turn k of both starts at the same moment, so the same line is answered side by side, and the call that is ahead waits in silence before its next line: only a caller's pause between turns is stretched, never a measured wait. The soundtrack is one call at a time, the left one for the first half and the right one for the second, and the side playing is highlighted. `--gif` writes the first 10 s (`--gif-seconds`) as a 640×360 GIF at 10 frames a second, for a README, from frames of their own without the soundtrack's cues (no side marked as heard). A 90-second video takes two to three minutes to render.
 
