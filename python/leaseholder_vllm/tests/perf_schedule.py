@@ -1,10 +1,11 @@
-"""make-room's cost per step: Scheduler.schedule()'s wall time on vLLM 0.32.0's real scheduler, on CPU, with the
-switches off and at the PRs' values, and the regression check of that cost against a measured baseline.
+"""make-room's cost per step: Scheduler.schedule()'s wall time on vLLM 0.32.0's real scheduler, on CPU, with its
+switches off and in the configuration to deploy, and the regression check of that cost against a measured baseline.
 
 The module is make-room's, as build.py generates it at engine start (``--module`` times another generated module), its
-switches off or at the PRs' values: ``max_preemptions_per_step 2``, ``budget_cap true``, ``budget_cap_tokens 48``,
-``reserve_tokens 0``. It runs in the steady states the PRs' cost tables were measured in (#63350 and #63351), in which
-nothing is admitted or preempted for the measured steps, so that every step does the same work:
+switches off or in the configuration to deploy: ``max_preemptions_per_step 2``, ``budget_cap true``,
+``budget_cap_tokens 48``, ``reserve_tokens 0``. It runs in the steady states the PRs' cost tables were measured in
+(#63350 and #63351), in which nothing is admitted or preempted for the measured steps, so that every step does the same
+work:
 
   A  R running priority-2 decodes; the waiting head is a priority-2 request that does not fit the free KV (the
      saturated background tier), then W-1 small priority-2 requests behind it.
@@ -24,8 +25,8 @@ the process is its cheaper scheduler's: one scheduler of a configuration may run
 through the whole process, as their places in memory differ, and the pair makes that need both. A state's ratio
 is the median over its processes of each one's on/off - 1: what the change costs as a fraction of the scheduler's own
 step, the same on a machine that is uniformly faster or slower. Its cost off in µs is the median over the processes,
-and the change's cost in µs that times the ratio, so that on = off x (1 + ratio). A run times every state in each of 3
-repetitions, a process each, the states in a rotated order.
+and the change's cost in µs that times the ratio, so that on = off x (1 + ratio). A round times every state once, a
+process each, the states in a rotated order, and a check is 3 rounds.
 
 What it can see: a state fails when the change's own cost a step grows by the tolerance of the step with the switches
 on (the table's "fails past", in µs), which is a small share of the change's cost where the change costs much (the B
@@ -34,14 +35,15 @@ states) and a large one where it costs little (the A states). And what it cannot
 move it. Each cell records the ratio by the median step as well, as information the check does not read.
 
 The check fails a state whose on/off exceeds the baseline's by more than the baseline's tolerance, a fraction of it
-(tolerance()), measured again over twice as many processes more and still exceeding it (confirm()). The baseline (benchmarks/perf/make-room-schedule.json) is two such runs, A and B, their repetitions
-interleaved and the off configuration timed twice in each process: its noise is off against off within each process,
-and run A against run B, compared as the check compares a run with the baseline. A state whose on/off fell below the
+(tolerance()), measured again over twice as many processes more and still exceeding it (confirm()). The baseline
+(benchmarks/perf/make-room-schedule.json) is two halves, A and B, of 3 rounds each, their rounds interleaved and the
+off configuration timed twice in each process: its noise is off against off within each process, and half B against
+half A, compared as the check compares itself with the baseline. A state whose on/off fell below the
 baseline's by more than the tolerance passes with a note (cheaper()): the change got cheaper, or the step with the
 switches off costlier, and either way the baseline no longer describes the code.
 
-    python tests/perf_schedule.py check BASELINE [--out JSON] [--reps 3] [--states A16,B64] [--module MODULE]
-    python tests/perf_schedule.py baseline BASELINE [--reps 3] [--beside TEXT]
+    python tests/perf_schedule.py check BASELINE [--out JSON] [--rounds 3] [--states A16,B64] [--module MODULE]
+    python tests/perf_schedule.py baseline BASELINE [--rounds 3] [--beside TEXT]
 
 Both need torch and vLLM 0.32.0's dependencies, with vLLM's source on PYTHONPATH (``make perf-make-room``). The exit
 status is 0 when every state is within the tolerance, 1 when one costs more than it did, and 2 when it could not
@@ -74,7 +76,7 @@ TURN = 5  # the steps a scheduler takes in a row
 INSTANCES = 2  # schedulers of each configuration in a process; the cheaper one's cost counts
 RUN_TOKENS = 2048  # each running request's prompt
 MAX_MODEL_LEN = 32768
-# The PRs' values (docs/PRODUCTION.md), as make_room's keys.
+# The configuration to deploy (docs/PRODUCTION.md), as make_room's keys.
 CONFIGS: dict[str, dict | None] = {
     "off": None,
     "on": {
@@ -256,7 +258,7 @@ def measure(
     return {c: [times[c, i] for i in range(INSTANCES)] for c in configs}
 
 
-# The runs: every state in each repetition, a process each, the states and configurations rotated.
+# The rounds: every state once in each, a process each, the states and configurations rotated.
 
 
 def rotated(items: list, k: int) -> list:
@@ -286,9 +288,10 @@ def run(
     reps: int,
     runs: str = "a",
 ) -> dict:
-    """``reps`` repetitions of each run in ``runs`` (their repetitions interleaved), every state in ``states`` in
-    each, a process each, timing ``configs``. Returns each process's timed steps by configuration, and for each
-    repetition the load average before and after it and what else used the CPU as it started."""
+    """``reps`` rounds of each set of rounds in ``runs``, named by a letter (a check's ``a``, a baseline's halves
+    ``ab``, the states measured again ``c``), their rounds interleaved, every state in ``states`` in each, a process
+    each, timing ``configs``. Returns each process's timed steps by configuration, and for each round the load average
+    before and after it and what else used the CPU as it started."""
     processes, load = [], []
     # The scheduler is Python; torch's thread pools would only take CPUs from what else runs.
     env = os.environ | {
@@ -389,7 +392,7 @@ def excess(ratio: float, base: float) -> float:
 
 
 def baseline_cells(processes: list[dict]) -> dict[str, dict]:
-    """The baseline's cells: over both runs' processes, with each run's ratios and run B's excess over run A."""
+    """The baseline's cells: over both halves' processes, with each half's ratios and half B's excess over half A."""
     out = cells(processes)
     by_run = {name: cells([p for p in processes if p["run"] == name]) for name in "ab"}
     for key, cell in out.items():
@@ -404,7 +407,7 @@ def baseline_cells(processes: list[dict]) -> dict[str, dict]:
 def tolerance(noise: list[float], aa: list[float]) -> float:
     """The check's tolerance: twice the largest factor by which the baseline's two measurements of something
     unchanged differed in any state, as a fraction rounded up to a whole percent. Those are off against off in each
-    process (``noise``: the median over the processes of off2/off - 1) and its run B against its run A (``aa``: the
+    process (``noise``: the median over the processes of off2/off - 1) and its half B against its half A (``aa``: the
     excess, as the check compares on/off), and a check run and the baseline may each be off by that much."""
     worst = max(abs(math.log1p(x)) for x in [*noise, *aa])
     return math.ceil(round(100 * math.expm1(2 * worst), 6)) / 100
@@ -619,7 +622,7 @@ def command() -> int:
     for name in ("check", "baseline"):
         p = sub.add_parser(name)
         p.add_argument("baseline", type=Path)
-        p.add_argument("--reps", type=int, default=3)
+        p.add_argument("--rounds", type=int, default=3, help="rounds: every state once in each")
         p.add_argument("--states", default=",".join(BY_KEY), help="comma-separated states")
         p.add_argument("--module", type=Path, help="a generated module in place of make-room's")
         p.add_argument("--raw", type=Path, help="every process's timed steps, as JSON")
@@ -666,13 +669,15 @@ def command() -> int:
         model.mkdir()
         write_model(model, max_position_embeddings=MAX_MODEL_LEN)
         started = datetime.now(UTC)
-        result = run(module, str(model), states, configs, args.reps, runs)
+        result = run(module, str(model), states, configs, args.rounds, runs)
         if baseline is not None:
 
             def again(failing: list[State]) -> dict:
                 keys = ", ".join(s.key for s in failing)
-                print(f"  measuring {keys} again, {2 * args.reps} processes each", file=sys.stderr)
-                return run(module, str(model), failing, configs, 2 * args.reps, "c")
+                print(
+                    f"  measuring {keys} again, {2 * args.rounds} processes each", file=sys.stderr
+                )
+                return run(module, str(model), failing, configs, 2 * args.rounds, "c")
 
             measured, failures, suspects = confirm(result, baseline, again)
     if args.raw:
@@ -682,7 +687,7 @@ def command() -> int:
         "date": started.strftime("%Y-%m-%dT%H:%MZ"),
         "module": "make-room" if args.module is None else args.module.name,
         "method": METHOD,
-        "reps": args.reps,
+        "reps": args.rounds,
         "load": result["load"],
     }
 
@@ -692,7 +697,7 @@ def command() -> int:
         aa = [cell["aa"] for cell in measured.values()]
         record = {
             "what": "make-room's cost per step, Scheduler.schedule()'s wall time on vLLM 0.32.0's real scheduler "
-            "on CPU with the switches off and at the PRs' values, written by "
+            "on CPU with its switches off and in the configuration to deploy, written by "
             "python/leaseholder_vllm/tests/perf_schedule.py baseline",
             **record,
             "beside": args.beside,
@@ -707,7 +712,7 @@ def command() -> int:
         args.baseline.write_text(dumps(record) + "\n")
         print(
             f"\nbaseline written to {args.baseline}: the worst off-against-off noise "
-            f"{record['noise_max']:+.1%}, the worst run B against run A {record['aa_max']:+.1%}, "
+            f"{record['noise_max']:+.1%}, the worst half B against half A {record['aa_max']:+.1%}, "
             f"so a tolerance of {record['tolerance']:.0%}"
         )
         return 0

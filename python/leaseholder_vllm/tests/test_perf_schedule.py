@@ -47,7 +47,7 @@ def test_a_cells_ratio_is_the_median_of_its_processes_on_off():
     assert "noise" not in P.cells([process("C16", 100, 150)])["C16"]
 
 
-def test_the_baseline_compares_its_run_b_with_its_run_a():
+def test_the_baseline_compares_its_half_b_with_its_half_a():
     procs = [process("C16", 100, 150, 101, run) for run in "ab"]
     procs += [process("C16", 100, 160, 100, "a"), process("C16", 100, 158, 99, "b")]
     procs += [process("C16", 100, 170, 100, "a"), process("C16", 100, 162, 101, "b")]
@@ -332,7 +332,7 @@ def test_a_check_against_another_cpus_baseline_exits_2_before_timing(tmp_path):
     other["machine"]["cpu"] = "a CPU no machine has"
     path = tmp_path / "other.json"
     path.write_text(json.dumps(other))
-    proc = script("check", str(path), "--states", "A16", "--reps", "1")
+    proc = script("check", str(path), "--states", "A16", "--rounds", "1")
     assert proc.returncode == 2, proc.stdout + proc.stderr
     if importlib.util.find_spec("torch") and importlib.util.find_spec("vllm"):
         assert "a CPU no machine has there" in proc.stderr and "measure one here" in proc.stderr

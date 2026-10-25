@@ -39,7 +39,7 @@ STATES = ("B64", "C256")
 
 
 def check(module: Path, out: Path) -> subprocess.CompletedProcess:
-    cmd = [sys.executable, P.__file__, "check", str(BASELINE), "--reps", "1"]
+    cmd = [sys.executable, P.__file__, "check", str(BASELINE), "--rounds", "1"]
     cmd += ["--states", ",".join(STATES), "--module", str(module), "--out", str(out)]
     return subprocess.run(cmd, capture_output=True, text=True)
 
