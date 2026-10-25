@@ -958,18 +958,34 @@ def preflight(
                 f"sm{major}{minor}",
                 "vLLM 0.32.0 needs compute capability 7.5 or newer",
             )
-        elif major >= 9:
-            add("CC and precision path", "ok", f"sm{major}{minor}: FP8 W8A8{seen}")
         else:
-            add(
-                "CC and precision path",
-                "degraded",
-                f"sm{major}{minor}{seen}",
-                "W8A16 through Marlin at the BF16 rate"
-                + (" (FP16 activations)" if major < 8 else ""),
-                "within-card comparisons unchanged; the per-token cost is the BF16 path's; across cards only in regime "
-                "coordinates",
-            )
+            # The path is the kernel the engine's start selected; before a start, the one the card is expected to
+            # take: vLLM 0.32.0's block-FP8 kernels ahead of Marlin need sm90, so below it this checkpoint goes to
+            # Marlin's W8A16 (kernels/linear/__init__.py), from it to FP8 W8A8.
+            selected = kernel.group(1) if kernel else None
+            expected = "" if selected else ", expected (the engine's first start shows its kernel)"
+            effect = "within-card comparisons unchanged; across cards only in regime coordinates"
+            if (not selected and major < 9) or (selected and "marlin" in selected.lower()):
+                add(
+                    "CC and precision path",
+                    "degraded",
+                    f"sm{major}{minor}{seen}",
+                    "W8A16 through Marlin at the BF16 rate"
+                    + (" (FP16 activations)" if major < 8 else "")
+                    + expected,
+                    "the per-token cost is the BF16 path's; " + effect,
+                )
+            elif major >= 9:
+                add("CC and precision path", "ok", f"sm{major}{minor}: FP8 W8A8{seen}{expected}")
+            else:
+                add(
+                    "CC and precision path",
+                    "degraded",
+                    f"sm{major}{minor}{seen}",
+                    f"FP8 through {selected}: neither Marlin's W8A16, which the forecast models below sm90, nor the "
+                    "box's W8A8",
+                    "the per-token cost is that kernel's; " + effect,
+                )
         if major >= 8:
             add("BF16", "ok", "CC >= 8.0")
         else:

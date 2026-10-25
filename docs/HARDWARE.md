@@ -49,7 +49,7 @@ The profile's "auto" values, in `deploy/profile.py`:
 
 | Check | Degraded, and what it changes | Refused |
 |---|---|---|
-| Compute capability and precision path | sm75-sm89: W8A16 through Marlin at the BF16 rate; the per-token cost is the BF16 path's, comparisons across cards only in regime coordinates | below sm75 |
+| Compute capability and precision path | sm75-sm89: W8A16 through Marlin at the BF16 rate; the per-token cost is the BF16 path's, comparisons across cards only in regime coordinates. The row names the kernel the engine's first start selected (before it, the one expected): another than Marlin below sm90 is named as such | below sm75 |
 | BF16 | sm75: FP16 activations; numerics differ from the box | |
 | Attention backend and KV layout | not FlashAttention or FlashInfer on LBHNC (the engine log): attention's cost | |
 | Driver and install path | cu130 with the compatibility libraries, or the cu129 lock: another CUDA runtime under the same vLLM and torch | the venv's build is not the one the driver needs |

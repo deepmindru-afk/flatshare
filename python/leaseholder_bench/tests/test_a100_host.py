@@ -626,6 +626,47 @@ def test_a_cpu_tier_other_than_the_staged_one_is_refused(
     assert tier().status == "ok"
 
 
+def test_the_precision_paths_reason_is_the_kernel_the_engine_selected(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # The row names the path by the kernel the engine's start logged, not by the card alone: on an sm89 card (an
+    # L4), a start that selected Cutlass's FP8 kernel is not Marlin's W8A16. Before a start, the expected one: below
+    # sm90 Marlin (vLLM 0.32.0's block-FP8 kernels ahead of it need sm90), from it FP8 W8A8.
+    node = ready_host(
+        tmp_path, venv, engine, monkeypatch, facts(gpu=gpu(name="NVIDIA L4", compute_cap="8.9"))
+    )
+    warm = venv / "leaseholder" / "cache" / "warm.json"
+    record = json.loads(warm.read_text())
+
+    def precision() -> host_py.Check:
+        checks = host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)
+        return next(c for c in checks if c.check == "CC and precision path")
+
+    for entry in record["configurations"].values():
+        entry["log"] = [
+            line.replace("MarlinFP8ScaledMMLinearKernel", "CutlassFP8ScaledMMLinearKernel")
+            for line in entry["log"]
+            if "native support for FP8" not in line
+        ]
+    warm.write_text(json.dumps(record))
+    row = precision()
+    assert row.status == "degraded" and "CutlassFP8ScaledMMLinearKernel" in row.value, row
+    assert (
+        row.reason.startswith("FP8 through CutlassFP8ScaledMMLinearKernel")
+        and "Marlin's W8A16" in row.reason
+    )
+    warm.unlink()  # no start yet
+    row = precision()
+    assert (
+        row.status == "degraded"
+        and row.reason.startswith("W8A16 through Marlin")
+        and "expected" in row.reason
+    )
+    node.host["gpu"] = gpu(name="NVIDIA H100 80GB HBM3", compute_cap="9.0")
+    row = precision()
+    assert row.status == "ok" and "FP8 W8A8" in row.value and "expected" in row.value, row
+
+
 def test_a_compute_mode_other_than_default_is_refused(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:
