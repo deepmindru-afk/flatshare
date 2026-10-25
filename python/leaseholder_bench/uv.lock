@@ -1036,6 +1036,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "aiperf" },
     { name = "httpx" },
+    { name = "leaseholder-stats" },
     { name = "orjson" },
 ]
 
@@ -1049,9 +1050,19 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.14,<4" },
     { name = "aiperf", specifier = "==0.13.0" },
     { name = "httpx", specifier = ">=0.28,<0.29" },
+    { name = "leaseholder-stats", editable = "../leaseholder_stats" },
     { name = "orjson", specifier = ">=3.11,<4" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8,<10" },
 ]
+provides-extras = ["test"]
+
+[[package]]
+name = "leaseholder-stats"
+version = "0.3.0"
+source = { editable = "../leaseholder_stats" }
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'test'", specifier = ">=8,<10" }]
 provides-extras = ["test"]
 
 [[package]]

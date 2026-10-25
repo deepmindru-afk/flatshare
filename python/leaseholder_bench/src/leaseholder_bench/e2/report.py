@@ -39,7 +39,7 @@ from leaseholder_bench.e2.record import (
     point_engines,
     turn_samples,
 )
-from leaseholder_bench.load import summarize
+from leaseholder_stats import percentiles, summarize
 
 COLUMNS = (
     "arm",
@@ -351,16 +351,6 @@ def v2v_samples(turns: Path) -> list[float]:
     """The callers' voice-to-voice samples in their turns.jsonl (:func:`turn_samples`), a failed
     turn's censored at REPLY_TIMEOUT_MS."""
     return turn_samples(map(orjson.loads, filter(str.strip, turns.read_text().splitlines())))[0]
-
-
-def percentiles(samples: Sequence[float]) -> dict[str, float | int]:
-    """Count, p50, p95 and p99 of V2V samples in ms, as ``lh-voice bots`` sums its calls up: inclusive
-    quantiles, to a tenth of a millisecond."""
-    xs = sorted(samples)
-    if len(xs) < 2:
-        return {"n": len(xs), **({"p50": xs[0]} if xs else {})}
-    q = statistics.quantiles(xs, n=100, method="inclusive")
-    return {"n": len(xs), "p50": round(q[49], 1), "p95": round(q[94], 1), "p99": round(q[98], 1)}
 
 
 def _node_row(node: str, share: Mapping[str, Any]) -> dict[str, Any]:

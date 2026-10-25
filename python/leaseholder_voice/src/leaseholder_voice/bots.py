@@ -36,7 +36,6 @@ import json
 import math
 import platform
 import random
-import statistics
 import time
 import uuid
 import wave
@@ -47,6 +46,8 @@ from typing import Any, TextIO
 
 import numpy as np
 from livekit import api, rtc
+
+from leaseholder_stats import percentiles, v2v_samples
 
 from .audio import (
     AGENT_RATE,
@@ -286,35 +287,12 @@ class Caller:
         (out_dir / f"call-{self.index}.json").write_text(json.dumps(call, indent=1) + "\n")
 
 
-def percentiles(values: Iterable[float], censored: int = 0) -> dict[str, float | int]:
-    """Count, p50, p95 and p99 of samples in ms; ``censored`` of them stand at the reply timeout."""
-    xs = sorted(values)
-    count = {"n": len(xs)} | ({"censored": censored} if censored else {})
-    if len(xs) < 2:
-        return count | ({"p50": xs[0]} if xs else {})
-    q = statistics.quantiles(xs, n=100, method="inclusive")
-    return count | {"p50": round(q[49], 1), "p95": round(q[94], 1), "p99": round(q[98], 1)}
-
-
-def v2v_samples(rows: Iterable[dict[str, Any]], timeout_ms: float) -> tuple[list[float], int]:
-    """The callers' voice-to-voice samples and how many of them are censored: each turn's reply and,
-    after a barge-in, the reply to the interruption, a reply that never came standing at the
-    timeout."""
-    samples, censored = [], 0
-    for row in rows:
-        wanted = ["v2v_ms", *(["v2v_after_barge_in_ms"] if row.get("barge_in") else [])]
-        for key in wanted:
-            censored += key not in row
-            samples.append(row.get(key, timeout_ms))
-    return samples, censored
-
-
 def summarize(
     rows: list[dict[str, Any]], lateness: list[float], timeout_s: float = 30.0
 ) -> dict[str, Any]:
-    """The calls' summary of their measured turns, the warm-up turns left out. A sample a timeout cut
-    short counts at the timeout (``timeout_s``): the reply to a turn or to an interruption that never
-    came, the agent's audio that never stopped."""
+    """The calls' summary of their measured turns, the warm-up turns left out, in leaseholder-stats'
+    percentiles. A sample a timeout cut short counts at the timeout (``timeout_s``): the reply to a
+    turn or to an interruption that never came, the agent's audio that never stopped."""
     rows = [row for row in rows if not row.get("warmup")]
     timeout_ms = timeout_s * 1000
     v2v, censored = v2v_samples(rows, timeout_ms)

@@ -34,9 +34,9 @@ import orjson
 
 from leaseholder_bench.e2.arm import E2Error
 from leaseholder_bench.e2.run import MEASURE, Host, read_env
-from leaseholder_bench.kv_metrics import metric_samples
-from leaseholder_bench.load import random_prompt, summarize
+from leaseholder_bench.load import random_prompt
 from leaseholder_bench.protocol import DEFAULT_MODEL, SloClass
+from leaseholder_stats import metric_samples, summarize
 
 PROMPT = "Count from 1 to 3000, one number per line, with nothing else."
 """A reply that keeps decoding until ``max_tokens``, whatever the sampling."""

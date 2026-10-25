@@ -14,6 +14,7 @@ dependencies = [
     "aiohttp>=3.14,<4",
     "httpx>=0.28,<0.29",
     "orjson>=3.11,<4",
+    "leaseholder-stats",  # python/leaseholder_stats, from this tree (tool.uv.sources)
 ]
 
 [project.optional-dependencies]
@@ -31,3 +32,6 @@ addopts = "-p no:cacheprovider"
 markers = [
     "integration: needs more than this venv (the demo video's encoding runs the script with uv)",
 ]
+
+[tool.uv.sources]
+leaseholder-stats = { path = "../leaseholder_stats", editable = true }
