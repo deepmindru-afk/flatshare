@@ -1512,3 +1512,10 @@ def test_the_gpu_columns_read_the_lent_gpu_of_several_alone(tmp_path: Path) -> N
     one = tmp_path / "one.csv"
     one.write_text("\n".join(row.rsplit(", GPU-", 1)[0] for row in rows[::4]) + "\n")
     assert gpu_samples([one], window)["gpu_sm_clock_p50_mhz"] == 1410
+    # The sampler before it named the GPU in each row: several rows a second are several GPUs, none of them named.
+    old = tmp_path / "old.csv"
+    old.write_text("\n".join(row.rsplit(", GPU-", 1)[0] for row in rows) + "\n")
+    assert gpu_samples([old], window) == {
+        "gpu_sm_clock_p50_mhz": None,
+        "gpu_temperature_max_c": None,
+    }

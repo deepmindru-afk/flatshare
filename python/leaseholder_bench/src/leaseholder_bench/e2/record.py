@@ -629,7 +629,8 @@ def gpu(files: Sequence[Path], window: Mapping[str, float] | None) -> dict[str, 
     campaign.sh takes once a second on each GPU node (gpu.csv; gpu-NODE.csv for a point on several);
     None without them. Where the samples name the GPU, also its name (``gpu_name``). A file whose rows
     carry several GPUs' UUIDs (a host's other GPUs) counts the rows of the one its ``# gpu UUID`` line
-    names, the point's, alone, and none where it names none: the GPUs are not mixed."""
+    names, the point's, alone, and none where it names none; one from before the rows named their GPU
+    with several rows a second (several GPUs) counts none: the GPUs are not mixed."""
     clocks: list[float] = []
     temperatures: list[float] = []
     names: list[str] = []
@@ -640,6 +641,9 @@ def gpu(files: Sequence[Path], window: Mapping[str, float] | None) -> dict[str, 
         lent = next((line.split()[2] for line in text if line.startswith("# gpu ")), None)
         rows = [[field.strip() for field in line.split(",")] for line in text]
         uuids = {row[7] for row in rows if len(row) > 7}
+        stamps = [row[0] for row in rows if len(row) > 1 and len(row) <= 7]
+        if len(stamps) != len(set(stamps)):
+            continue  # several GPUs a second, unnamed
         for fields in rows:
             if len(uuids) > 1 and (len(fields) <= 7 or fields[7] != lent):
                 continue
