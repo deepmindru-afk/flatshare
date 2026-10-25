@@ -162,6 +162,48 @@ def test_cyans_install_makes_the_gateways_secret_and_metrics_key_once(tmp_path: 
     assert sorted(p.name for p in config.iterdir()) == ["cache-salt-secret", "metrics-key"]
 
 
+LINKED_SYSTEMCTL = """\
+#!/bin/sh
+# systemctl --user ...: logs each call; disable removes a linked unit's file from the user's units, as systemd's does.
+echo "$*" >>"$HOME/systemctl.log"
+if [ "$2" = disable ]; then
+  rm "$HOME/.config/systemd/user/$4"
+fi
+"""
+
+
+def test_cyans_install_drops_links_to_units_the_repository_no_longer_has(tmp_path: Path) -> None:
+    # Two links left by units the repository dropped (the tunnels before lh-tunnel@.service): the
+    # first one's disable removed the link itself, its rm then failed, and under set -e the install
+    # stopped before the second link, daemon-reload and the enables (the W6 deploy, 2026-10-25).
+    home, bin_dir = tmp_path / "home", tmp_path / "bin"
+    units = home / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    bin_dir.mkdir()
+    (bin_dir / "systemctl").write_text(LINKED_SYSTEMCTL)
+    (bin_dir / "loginctl").write_text("#!/bin/sh\n")
+    for tool in ("systemctl", "loginctl"):
+        (bin_dir / tool).chmod(0o755)
+    gone = ["lh-tunnel-gray.service", "lh-tunnel-phastform.service"]
+    for name in gone:
+        (units / name).symlink_to(DEPLOY / "cyan" / "systemd" / name)  # no such unit now
+    env = os.environ | {"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    done = subprocess.run(
+        ["bash", str(DEPLOY / "cyan" / "install.sh")], env=env, capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    assert not any(os.path.lexists(units / name) for name in gone)
+    calls = (home / "systemctl.log").read_text().splitlines()
+    assert [c for c in calls if " disable " in c] == [f"--user disable -q {name}" for name in gone]
+    assert calls[-2:] == [
+        "--user daemon-reload",
+        "--user enable -q lh-voicenet.service lh-livekit.service lh-tunnel@phastform.service "
+        "lh-voice-worker.service",
+    ]
+    linked = {p.name for p in units.iterdir()}
+    assert linked == {p.name for p in (DEPLOY / "cyan" / "systemd").iterdir()}  # the units it has
+
+
 FAKE_SYSTEMCTL = """\
 #!/bin/sh
 # systemctl --user ...: a GPU node's user manager, every unit running; logs each call that changes something.
