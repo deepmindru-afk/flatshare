@@ -65,7 +65,7 @@ test-make-room: $(VLLM_SRC)
 	@test -n "$(TORCH_PYTHON)" || { echo "usage: make test-make-room TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies>" >&2; exit 2; }
 	@$(CPU_SUITE_IMPORTS)
 	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -m pytest -q -p no:cacheprovider \
-	  tests/test_make_room.py
+	  tests/test_make_room.py tests/test_perf_schedule.py
 
 # make-room against the PRs' own patches, step for step, on the same CPU environment (python/leaseholder_vllm/README.md):
 # the trace that keeps the variant equal to #63350 and #63351, with the PRs' one-line mutants as its negative control.
@@ -94,6 +94,23 @@ test-python:
 	@for pkg in $(PY_PACKAGES); do \
 	  echo "== $$pkg"; (cd $$pkg && uv run -q --extra test pytest -q -m "not integration") || exit 1; \
 	done
+
+# The engine change's upkeep checks, outside make check (python/leaseholder_vllm/README.md says how to read them).
+.PHONY: perf-make-room
+
+# make-room's cost per step: Scheduler.schedule() on CPU with the switches off and at the PRs' values, in the 13 steady
+# states of the PRs' cost tables (tests/perf_schedule.py; 10 minutes on a 2.1 GHz Xeon, its negative control included).
+# It prints the table, writes PERF_OUT, fails a state whose on/off grew past benchmarks/perf/make-room-schedule.json's
+# tolerance (measured again first), and then runs the check's negative control. UPDATE=1 measures a new baseline in that file's place
+# (PERF_BESIDE: what else ran on the machine).
+PERF_BASELINE := benchmarks/perf/make-room-schedule.json
+PERF_OUT ?= build/perf-make-room.json
+perf-make-room: $(VLLM_SRC)
+	@test -n "$(TORCH_PYTHON)" || { echo "usage: make perf-make-room TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies> [UPDATE=1]" >&2; exit 2; }
+	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) tests/perf_schedule.py \
+	  $(if $(UPDATE),baseline $(abspath $(PERF_BASELINE)) --beside "$(PERF_BESIDE)",check $(abspath $(PERF_BASELINE)) --out $(abspath $(PERF_OUT)))
+	cd python/leaseholder_vllm && LH_PERF=1 VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -m pytest -q -s -p no:cacheprovider \
+	  tests/test_perf_control.py
 
 schema:
 	cargo run -q -p lh-proto --bin lh-proto-schema

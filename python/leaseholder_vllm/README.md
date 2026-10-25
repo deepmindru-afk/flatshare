@@ -8,7 +8,7 @@ src/leaseholder_vllm/make-room/  63350.patch and 63351.patch, the PRs' scheduler
                                  variant.patch, what only the variant has; probe.py and tail.py, its GPU checks
 src/leaseholder_vllm/pr54530/    pr54530.patch, #54530 ported to v0.32.0 by hand; probe.py
 scripts/make-room-patches.sh     rewrites make-room's patches from the backport's branches in a vLLM clone
-tests/                           the build, make-room's behavior, and make-room traced against the PRs
+tests/                           the build, make-room's behavior, make-room traced against the PRs, its cost per step
 ```
 
 ## The build
@@ -29,6 +29,10 @@ The PRs are the change's only source. A change is made on their branches, on vLL
 - **Where.** In each switch set E2 ran (with the reserve off), synchronous and asynchronous, at watermarks 0 and 0.07, over four workloads: the behavior suite's; KV pressure, where make-room preempts under the budget cap and past two victims; random ones with shared prefixes; random ones with a KV connector's asynchronous loads, "not yet" lookups and pending frees.
 - **Its negative control.** One-line mutants of the PRs' module, each of which must diverge.
 - **Against another module.** `TRACE_REFERENCE=<a generated module>` compares the variant with that module instead, the reserve and the counters included: before a change lands, the module it replaces against the new one. Before #63351 bounded a step's held tokens by its budget, a module counted each of the step's held chunks against the whole budget; against such a module (W5's), the variant's held tokens need only be at most the module's.
+
+## Upkeep: the change's cost
+
+`make perf-make-room TORCH_PYTHON=<CPU torch 2.13 with vLLM 0.32.0's dependencies>` answers whether the change still costs a scheduler step what the PRs' tables say. `tests/perf_schedule.py` times `Scheduler.schedule()` for make-room's module with its switches off and at the PRs' values (2, true, 48, 0) in the 13 steady states of those tables, prints each state's ratio on/off - 1 (the median over its processes of each one's own), its cost off in µs and the change's at that cost, writes `build/perf-make-room.json`, and fails a state whose on/off exceeds the one in `benchmarks/perf/make-room-schedule.json` by more than that baseline's tolerance, measured again over six more processes first (4% for the one measured on peacock, a shared 2.1 GHz Xeon: twice the worst difference there between two measurements of something unchanged, 0.9% off against off in a process and 1.9% between the baseline's two runs). Each process times two schedulers of each configuration in turns, and a configuration's cost is its cheaper scheduler's 10th-percentile step: what else runs on the machine slows the schedulers alike, and one scheduler that runs slower than its twin all along, as their places in memory differ, does not count. A failure names the state and how much costlier the change has become relative to the scheduler's own step, the kind of regression #63350's own optimizations removed: the check's negative control, which runs after it (`tests/test_perf_control.py`), undoes two of them, giving up on room before counting the decodes' growth and checking a fit against a bound first, and must fail at B64 and C256. A ratio does not move on a machine that is uniformly faster or slower, but a different CPU weights the change's code differently: on an M5 Max, 10 of the 13 states came within 1.4% of peacock's ratios and A16's 2.8% above them, but B16's and C16's 4.1% and 4.6%, past the tolerance. So on another machine, measure its own baseline first (`UPDATE=1`, which runs the states twice over and times the off configuration twice in each process), and check against that.
 
 ## Tests
 
