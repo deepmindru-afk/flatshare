@@ -129,13 +129,14 @@ The Rust workspace has four crates: `lh-proto` (wire types and their JSON Schema
 
 The original design put leases in the control plane: each session's claim on KV residency, with prefetch timed from lifecycle events, a sidecar per GPU node (`lh-node`) with engine epochs, cache contracts from Anthropic's `cache_control`, and a ledger attributing every recomputed token to a cause. After E1 and E2 these were dropped: §6's two results remove their premise, and sticky placement already does the routing leases were also for. They would be reopened by a source of tool-return times ahead of the return, which the oracle's tail gain needs, or by an engine whose running KV a control plane can reclaim. The types and plugins built for them (`lh-proto`'s lease hint and ledger rows with their schemas, `X-LH-Synthetic`, the `leaseholder_vllm` plugins) were removed after v0.3.
 
-Still planned: the two-node points (dedicate against pool, in a window on Gray), the background tier's cost of make-room (restored against recomputed prompt tokens, from the counters every E2 point keeps), and dashboards and alerts as code.
+Still planned: the two-node points (dedicate against pool, in a window on Gray), and the background tier's cost of make-room (restored against recomputed prompt tokens, from the counters every E2 point keeps).
 
 ## 8. Failure handling
 
 | Failure | Behavior | Evidence |
 |---|---|---|
-| Engine crash | The unit restarts; requests in flight fail, and their sessions re-prefill on the next turn | Once in E2, an out-of-memory kill; no drill |
+| Engine crash | The unit restarts 5 s after its last process exits; streams in flight end with the gateway's `upstream_unavailable` error event, then one 502 and 503s with `Retry-After` until the engine's `/health` answers; sessions re-prefill on the next turn | Once in E2, an out-of-memory kill; the W8 engine-kill drill: streams broken within 57 ms, the first success 112.3 s after the kill with the 15 s delay of then ([PRODUCTION.md](PRODUCTION.md#how-it-fails)) |
+| Gateway restart or crash | `lh-gateway.socket` holds the listeners. A reload hands them to a successor and drains: nothing is refused or waits. A restart or a crash leaves new connections waiting in the backlog, for the drain or about a second. Background requests in flight are cut 5 s into a drain with a `draining` error | The binary's reload tests (a request every 20 ms on each socket through a reload, all answered); the W8 gateway drills |
 | GPU node loss | Readiness probes (`/health` every `probe_interval_s`, down after three failures): the node takes no new session, and its sessions are placed again and re-prefill on another node | Two mock engines in the gateway's tests |
 | Slow client | Backpressure through the bounded buffer, then an upstream abort | A stalled reader |
 | Client disconnect | Upstream abort; vLLM aborts the request | Mid-stream disconnects |
