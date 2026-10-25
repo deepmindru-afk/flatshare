@@ -781,7 +781,7 @@ def test_a_run_ends_the_process_group_a_killed_run_left_although_its_titles_blan
     tmp_path: Path,
 ) -> None:
     """AIPerf's services set their titles (setproctitle), which blanks /proc/PID/environ and the mark in it,
-    but stay in AIPerf's process group, which is named beside the run lock until the tool is stopped: a
+    but stay in AIPerf's process group, which is named in the run's scope until the tool is stopped: a
     run killed before it could stop its tools leaves both running, and the next run's start ends them."""
     pytest.importorskip("setproctitle")
     artifacts = tmp_path / "aiperf"
@@ -791,10 +791,7 @@ def test_a_run_ends_the_process_group_a_killed_run_left_although_its_titles_blan
     child = int(wait_for(artifacts / "child.pid").read_text())
     try:
         assert os.getpgid(child) == tool.popen.pid
-        deadline = time.monotonic() + 10
-        while e2.TOOL_MARK.encode() in Path(f"/proc/{child}/environ").read_bytes():
-            assert time.monotonic() < deadline, "the child set its title"
-            time.sleep(0.05)
+        titled(child)
         assert (tmp_path / e2.TOOLS / str(tool.popen.pid)).exists()
         # The run is killed here, before stop(); the next run's start:
         assert sorted(e2.kill_left(str(tmp_path))) == sorted([tool.popen.pid, child])
@@ -807,7 +804,7 @@ def test_a_run_ends_the_process_group_a_killed_run_left_although_its_titles_blan
 
 
 @needs_waitid
-def test_a_stopped_tool_leaves_no_group_named_beside_the_lock(tmp_path: Path) -> None:
+def test_a_stopped_tool_leaves_no_group_named_in_its_scope(tmp_path: Path) -> None:
     artifacts = tmp_path / "aiperf"
     env = os.environ | {"LH_BENCH_ARTIFACTS": str(artifacts)}
     tool = Process(
@@ -820,6 +817,120 @@ def test_a_stopped_tool_leaves_no_group_named_beside_the_lock(tmp_path: Path) ->
     wait_for(artifacts / "profile_export.jsonl")
     assert tool.stop(grace=5) == 0
     assert list((tmp_path / e2.TOOLS).iterdir()) == [] and e2.kill_left(str(tmp_path)) == []
+
+
+def titled(pid: int) -> None:
+    """Wait for process ``pid`` to set its title, which blanks its environment and the mark in it."""
+    deadline = time.monotonic() + 10
+    while e2.TOOL_MARK.encode() in Path(f"/proc/{pid}/environ").read_bytes():
+        assert time.monotonic() < deadline, f"{pid} never set its title"
+        time.sleep(0.05)
+
+
+def leaderless(scope: Path) -> tuple[Path, int]:
+    """A tool in ``scope`` as a run killed before it could stop it may leave it: its leader exited and
+    reaped, and its titled child running on in its group, which keeps the group's number taken. Returns
+    the tool's record and the child's pid."""
+    pytest.importorskip("setproctitle")
+    artifacts = scope / "aiperf"
+    env = os.environ | {"LH_BENCH_ARTIFACTS": str(artifacts), "FAKE_AIPERF": "titled"}
+    command = [sys.executable, str(FAKES / "fake_aiperf.py")]
+    tool = Process("AIPerf", command, scope / "log", env, str(scope))
+    child = int(wait_for(artifacts / "child.pid").read_text())
+    titled(child)
+    os.kill(tool.popen.pid, signal.SIGINT)  # which the child ignores
+    assert tool.popen.wait(timeout=10) == 0
+    return scope / e2.TOOLS / str(tool.popen.pid), child
+
+
+@PROC
+@needs_waitid
+def test_a_run_ends_the_titled_processes_of_a_tools_group_whose_leader_is_gone(
+    tmp_path: Path,
+) -> None:
+    """The members of a group whose leader has exited keep its number taken: those titled in the
+    cgroup the tool started in are the tool's."""
+    named, child = leaderless(tmp_path)
+    try:
+        assert e2.kill_left(str(tmp_path)) == [child]
+        assert gone(child) and not named.exists()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child, signal.SIGKILL)
+
+
+@PROC
+@needs_waitid
+@pytest.mark.parametrize("which", ["empty", "of an earlier boot", "of another cgroup"])
+def test_a_record_that_does_not_name_the_tool_leaves_the_titled_processes_of_its_group(
+    tmp_path: Path, which: str
+) -> None:
+    """A record cut short names nothing, and a pid of an earlier boot nothing of this one. A titled
+    process in another cgroup is another's: vLLM's engine core reads blank too, and on a single host it
+    runs as lh-bench's user, in its unit's cgroup under systemd."""
+    named, child = leaderless(tmp_path)
+    started = named.read_text().partition("\n")[0]
+    cgroup = Path(f"/proc/{child}/cgroup").read_text()
+    unit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/lh-engine.service\n"
+    records = {
+        "empty": "",
+        "of an earlier boot": f"an-earlier-boot/{started.split('/')[1]}\n{cgroup}",
+        "of another cgroup": f"{started}\n{unit}",
+    }
+    named.write_text(records[which])
+    try:
+        assert e2.kill_left(str(tmp_path)) == [] and not gone(child, timeout=0.2)
+        assert not named.exists()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child, signal.SIGKILL)
+
+
+def name_group(scope: Path, pgid: int, started: str | None) -> Path:
+    """Name process group ``pgid`` in ``scope`` as Process names a tool's: ``started`` for its leader's
+    start, and the cgroup of this process, which the processes it starts share."""
+    named = scope / e2.TOOLS / str(pgid)
+    named.parent.mkdir(exist_ok=True)
+    named.write_text(f"{started}\n{Path('/proc/self/cgroup').read_text()}")
+    return named
+
+
+@PROC
+def test_a_record_leaves_a_process_that_took_its_number_since(tmp_path: Path) -> None:
+    """A killed run's record outlives its tool's group, whose number may be another's by the next run's
+    start: here the leader of a group of its own, started after the tool."""
+    other = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True
+    )
+    try:
+        named = name_group(tmp_path, other.pid, e2._started(os.getpid()))  # the tool's, earlier
+        assert e2.kill_left(str(tmp_path)) == [] and other.poll() is None
+        assert not named.exists()
+    finally:
+        other.kill()
+
+
+@PROC
+def test_a_record_leaves_a_group_that_took_its_number_since_and_lost_its_own_leader(
+    tmp_path: Path,
+) -> None:
+    """The group that took a record's number may have lost its own leader too, as a shell's pipeline
+    can, or a daemon's that forked: its members' environments read without the mark."""
+    shell = subprocess.Popen(
+        ["sh", "-c", "sleep 60 >/dev/null & echo $!"],
+        stdout=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    member = int(shell.communicate()[0])  # the shell has exited, and been reaped
+    try:
+        assert os.getpgid(member) == shell.pid
+        named = name_group(tmp_path, shell.pid, e2._started(os.getpid()))
+        assert e2.kill_left(str(tmp_path)) == [] and not gone(member, timeout=0.2)
+        assert not named.exists()
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(member, signal.SIGKILL)
 
 
 def marked(mark: str) -> subprocess.Popen:
@@ -1209,6 +1320,30 @@ def test_a_point_kills_what_its_own_runs_left_and_not_another_sessions_tools(cya
     finally:
         left.kill()
         others.kill()
+
+
+@PROC
+def test_a_point_ends_the_group_a_killed_runs_tool_left_its_titled_processes_too(
+    cyan: Cyan, tmp_path: Path
+) -> None:
+    """A run killed before it could stop AIPerf left it running, its service titled, which the marks
+    alone do not find: the next point ends them by the group named in the scope."""
+    pytest.importorskip("setproctitle")
+    artifacts = tmp_path / "left"
+    env = os.environ | {"LH_BENCH_ARTIFACTS": str(artifacts), "FAKE_AIPERF": "titled"}
+    command = [sys.executable, str(FAKES / "fake_aiperf.py")]
+    tool = Process("AIPerf", command, tmp_path / "left.log", env, e2.tool_scope(cyan.host))
+    child = int(wait_for(artifacts / "child.pid").read_text())
+    try:
+        titled(child)
+        run(cyan, "a1-voice", VOICE_ALONE)
+        killed = record(cyan, "a1-voice")["leftovers_killed"]
+        assert sorted(killed) == sorted([tool.popen.pid, child])
+        assert gone(child) and tool.popen.wait(timeout=5) == -9
+    finally:
+        for pid in (child, tool.popen.pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
 
 def test_a_point_with_agents_configures_cyan_and_stops_aiperf_after_the_calls(cyan: Cyan) -> None:
