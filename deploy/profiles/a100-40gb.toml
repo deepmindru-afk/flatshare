@@ -10,6 +10,9 @@ gpu = "A100 40 GB"
 node = "auto"
 dir = ""
 deploy_dir = "%h/leaseholder/node"
+# The card as nvidia-smi shows it, for what is rendered and built before it is visible (staging).
+memory_mib = 40960
+compute_cap = "8.0"
 
 [model]
 name = "Qwen/Qwen3-4B-Instruct-2507-FP8"
@@ -34,6 +37,8 @@ cuda_home = "auto"
 engine_path = "auto"
 stt_path = "auto"
 stt_cuda_home = "auto"
+cuda_compat = "auto"
+cuda_ldflags = "auto"
 engine_cpus = "auto"
 engine_numa = "auto"
 audio_cpus = "auto"

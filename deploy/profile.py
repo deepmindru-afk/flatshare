@@ -33,6 +33,11 @@ The rules (docs/HARDWARE.md):
   shares of the host's CPUs in proportion 8:4:2:8:8:4 (34 CPUs give each its want), the engine on the GPU's NUMA node
   and the audio servers off it where there is another. 17 CPUs, half the wants, is the floor for measuring; below it
   the plan still holds every component, and warns.
+- R8, the install path: the box's cu130 lock where the driver runs CUDA 13.0, natively (R580 and newer) or through
+  the forward-compatibility libraries a data-center GPU on R535 or R570 can load (cuda-compat-13-0, installed);
+  the cu129 lock (deploy/a100/requirements) on any other driver from R525; none below. JIT compiles with the host's
+  toolkit of the runtime's CUDA version where it has one, else with the venv's CUDA 13.0 compiler (cu130) or with CUDA
+  12.9's toolkit, which bootstrap.sh installs into ~/leaseholder/cuda-12.9 (cu129: CUDA 12's wheels carry no nvcc).
 
 Standard library only (Python 3.11 or newer), so that a bare host runs it before any venv exists.
 """
@@ -106,6 +111,12 @@ CORE_FLOOR = sum(want for _, want in CORES) // 2
 GIB = 1 << 30
 VENV_CUDA = "%h/leaseholder/venvs/engine/lib/python3.12/site-packages/nvidia/cu13"
 """The CUDA 13 toolkit the engine venv carries (nvidia-cuda-nvcc, pinned by the engine lock), Gray's CUDA_HOME."""
+HOME_CUDA = "%h/leaseholder/cuda-12.9"
+"""Where bootstrap.sh installs CUDA 12.9.1's toolkit for the cu129 lock on a host without one."""
+COMPAT = "/usr/local/cuda-13.0/compat"
+"""Where cuda-compat-13-0 puts CUDA 13.0's forward-compatibility libraries."""
+COMPAT_BRANCHES = (535, 570)
+"""The driver branches cuda-compat-13-0 runs CUDA 13.0 on, on data-center GPUs only (NOTES §3)."""
 
 
 class ProfileError(Exception):
@@ -247,18 +258,19 @@ def _bracketed(text: str | None) -> str | None:
     return m.group(1) if m else None
 
 
-def _cuda_toolkit(local: Path) -> dict | None:
-    """The newest CUDA toolkit's nvcc on the PATH or under `local` (/usr/local), with its version."""
+def _cuda_toolkits(local: Path) -> list[dict]:
+    """Each CUDA toolkit whose nvcc is on the PATH or under `local` (/usr/local), with its version, newest first."""
     candidates = [shutil.which("nvcc"), *sorted(str(p) for p in local.glob("cuda*/bin/nvcc"))]
-    best = None
+    found: dict[str, tuple[int, int]] = {}
     for nvcc in filter(None, candidates):
         done = _run([nvcc, "--version"])
         m = re.search(r"release (\d+)\.(\d+)", done.stdout if done else "")
         if m:
-            version = (int(m.group(1)), int(m.group(2)))
-            if best is None or version > best[0]:
-                best = (version, str(Path(nvcc).resolve().parent.parent))
-    return {"version": f"{best[0][0]}.{best[0][1]}", "path": best[1]} if best else None
+            found[str(Path(nvcc).resolve().parent.parent)] = (int(m.group(1)), int(m.group(2)))
+    return [
+        {"version": f"{v[0]}.{v[1]}", "path": path}
+        for path, v in sorted(found.items(), key=lambda item: item[1], reverse=True)
+    ]
 
 
 def _userns() -> bool | None:
@@ -327,7 +339,14 @@ def detect(peer: str | None = None) -> dict:
         "systemd_user": systemd is not None and systemd.stdout.strip() in ("running", "degraded"),
         "linger": None if linger is None else linger.stdout.strip() == "yes",
         "userns": _userns(),
-        "cuda_toolkit": _cuda_toolkit(root / "usr" / "local"),
+        "cuda_toolkits": (toolkits := _cuda_toolkits(root / "usr" / "local")),
+        "cuda_toolkit": toolkits[0] if toolkits else None,
+        "cuda_compat": str(compat)
+        if (compat := root / COMPAT.lstrip("/")).joinpath("libcuda.so.1").exists()
+        else None,
+        # Triton builds its launchers with a C compiler, and nvcc needs a host C++ compiler.
+        "cc": shutil.which("cc") or shutil.which("gcc"),
+        "cxx": shutil.which("c++") or shutil.which("g++"),
         "ninja": shutil.which("ninja") is not None,
         "uv": shutil.which("uv")
         or (
@@ -351,6 +370,63 @@ def utilization(budget_gib: float, memory_mib: int) -> str:
             f"{budget_gib} GiB is {u:.2f} of a {memory_mib} MiB card: too small a card"
         )
     return f"{u:.2f}"
+
+
+def install_path(host: dict) -> tuple[str, str]:
+    """R8: the engine venv's CUDA build (cu130, cu130-compat or cu129) by the host's driver, and why."""
+    gpu = host.get("gpu") or {}
+    driver = gpu.get("driver") or ""
+    m = re.match(r"(\d+)\.", driver)
+    if not m:
+        return "cu130", "no driver seen yet: the box's lock until bootstrap.sh gpu reads the driver"
+    major = int(m.group(1))
+    if major >= 580:
+        return "cu130", f"driver {driver} runs CUDA 13.0: the box's lock"
+    if major < 525:
+        raise ProfileError(
+            f"refused: driver {driver} is older than R525, the oldest that runs CUDA 12; vLLM 0.32.0's builds are "
+            "for CUDA 12.9 and 13.0"
+        )
+    if compat_eligible(host) and host.get("cuda_compat"):
+        return (
+            "cu130-compat",
+            f"driver {driver} on a data-center GPU runs CUDA 13.0 through the forward-compatibility libraries "
+            f"in {host['cuda_compat']}: the box's lock",
+        )
+    return (
+        "cu129",
+        f"driver {driver} runs CUDA 12 but not 13.0: the cu129 lock (vLLM 0.32.0+cu129, torch 2.13.0+cu129)",
+    )
+
+
+def compat_eligible(host: dict) -> bool:
+    """Whether the host's driver and card can run CUDA 13.0 through cuda-compat-13-0: R535 or R570 on a data-center
+    GPU (NVIDIA's table; GeForce and workstation cards get error 803)."""
+    gpu = host.get("gpu") or {}
+    m = re.match(r"(\d+)\.", gpu.get("driver") or "")
+    consumer = re.search(r"GeForce|TITAN|Quadro|RTX", gpu.get("name") or "")
+    return bool(m) and int(m.group(1)) in COMPAT_BRANCHES and not consumer
+
+
+def compiler(host: dict, install: str) -> tuple[str, str]:
+    """R8: the CUDA_HOME FlashInfer's JIT compiles with, and the middle of the comment sentence that says so."""
+    want = "12.9" if install == "cu129" else "13.0"
+    toolkits = host.get("cuda_toolkits")
+    if toolkits is None:
+        toolkits = [host["cuda_toolkit"]] if host.get("cuda_toolkit") else []
+    for toolkit in toolkits:
+        if toolkit["version"] == want:
+            return toolkit["path"], f"the host's CUDA {want} toolkit at {toolkit['path']} compiles"
+    if install == "cu129":
+        return HOME_CUDA, (
+            "the host has no CUDA 12.9 toolkit and CUDA 12's wheels carry no nvcc, so the engine\n# JIT-compiles "
+            "with CUDA 12.9.1's toolkit, which bootstrap.sh installs into ~/leaseholder/cuda-12.9"
+        )
+    return VENV_CUDA, (
+        "the host has no CUDA 13 toolkit, so the engine JIT-compiles with the CUDA 13 compiler its\n# venv "
+        "carries (nvidia-cuda-nvcc, pinned by the engine lock), as on Gray, and links with the venv's runtime and a "
+        "driver\n# stub, which bootstrap.sh puts in cache/cuda_lib"
+    )
 
 
 def cpu_tier(pool_bytes: int, ratio: float, host: dict, reserve_gib: float) -> tuple[int, str]:
@@ -474,8 +550,23 @@ def resolve(profile: dict, host: dict | None) -> tuple[dict[str, str], dict | No
             f"{name} derives {', '.join(autos)} from the host: pass --host (profile.py detect)"
         )
     gpu = host.get("gpu")
+    early = []
     if not gpu:
-        raise ProfileError(f"{name}: the host shows no GPU (nvidia-smi)")
+        # Staging can come before the card is visible: the profile's card stands in until bootstrap.sh gpu.
+        if not values.get("profile.memory_mib"):
+            raise ProfileError(
+                f"{name}: the host shows no GPU (nvidia-smi) and the profile names no card"
+            )
+        gpu = {
+            "name": values["profile.gpu"],
+            "memory_mib": int(values["profile.memory_mib"]),
+            "compute_cap": values.get("profile.compute_cap"),
+            "numa_node": None,
+        }
+        early.append(
+            "no GPU visible: rendered for the profile's card (its memory_mib and compute_cap) and the box's lock; "
+            "bootstrap.sh gpu renders again from the card's own facts"
+        )
     budgets = profile.get("budgets", {})
     derived: dict[str, str] = {}
     if values.get("profile.node") == "auto":
@@ -494,23 +585,31 @@ def resolve(profile: dict, host: dict | None) -> tuple[dict[str, str], dict | No
         values["engine.cpu_bytes_to_use"] = str(tier)
         derived["cpu_tier_gib"] = f"{tier // GIB}"
         derived["cpu_tier_note"] = why
-    toolkit = host.get("cuda_toolkit")
-    system = toolkit is not None and tuple(int(x) for x in toolkit["version"].split(".")) >= (13, 0)
-    cuda = toolkit["path"] if system else VENV_CUDA
+    install, derived["install_note"] = install_path(host)
+    derived["install"] = install
+    cuda, derived["cuda_note"] = compiler(
+        host, install
+    )  # the middle of a sentence: text.cuda ends it
+    system = not cuda.startswith("%h/")
     unit_values = {
         "units.cuda_home": cuda,
         "units.engine_path": f"%h/leaseholder/venvs/engine/bin:{cuda}/bin:/usr/local/bin:/usr/bin:/bin:%h/.local/bin",
         "units.stt_path": f"%h/leaseholder/venvs/engine/bin:{cuda}/bin:/usr/local/bin:/usr/bin:/bin",
         "units.stt_cuda_home": "" if system else f"Environment=CUDA_HOME={cuda}",
+        # FlashInfer's JIT links -lcudart and -lcuda from $CUDA_HOME/lib64 and lib64/stubs, which the venv's CUDA 13
+        # lacks (lib/ holds libcudart.so.13 only): bootstrap.sh links them into cache/cuda_lib.
+        "units.cuda_ldflags": "Environment=FLASHINFER_EXTRA_LDFLAGS=-L%h/leaseholder/cache/cuda_lib"
+        if cuda == VENV_CUDA
+        else "",
+        "units.cuda_compat": (
+            f"# Driver {gpu['driver']}: CUDA 13.0 through the forward-compatibility libraries of cuda-compat-13-0,\n"
+            f"# which a data-center GPU can load.\nEnvironment=LD_LIBRARY_PATH={host['cuda_compat']}"
+            if install == "cu130-compat"
+            else ""
+        ),
     }
-    # The middle of a comment sentence: text.cuda ends it.
-    derived["cuda_note"] = (
-        f"the host's CUDA {toolkit['version']} toolkit at {toolkit['path']} compiles"
-        if system
-        else "the host has no CUDA 13 toolkit, so the engine JIT-compiles with the CUDA 13 compiler its\n# venv "
-        "carries (nvidia-cuda-nvcc, pinned by the engine lock), as on Gray"
-    )
     plan, warnings = core_plan({k: v for k, v in host["cpus"].items()}, gpu.get("numa_node"))
+    warnings = early + warnings
     unit_values |= {
         "units.engine_cpus": plan["engine"],
         "units.engine_numa": plan["engine_numa"],
@@ -576,6 +675,14 @@ def render(profile: dict, host: dict | None, out: Path) -> dict:
     node = {
         "profile": values["profile.name"],
         "values": {k: v for k, v in sorted(values.items()) if not k.startswith("text.")},
+        "install": {
+            "path": values["derived.install"],
+            "reason": values["derived.install_note"],
+            # On cu129 here, the box's lock would run once cuda-compat-13-0 is installed (bootstrap.sh tries).
+            "compat_eligible": compat_eligible(host or {}),
+        }
+        if "derived.install" in values
+        else None,
         "plan": plan,
         "warnings": warnings,
     }

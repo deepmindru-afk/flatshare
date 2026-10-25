@@ -10,6 +10,7 @@ node = "Phastform"
 # The repository's copy of the rendered files, and where the units find them on the node.
 dir = "deploy/phastform"
 deploy_dir = "%h/leaseholder/src/deploy/phastform"
+compute_cap = "12.0"
 
 [model]
 name = "Qwen/Qwen3-4B-Instruct-2507-FP8"
@@ -33,6 +34,8 @@ cuda_home = "/usr/local/cuda-13.0"
 engine_path = "%h/leaseholder/venvs/engine/bin:/usr/local/cuda-13.0/bin:/usr/local/bin:/usr/bin:/bin:%h/.local/bin"
 stt_path = "%h/leaseholder/venvs/engine/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin"
 stt_cuda_home = ""
+cuda_compat = ""
+cuda_ldflags = ""
 engine_cpus = "8-15"
 engine_numa = "1"
 audio_cpus = "0-7"

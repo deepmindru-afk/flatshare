@@ -141,8 +141,8 @@ def test_the_a100_profile_derives_its_values_from_the_host(tmp_path: Path) -> No
     assert f"Environment=CUDA_HOME={profile.VENV_CUDA}\n" in unit
     assert (
         "# cache/curand_include; the host has no CUDA 13 toolkit, so the engine JIT-compiles with the CUDA 13 "
-        "compiler its\n# venv carries (nvidia-cuda-nvcc, pinned by the engine lock), as on Gray.\n"
-        in unit
+        "compiler its\n# venv carries (nvidia-cuda-nvcc, pinned by the engine lock), as on Gray, and links with the "
+        "venv's runtime and a driver\n# stub, which bootstrap.sh puts in cache/cuda_lib.\n" in unit
     )
     assert all(len(line) <= 120 for line in unit.splitlines() if line.startswith("#")), unit
     assert (
@@ -194,6 +194,93 @@ def test_a_host_with_its_own_cuda_13_toolkit_compiles_with_it(tmp_path: Path) ->
         host(cuda_toolkit={"version": "12.4", "path": "/usr/local/cuda"}),
     )
     assert f"CUDA_HOME={profile.VENV_CUDA}" in (out / "systemd" / "lh-engine.service").read_text()
+
+
+A100 = {
+    "name": "NVIDIA A100-SXM4-40GB",
+    "memory_mib": 40960,
+    "compute_cap": "8.0",
+    "numa_node": None,
+}
+COMPAT = "/usr/local/cuda-13.0/compat"
+
+
+@pytest.mark.parametrize(
+    ("driver", "name", "compat", "path"),
+    [
+        # Before the card is visible (staging): the box's lock until bootstrap.sh gpu reads the driver.
+        (None, A100["name"], None, "cu130"),
+        ("580.65.06", A100["name"], None, "cu130"),
+        ("590.48.01", A100["name"], None, "cu130"),
+        ("570.86.15", A100["name"], COMPAT, "cu130-compat"),
+        ("535.230.02", A100["name"], COMPAT, "cu130-compat"),
+        # The forward-compatibility libraries not installed.
+        ("570.86.15", A100["name"], None, "cu129"),
+        # No R550 in cuda-compat-13-0's table.
+        ("550.54.15", A100["name"], COMPAT, "cu129"),
+        # A GeForce card gets error 803 from the libraries.
+        ("570.86.15", "NVIDIA GeForce RTX 4090", COMPAT, "cu129"),
+        ("525.60.13", A100["name"], None, "cu129"),
+    ],
+)
+def test_the_install_path_follows_the_driver(driver, name, compat, path) -> None:
+    facts = {"gpu": {"name": name, "driver": driver} if driver else None, "cuda_compat": compat}
+    assert profile.install_path(facts)[0] == path
+
+
+def test_a_driver_older_than_r525_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(profile.ProfileError, match="older than R525"):
+        profile.install_path({"gpu": {"name": A100["name"], "driver": "520.61.05"}})
+    with pytest.raises(profile.ProfileError, match="older than R525"):
+        render(tmp_path, "a100-40gb", host(gpu=A100 | {"driver": "470.256.02"}))
+
+
+def test_each_install_path_compiles_at_its_runtimes_cuda_version(tmp_path: Path) -> None:
+    def units(name: str, **facts) -> tuple[str, str, dict]:
+        out, node = render(tmp_path / name, "a100-40gb", host(**facts))
+        read = lambda unit: (out / "systemd" / unit).read_text()  # noqa: E731
+        assert "LD_LIBRARY_PATH" not in read("lh-tts.service")  # Kokoro's own CUDA 12.8 build
+        return read("lh-engine.service"), read("lh-stt.service"), node
+
+    # R580 without a toolkit: the venv's CUDA 13.0, which FlashInfer links through cache/cuda_lib (the venv's
+    # runtime and a driver stub): its lib/ has no libcudart.so and no stubs.
+    engine, stt, node = units("venv13", gpu=A100 | {"driver": "580.65.06"})
+    assert node["install"]["path"] == "cu130"
+    assert f"Environment=CUDA_HOME={profile.VENV_CUDA}\n" in engine
+    assert "Environment=FLASHINFER_EXTRA_LDFLAGS=-L%h/leaseholder/cache/cuda_lib\n" in engine
+    assert "LD_LIBRARY_PATH" not in engine + stt
+    # The host's own 13.0 toolkit has both, so no link flags; a 13.2 toolkit is not the runtime's version.
+    toolkits = [
+        {"version": "13.2", "path": "/usr/local/cuda-13.2"},
+        {"version": "13.0", "path": "/usr/local/cuda-13.0"},
+    ]
+    engine, stt, _ = units("system13", gpu=A100 | {"driver": "580.65.06"}, cuda_toolkits=toolkits)
+    assert "Environment=CUDA_HOME=/usr/local/cuda-13.0\n" in engine
+    assert "FLASHINFER_EXTRA_LDFLAGS" not in engine and "CUDA_HOME" not in stt
+    # R550: the cu129 lock, compiled by a CUDA 12.9 toolkit, the host's where it has one, ...
+    toolkits.append({"version": "12.9", "path": "/usr/local/cuda-12.9"})
+    engine, _, node = units("system129", gpu=A100 | {"driver": "550.54.15"}, cuda_toolkits=toolkits)
+    assert node["install"]["path"] == "cu129"
+    assert "Environment=CUDA_HOME=/usr/local/cuda-12.9\n" in engine
+    # ... else the one bootstrap.sh installs, since CUDA 12's wheels carry no nvcc.
+    engine, stt, node = units("home129", gpu=A100 | {"driver": "550.54.15"})
+    assert f"Environment=CUDA_HOME={profile.HOME_CUDA}\n" in engine
+    assert f"Environment=CUDA_HOME={profile.HOME_CUDA}\n" in stt
+    assert (
+        "FLASHINFER_EXTRA_LDFLAGS" not in engine
+        and "installs into ~/leaseholder/cuda-12.9." in engine
+    )
+    assert node["install"]["compat_eligible"] is False
+    for unit in (engine, stt):
+        assert all(len(line) <= 120 for line in unit.splitlines() if line.startswith("#")), unit
+    # R570 with the forward-compatibility libraries: the box's lock, with them on both vLLM units' library path.
+    engine, stt, node = units("compat", gpu=A100 | {"driver": "570.86.15"}, cuda_compat=COMPAT)
+    assert node["install"]["path"] == "cu130-compat"
+    assert f"Environment=LD_LIBRARY_PATH={COMPAT}\n" in engine
+    assert f"Environment=LD_LIBRARY_PATH={COMPAT}\n" in stt
+    # R570 without them: cu129, and bootstrap.sh tries to install them.
+    _, _, node = units("nocompat", gpu=A100 | {"driver": "570.86.15"})
+    assert node["install"]["path"] == "cu129" and node["install"]["compat_eligible"] is True
 
 
 def test_the_cpu_tier_shrinks_to_what_the_host_holds_and_is_refused_below_the_pool(

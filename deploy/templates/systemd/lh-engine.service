@@ -12,6 +12,7 @@ Type=exec
 WorkingDirectory=%h/leaseholder
 {{text.cuda}}
 Environment=CUDA_HOME={{units.cuda_home}}
+{{units.cuda_compat}}
 # vLLM's /server_info (the measurement drop-in's, deploy/phastform/measure) lists the venv's packages with `uv pip list`
 # when the venv has no pip, so uv (in ~/.local/bin) is on the path and VIRTUAL_ENV names the venv; without them the
 # endpoint answers 500.
@@ -19,6 +20,7 @@ Environment=PATH={{units.engine_path}}
 Environment=VIRTUAL_ENV=%h/leaseholder/venvs/engine
 Environment=FLASHINFER_EXTRA_CUDAFLAGS=-I%h/leaseholder/cache/curand_include
 Environment=FLASHINFER_EXTRA_CFLAGS=-I%h/leaseholder/cache/curand_include
+{{units.cuda_ldflags}}
 Environment=FLASHINFER_WORKSPACE_BASE=%h/leaseholder/cache/flashinfer
 {{text.engine_caches}}
 Environment=HF_HUB_OFFLINE=1
