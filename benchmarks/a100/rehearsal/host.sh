@@ -330,18 +330,19 @@ purge() {
 steps=$HOME/.rehearsal/steps
 
 state() {
-  local base=$steps/$1 pid
-  if [[ -f $base.status ]]; then
+  local base=$steps/$1 pid=""
+  [[ ! -f $base.pid ]] || pid=$(cat "$base.pid")
+  # The process first, then its status: a step writes its status before it exits, so one seen gone has written any
+  # status it was to write (the other order misreads a step that ends between the two looks as died). On Linux the
+  # process must be the step's own (LH_REHEARSAL_STEP in its environment), not a pid reused since; grep reads the file
+  # itself, as behind a pipe under pipefail its exit at the first match can kill the writer (SIGPIPE).
+  if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null &&
+    { [[ ! -r /proc/$pid/environ ]] || grep -qzx "LH_REHEARSAL_STEP=$1" "/proc/$pid/environ"; }; then
+    echo "running $pid"
+  elif [[ -f $base.status ]]; then
     echo "done $(cat "$base.status")"
-  elif [[ -f $base.pid ]]; then
-    pid=$(cat "$base.pid")
-    # On Linux the process must be the step's own (LH_REHEARSAL_STEP in its environment), not a pid reused since.
-    if kill -0 "$pid" 2>/dev/null &&
-      { [[ ! -r /proc/$pid/environ ]] || tr '\0' '\n' <"/proc/$pid/environ" | grep -qx "LH_REHEARSAL_STEP=$1"; }; then
-      echo "running $pid"
-    else
-      echo "died $pid"
-    fi
+  elif [[ -n $pid ]]; then
+    echo "died $pid"
   else
     echo none
   fi
@@ -379,15 +380,18 @@ base, command = sys.argv[1], sys.argv[2]
 if os.fork():
     os._exit(0)
 os.setsid()
-with open(base + ".pid", "w") as f:
-    f.write(f"{os.getpid()}\n")
 log = os.open(base + ".log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 null = os.open(os.devnull, os.O_RDONLY)
 os.dup2(null, 0)
 os.dup2(log, 1)
 os.dup2(log, 2)
-# In a subshell, so that an exit in the command ends the subshell alone, and the status is still written.
-script = "(\n" + command + "\n)\nstatus=$?\necho $status >\"$0.status.new\" && mv \"$0.status.new\" \"$0.status\"\nexit $status\n"
+# The bash of the step writes the pid file once the exec is done: until then /proc/PID/environ reads empty, and the
+# step would read as died. The command runs in a subshell, so that an exit in it ends the subshell alone, and the
+# status is still written.
+script = (
+    "echo $$ >\"$0.pid.new\" && mv \"$0.pid.new\" \"$0.pid\"\n(\n" + command + "\n)\n"
+    "status=$?\necho $status >\"$0.status.new\" && mv \"$0.status.new\" \"$0.status\"\nexit $status\n"
+)
 os.execvp("bash", ["bash", "-c", script, base])
 ' "$base" "$command"
   for i in $(seq 50); do
@@ -497,7 +501,7 @@ EOF
     block0)
       local audit want
       [[ -f $runs/blocks/0.done ]] || { echo "verify: no blocks/0.done"; return 1; }
-      tail -1 "$runs/block0/smoke.txt" | grep -qx 'smoke: ok' || { echo "verify: smoke.txt does not end in smoke: ok"; return 1; }
+      [[ $(tail -n 1 "$runs/block0/smoke.txt") == 'smoke: ok' ]] || { echo "verify: smoke.txt does not end in smoke: ok"; return 1; }
       [[ -s $runs/block0/call.txt ]] || { echo "verify: no block0/call.txt"; return 1; }
       # The listener audit's line: the GPU servers each in a network namespace of its own (deploy/bin/in-private-net)
       # where the kernel allows unprivileged user namespaces, else in the host's, marked LH_PRIVATE_NET=host.

@@ -498,3 +498,33 @@ def test_a_step_on_the_host_outlives_its_session_and_is_waited_for_once(tmp_path
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="reads /proc (Linux)")
+def test_a_running_step_reads_as_running_whatever_its_environment_holds(tmp_path: Path) -> None:
+    # host.sh tells a step's process by LH_REHEARSAL_STEP in its /proc/PID/environ. Read through tr and grep -q under
+    # pipefail, tr died of SIGPIPE once grep had matched while more of the environment was to come, and the running
+    # step read as died: here deterministically, the environment after the mark being larger than a pipe's buffer.
+    steps = tmp_path / ".rehearsal" / "steps"
+    steps.mkdir(parents=True)
+    rest = {k: v for k, v in os.environ.items() if k != "LH_REHEARSAL_STEP"}
+    env = {
+        "LH_REHEARSAL_STEP": "stage",
+        **rest,
+        "LH_BULK_A": "y" * 100_000,
+        "LH_BULK_B": "y" * 100_000,
+    }
+    step = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env)
+    try:
+        (steps / "stage.pid").write_text(f"{step.pid}\n")
+        done = subprocess.run(
+            ["bash", str(HOST_SH), "state", "stage"],
+            env=os.environ | {"HOME": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert done.stdout.strip() == f"running {step.pid}", done.stdout + done.stderr
+    finally:
+        step.kill()
+        step.wait()
