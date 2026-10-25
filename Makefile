@@ -196,8 +196,9 @@ reproduce-calibration:
 	  $(CALIBRATION_REPORT) >/dev/null
 	@ls $(CALIBRATION_REPORT)/calibration.md
 
-# E2's report (frontier.md, frontier.csv, frontier.svg, waterfall.svg) from the committed records, with the bench
-# venv; it prints the files it writes.
+# E2's report from the committed records, with the bench venv: frontier.md, frontier.csv, a frontier figure per workload
+# (W4's four, W5's six) and waterfall.svg, the files each set of records keeps in its report/, which the bench's tests
+# check and E2_REPORT=<that report/> rewrites. It prints the files it writes.
 reproduce-e2:
 	@cd python/leaseholder_bench && uv run -q lh-bench e2 report \
 	  $(abspath $(dir $(wildcard $(E2_RESULTS)/*/*/run.json))) --out $(abspath $(E2_REPORT))
