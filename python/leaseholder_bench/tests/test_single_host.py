@@ -332,6 +332,60 @@ def test_a_start_whose_server_dies_fails_at_once_not_at_its_timeout(host: dict) 
     assert "exited before http://127.0.0.1:9/health was healthy" in journal
 
 
+@pytest.mark.skipif(
+    not Path("/proc/sys/kernel/random/boot_id").exists(), reason="reads /proc (Linux)"
+)
+def test_a_state_file_from_another_boot_or_a_reused_pid_is_not_a_running_unit(host: dict) -> None:
+    # After a reboot, or once a pid is reused, a state file's runner names some other process: the unit is not
+    # running, a start starts it, and a stop leaves that process alone.
+    state = Path(host["env"]["XDG_STATE_HOME"]) / "lh-svc"
+    state.mkdir(parents=True, exist_ok=True)
+    py = sys.executable
+    (host["units"] / "sleeper.service").write_text(
+        f"[Service]\nExecStart={py} -c 'import time; time.sleep(60)'\n"
+    )
+    other = subprocess.Popen(["sleep", "300"])
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    started = Path(f"/proc/{other.pid}/stat").read_text().rsplit(") ", 1)[1].split()[19]
+    try:
+        for recorded in (
+            {"boot": boot, "runner_start": str(int(started) - 100)},  # the pid reused since
+            {
+                "boot": "00000000-0000-0000-0000-000000000000",
+                "runner_start": started,
+            },  # another boot
+        ):
+            (state / "sleeper.service.json").write_text(
+                json.dumps({"state": "active", "runner": other.pid, "main": other.pid} | recorded)
+            )
+            assert ctl(host, "--user", "is-active", "sleeper").stdout.strip() != "active", recorded
+            assert ctl(host, "--user", "stop", "sleeper").returncode == 0
+            assert other.poll() is None, recorded  # the unrelated process lives on
+        (state / "sleeper.service.json").write_text(
+            json.dumps(
+                {
+                    "state": "active",
+                    "runner": other.pid,
+                    "boot": boot,
+                    "runner_start": str(int(started) - 1),
+                }
+            )
+        )
+        assert ctl(host, "--user", "start", "sleeper").returncode == 0
+        runner = json.loads((state / "sleeper.service.json").read_text())
+        assert runner["runner"] != other.pid and runner["boot"] == boot and runner["runner_start"]
+        assert ctl(host, "--user", "is-active", "sleeper").stdout.strip() == "active"
+    finally:
+        ctl(host, "--user", "stop", "sleeper")
+        other.kill()
+        other.wait()
+    # A target's or a socket's state is a boot's too.
+    (state / "box.target.json").write_text(
+        json.dumps({"state": "active", "boot": "00000000-0000-0000-0000-000000000000"})
+    )
+    assert ctl(host, "--user", "is-active", "box.target").stdout.strip() == "inactive"
+
+
 def test_the_shims_answer_what_the_scripts_ask(host: dict) -> None:
     assert ctl(host, "--user", "daemon-reload").returncode == 0
     assert ctl(host, "--user", "enable", "-q", "svc-a.service").returncode == 0

@@ -305,7 +305,12 @@ def test_the_core_runs_in_order_resumes_after_each_stop_and_reads_back(
         lines(home / "taskset.log") == ["taskset -c 21-27"] * 2
     )  # the relay and AIPerf, on AIPerf's cores
     assert "127.0.0.1:" + str(port) + " -> unix:" in (point / "forward.log").read_text()
+    # Each run first brings the control plane up, which a reboot leaves down (starting it running is nothing).
+    up = "systemctl --user start lh-voice-worker.service"
     assert lines(home / "systemctl.log") == [
+        up,
+        up,
+        up,
         "systemctl --user reset-failed lh-engine.service",
         "systemctl --user restart lh-engine.service",
         "systemctl --user stop leaseholder.target lh-engine lh-stt lh-tts",  # block 10

@@ -159,6 +159,13 @@ sys.exit(0 if all(done.get(name, {}).get("ok") for name in ("frozen", "2048-0", 
 }
 
 log "blocks ${blocks[*]}${until:+, until $until UTC}"
+# The control plane (the voice worker, LiveKit in the voice plane, the gateway), which a reboot leaves down (nothing
+# starts it at boot: lh-svc is no boot-time service, and the units are not enabled): block 0's call and every E2 point
+# need it, and starting it where it runs is nothing.
+# shellcheck source=/dev/null
+[[ ! -f $node/env.sh ]] || source "$node/env.sh"
+systemctl --user start lh-voice-worker.service ||
+  { log "the control plane did not start: journalctl --user -u lh-voice-worker (and lh-livekit, lh-gateway)"; exit 1; }
 for name in "${blocks[@]}"; do
   block "$name"
 done

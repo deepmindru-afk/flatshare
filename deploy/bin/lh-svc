@@ -272,7 +272,35 @@ def read_state(name: str) -> dict:
         return {"state": "inactive"}
 
 
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+
+
+def boot_id() -> str | None:
+    """This boot's id (Linux), which a state file keeps: after a reboot its pids name other processes, or none."""
+    try:
+        return BOOT_ID.read_text().strip()
+    except OSError:
+        return None
+
+
+def started_at(pid: object) -> str | None:
+    """Process ``pid``'s start time (/proc/PID/stat's field 22, clock ticks since boot), which tells it from a later
+    process that reuses its pid; None where /proc does not say (another system, or no such process)."""
+    if not isinstance(pid, int) or not pid:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return stat.rsplit(") ", 1)[1].split()[19]
+
+
 def write_state(name: str, **values: object) -> None:
+    # Each pid with its start time, and the boot: a process of this unit's is the one recorded, not its pid's next.
+    for key in ("runner", "main"):
+        if key in values:
+            values[f"{key}_start"] = started_at(values[key])
+    values["boot"] = boot_id()
     state = read_state(name) | values
     path = state_path(name)
     temporary = path.with_suffix(".tmp")
@@ -296,11 +324,28 @@ def alive(pid: int | None) -> bool:
         return True
 
 
+def owned(state: dict, key: str) -> int | None:
+    """The pid a unit's state names as its KEY (runner or main) while that process is still the one recorded: alive,
+    on this boot, started when it was. After a reboot, or once the pid is reused, it names another process or none."""
+    pid = state.get(key)
+    if not alive(pid):
+        return None
+    if state.get("boot") and state.get("boot") != boot_id():
+        return None
+    recorded = state.get(f"{key}_start")
+    if recorded and recorded != started_at(pid):
+        return None
+    return pid
+
+
 def current(name: str) -> str:
-    """The unit's state, as is-active prints it: a runner that died leaves its last state out of date."""
+    """The unit's state, as is-active prints it: a runner that died leaves its last state out of date, and a reboot
+    every state."""
     state = read_state(name)
+    if state.get("boot") and state.get("boot") != boot_id():
+        return "inactive"  # nothing of an earlier boot runs
     running = state.get("state") in ACTIVE and not passive(name)
-    if running and not alive(state.get("runner")):
+    if running and not owned(state, "runner"):
         return "failed" if state.get("state") != "deactivating" else "inactive"
     return state.get("state", "inactive")
 
@@ -640,7 +685,7 @@ def start(names: list[str]) -> int:
             deadline = time.time() + unit.seconds("TimeoutStartSec", 90.0) + 10
             while time.time() < deadline:
                 values = read_state(name)
-                gone = runner.poll() is not None if runner else not alive(values.get("runner"))
+                gone = runner.poll() is not None if runner else not owned(values, "runner")
                 if started(values) or values.get("state") in ("failed", "inactive") or gone:
                     break
                 time.sleep(0.05)
@@ -680,8 +725,8 @@ def stop(names: list[str]) -> int:
                 write_state(name, state="inactive")
                 continue
             state = read_state(name)
-            runner = state.get("runner")
-            if alive(runner):
+            runner = owned(state, "runner")  # not a process that took a stale pid since
+            if runner:
                 os.kill(runner, signal.SIGTERM)
                 unit = load(name)
                 deadline = time.time() + unit.seconds("TimeoutStopSec", 90.0) + 30
@@ -689,7 +734,7 @@ def stop(names: list[str]) -> int:
                     time.sleep(0.05)
                 if alive(runner):
                     kill_group(runner, signal.SIGKILL)
-            group_gone(state.get("main"), 5.0)
+            group_gone(owned(state, "main"), 5.0)
             if read_state(name).get("state") != "failed":
                 write_state(name, state="inactive", runner=None, main=None)
     return 0
