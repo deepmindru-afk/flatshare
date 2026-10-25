@@ -7,7 +7,6 @@
 //! which closes the upstream connection; vLLM aborts a request whose client disconnects.
 
 use std::convert::Infallible;
-use std::error::Error as _;
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -365,6 +364,7 @@ async fn forward(
     let body = ClientBody {
         frames: receiver,
         aborted,
+        unflushed: false,
     };
     Response::from_parts(parts, Body::new(body))
 }
@@ -394,12 +394,7 @@ impl Failure {
                     UpstreamError::Request
                 };
                 ex.metrics().upstream_error(kind);
-                let mut message = format!("upstream request failed: {err}");
-                let mut source = err.source();
-                while let Some(cause) = source {
-                    message.push_str(&format!(": {cause}"));
-                    source = cause.source();
-                }
+                let message = format!("upstream request failed: {}", causes(&err));
                 ex.error(StatusCode::BAD_GATEWAY, "upstream_unavailable", message)
             }
             Self::Timeout(awaited) => {
@@ -520,8 +515,18 @@ async fn pump(
         };
         let data = match frame {
             None => break Outcome::Completed,
-            Some(Err(_)) => {
+            Some(Err(err)) => {
                 ex.metrics().upstream_error(UpstreamError::Body);
+                let message = format!("the upstream stream broke off: {}", causes(&err));
+                if scanner.is_events() {
+                    // Within the stall timeout: a client that stops reading gets none.
+                    let event = error_event(&message, scanner.at_event_boundary());
+                    let sent = tokio::time::timeout(stall_timeout, frames.send(event)).await;
+                    if let (Ok(Ok(())), Some(class)) = (sent, ex.class) {
+                        ex.metrics().error_event(class);
+                    }
+                }
+                ex.note_error(message);
                 break Outcome::Error;
             }
             // Trailers are not relayed; vLLM sends none.
@@ -569,6 +574,28 @@ async fn pump(
         drop(ticket);
     }
     ex.finish(outcome);
+}
+
+/// The error event of vLLM's own streams (`data: {"error": {...}}`), which the gateway sends before it aborts an
+/// event stream the upstream broke off, so that a client learns why; a client that ignores it still sees the broken
+/// stream. After a partial event, a blank line ends that event first.
+fn error_event(message: &str, at_boundary: bool) -> Bytes {
+    let error = serde_json::json!({
+        "error": {"message": message, "type": "upstream_unavailable", "param": null, "code": 502},
+    });
+    let start = if at_boundary { "" } else { "\n\n" };
+    Bytes::from(format!("{start}data: {error}\n\n"))
+}
+
+/// An error and its causes, outermost first: `client error (Connect): Connection refused (os error 111)`.
+fn causes(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    message
 }
 
 /// Completes when the admission policy sheds the request.
@@ -627,6 +654,10 @@ struct ClientBody {
     /// Set by the pump before it stops on a stall, an upstream error or a shed, so the client sees an error
     /// instead of a clean end: a truncated response must not look complete.
     aborted: Arc<AtomicBool>,
+    /// Whether a frame was handed to hyper since it last found the body pending. hyper drops what it has not
+    /// written when a body errors, so an abort waits one poll, in which hyper writes out the last frames, such as
+    /// the error event.
+    unflushed: bool,
 }
 
 #[derive(Debug)]
@@ -648,10 +679,23 @@ impl http_body::Body for ClientBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, StreamAborted>>> {
-        match ready!(self.frames.poll_recv(cx)) {
-            Some(data) => Poll::Ready(Some(Ok(Frame::data(data)))),
+        let polled = self.frames.poll_recv(cx);
+        if polled.is_pending() {
+            self.unflushed = false;
+        }
+        match ready!(polled) {
+            Some(data) => {
+                self.unflushed = true;
+                Poll::Ready(Some(Ok(Frame::data(data))))
+            }
             // The pump stores the flag before it drops the sender, so it is visible once the channel closes.
-            None if self.aborted.load(Ordering::Acquire) => Poll::Ready(Some(Err(StreamAborted))),
+            None if self.aborted.load(Ordering::Acquire) => {
+                if std::mem::take(&mut self.unflushed) {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(Some(Err(StreamAborted)))
+            }
             None => Poll::Ready(None),
         }
     }

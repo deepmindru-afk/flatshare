@@ -309,6 +309,7 @@ pub(crate) struct Metrics {
     sanitized: Family<FieldLabels, Counter>,
     class_clamped: Counter,
     upstream_errors: Family<KindLabels, Counter>,
+    error_events: Family<ClassLabels, Counter>,
     events: Family<EventLabels, Counter>,
     usage_tokens: Family<UsageLabels, Counter>,
     admitted: Family<NodeClassLabels, Counter>,
@@ -369,6 +370,7 @@ impl Metrics {
             sanitized: Family::default(),
             class_clamped: Counter::default(),
             upstream_errors: Family::default(),
+            error_events: Family::default(),
             events: Family::default(),
             usage_tokens: Family::default(),
             admitted: Family::default(),
@@ -412,6 +414,7 @@ impl Metrics {
             create(&metrics.first_byte, ClassLabels { class });
             create(&metrics.duration, ClassLabels { class });
             create(&metrics.streams_active, ClassLabels { class });
+            create(&metrics.error_events, ClassLabels { class });
             for node in nodes {
                 let labels = NodeClassLabels {
                     node: node.clone(),
@@ -539,6 +542,11 @@ impl Metrics {
             "upstream_errors",
             "Upstream failures by kind",
             self.upstream_errors.clone(),
+        );
+        r.register(
+            "error_events",
+            "Error events sent on event streams the upstream broke off, before the gateway aborted them",
+            self.error_events.clone(),
         );
         r.register(
             "events",
@@ -859,6 +867,14 @@ impl Metrics {
             kind: kind.as_str(),
         };
         self.upstream_errors.get_or_create(&labels).inc();
+    }
+
+    /// An event stream the upstream broke off got an error event before its abort.
+    pub fn error_event(&self, class: SloClass) {
+        let labels = ClassLabels {
+            class: class.as_str(),
+        };
+        self.error_events.get_or_create(&labels).inc();
     }
 
     pub fn event(&self, r#type: &'static str, source: &'static str, duplicate: bool) {

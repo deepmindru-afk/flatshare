@@ -161,6 +161,11 @@ impl Exchange {
         )
     }
 
+    /// Records why a response already begun went wrong, for the request's log line.
+    pub fn note_error(&mut self, message: String) {
+        self.error = Some(message);
+    }
+
     /// Records how a forwarded request ended.
     pub fn finish(mut self, outcome: Outcome) {
         self.outcome = Some(outcome);

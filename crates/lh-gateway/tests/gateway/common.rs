@@ -53,6 +53,12 @@ pub enum Script {
     },
     /// JSON, but the response headers come only after this delay.
     Slow(Duration),
+    /// A body of `content_type`: the chunks, `gap` apart, then the connection breaks, as a killed engine's does.
+    Broken {
+        content_type: &'static str,
+        chunks: Vec<Bytes>,
+        gap: Duration,
+    },
 }
 
 /// A request the mock engine received.
@@ -295,6 +301,28 @@ async fn answer(State(state): State<Arc<MockState>>, request: Request) -> Respon
                 },
             );
             event_stream(Body::from_stream(chunks))
+        }
+        Script::Broken {
+            content_type,
+            chunks,
+            gap,
+        } => {
+            // After the chunks, one error: hyper then closes the connection without ending the body.
+            let chunks = stream::unfold(
+                (chunks.into_iter(), guard, false),
+                move |(mut chunks, guard, broken)| async move {
+                    if broken {
+                        return None;
+                    }
+                    tokio::time::sleep(gap).await;
+                    let item = chunks
+                        .next()
+                        .ok_or_else(|| std::io::Error::other("the engine died"));
+                    let broken = item.is_err();
+                    Some((item, (chunks, guard, broken)))
+                },
+            );
+            ([(CONTENT_TYPE, content_type)], Body::from_stream(chunks)).into_response()
         }
         Script::Endless { chunk, gap } => {
             let chunks = stream::unfold(guard, move |guard| {
