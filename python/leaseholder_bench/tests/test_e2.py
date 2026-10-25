@@ -346,6 +346,36 @@ def test_the_w5_extension_rotates_its_engine_groups_over_w5s_seeds() -> None:
     )
 
 
+W5_CAP = {
+    "w5-a1-voice-c4": ("w5-a1-voice", 4),
+    "w5-a1-voice-c6": ("w5-a1-voice", 6),
+    "w5-disc-pr-ab48-c4-s24": ("w5-disc-pr-ab48-s24", 4),
+    "w5-disc-pr-ab48-c6-s24": ("w5-disc-pr-ab48-s24", 6),
+}
+"""The calls-per-GPU configurations: each a W5 arm with more callers."""
+
+
+def test_the_calls_per_gpu_rounds_alternate_their_engine_groups_and_caller_counts() -> None:
+    rounds = [campaign_lines(BENCHMARKS / f"w5-cap-r{r}.campaign") for r in range(1, 4)]
+    assert [lines[0] for lines in rounds] == [f"agents-seed {seed}" for seed in range(11, 14)]
+    orders = [[Path(line).stem for line in lines[1:]] for lines in rounds]
+    assert all(sorted(order) == sorted(W5_CAP) for order in orders)
+    for order, then in itertools.pairwise(orders):
+        assert then == order[::-1]  # the groups and the caller counts in each swap places
+    for name, (w5, callers) in W5_CAP.items():
+        arm, before = (
+            load_arm(BENCHMARKS / "arms" / f"{name}.toml"),
+            load_arm(BENCHMARKS / "arms" / f"{w5}.toml"),
+        )
+        assert arm.voice == replace(before.voice, callers=callers)
+        assert (arm.agents, arm.gateway, arm.router, arm.engine) == (
+            before.agents,
+            before.gateway,
+            before.router,
+            before.engine,
+        )
+
+
 def test_flag_values_pair_each_flag_with_its_value() -> None:
     flags = ["--max-num-seqs", "12", "--no-async-scheduling", "--watermark", "0.1", "--x"]
     assert flag_values(flags) == {

@@ -75,6 +75,8 @@ The other arms take an earlier arm's winner, so their files are written from its
 
 [`w5-ext-r1.campaign`](w5-ext-r1.campaign) to [`w5-ext-r5.campaign`](w5-ext-r5.campaign) extend W5's re-measure over the same five samples of the agents: preempt-resubmit, the best arm without an engine change, beside the PRs' 48-token configuration in the discriminating scenario (`arms/w5-disc-a8c-resubmit-s24.toml`, `w5-disc-pr-ab48-s24.toml`), and the frozen box and the PRs' 48-token configuration in the standard scenario, 16 session trees of the whole corpus (`w5-std-frozen-s16.toml`, `w5-std-pr-ab48-s16.toml`), each call opening with a warm-up turn. Each round runs three engine groups in an order rotated by one group from round to round; the PRs' two points share their engine.
 
+[`w5-cap-r1.campaign`](w5-cap-r1.campaign) to [`w5-cap-r3.campaign`](w5-cap-r3.campaign) measure calls per GPU: the PRs' 48-token configuration with 4 and with 6 callers beside the discriminating scenario (`arms/w5-disc-pr-ab48-c4-s24.toml`, `w5-disc-pr-ab48-c6-s24.toml`), and voice alone with as many callers, the SLO's references (`w5-a1-voice-c4.toml`, `w5-a1-voice-c6.toml`), over three of W5's samples of the agents. Each round swaps the order of its two engine groups, and of the caller counts within each.
+
 The `[admission]` keys are those of `lh-gateway`'s configuration ([its README](../../crates/lh-gateway/README.md)); `lh-bench e2 run` passes the `[gateway]` table through as it is.
 
 ## Two GPU nodes: dedicate vs pool
