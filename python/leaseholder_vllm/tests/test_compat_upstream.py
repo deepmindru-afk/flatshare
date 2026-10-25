@@ -32,7 +32,8 @@ def git_version() -> tuple[int, ...]:
     return tuple(map(int, match.groups())) if match else (0, 0)
 
 
-pytestmark = pytest.mark.skipif(
+# The tests that run the script against a fake upstream need git merge-tree --write-tree; the rest run on any git.
+needs_merge_tree = pytest.mark.skipif(
     git_version() < (2, 38),
     reason="needs git 2.38 or newer (merge-tree --write-tree); GIT names one",
 )
@@ -169,6 +170,7 @@ def standard(upstream: Upstream, pr_tests: str = "def test_pr():\n    assert Tru
     return upstream.serve(main, {63350: kv, 63351: cap}, {"v0.40.0": base})
 
 
+@needs_merge_tree
 def test_clean_merges_run_the_tests_the_prs_add(tmp_path, upstream, python):
     proc = run(tmp_path, standard(upstream), "--python", python)
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -182,6 +184,7 @@ def test_clean_merges_run_the_tests_the_prs_add(tmp_path, upstream, python):
     )
 
 
+@needs_merge_tree
 def test_without_an_interpreter_no_test_runs(tmp_path, upstream):
     proc = run(tmp_path, standard(upstream))
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -189,6 +192,7 @@ def test_without_an_interpreter_no_test_runs(tmp_path, upstream):
     assert "passed" not in proc.stdout
 
 
+@needs_merge_tree
 def test_a_conflict_names_its_files_and_fails(tmp_path, upstream, python):
     base = upstream.commit(None, BASE | scheduler_files(real=False), "base")
     main = upstream.commit(base, {"vllm/other.py": "a = 1\n"}, "main changes other.py")
@@ -201,6 +205,7 @@ def test_a_conflict_names_its_files_and_fails(tmp_path, upstream, python):
     assert "#63351: CONFLICTS with main in vllm/other.py\n" in proc.stdout
 
 
+@needs_merge_tree
 def test_a_failing_test_fails_and_one_main_fails_too_is_mains(tmp_path, upstream, python):
     core = "def test_core():\n    assert True\n\n\ndef test_broken_on_main():\n    assert False\n"
     base = upstream.commit(None, BASE | scheduler_files(real=False) | {"tests/test_core.py": core})
@@ -220,6 +225,7 @@ def test_a_failing_test_fails_and_one_main_fails_too_is_mains(tmp_path, upstream
     assert failed == ["FAILED tests/test_cap.py::test_cap"], proc.stdout
 
 
+@needs_merge_tree
 def test_a_pr_whose_tests_all_skip_has_not_been_checked(tmp_path, upstream, python):
     """A test file that skips as a whole (a CUDA-only mark, an importorskip of what main's environment lacks) passes
     no test: that is no evidence, so the check exits 2, not 0."""
@@ -230,6 +236,7 @@ def test_a_pr_whose_tests_all_skip_has_not_been_checked(tmp_path, upstream, pyth
     assert "no test ran" in proc.stdout
 
 
+@needs_merge_tree
 def test_a_pr_test_that_hangs_fails_its_file_when_the_time_runs_out(tmp_path, upstream, python):
     base = upstream.commit(None, BASE | scheduler_files(real=False))
     main = upstream.commit(base, {"vllm/main_only.py": "m = 1\n"})
@@ -244,6 +251,7 @@ def test_a_pr_test_that_hangs_fails_its_file_when_the_time_runs_out(tmp_path, up
     assert "#63351: no test file added or changed" in proc.stdout
 
 
+@needs_merge_tree
 def test_an_interpreter_that_cannot_import_mains_scheduler_runs_nothing(tmp_path, upstream, python):
     error = "ModuleNotFoundError: No module named 'torch'"
     proc = run(tmp_path, standard(upstream), "--python", python, env={"FAKE_IMPORT_ERROR": error})
@@ -252,6 +260,7 @@ def test_an_interpreter_that_cannot_import_mains_scheduler_runs_nothing(tmp_path
     assert "passed" not in proc.stdout and "FAILED" not in proc.stdout
 
 
+@needs_merge_tree
 def test_an_interpreter_that_cannot_run_mains_tests_runs_nothing(tmp_path, upstream, python):
     base = upstream.commit(None, BASE | scheduler_files(real=False))
     main = upstream.commit(base, {"tests/conftest.py": "import not_installed_here\n"})
@@ -263,6 +272,7 @@ def test_an_interpreter_that_cannot_run_mains_tests_runs_nothing(tmp_path, upstr
     assert "No module named 'not_installed_here'" in proc.stdout
 
 
+@needs_merge_tree
 def test_a_pr_main_squash_merged_is_reported_and_not_merged_again(tmp_path, upstream):
     """vLLM squash-merges: main holds #63350 as a commit of its own whose subject ends with (#63350), and the PR's
     head is no ancestor of main. Main edits the same file afterwards, so merging the stale head would conflict, and
@@ -285,6 +295,7 @@ def test_a_pr_main_squash_merged_is_reported_and_not_merged_again(tmp_path, upst
     assert "CONFLICTS" not in proc.stdout
 
 
+@needs_merge_tree
 def test_a_stacked_prs_own_conflict_with_main_is_reported(tmp_path, upstream):
     base = upstream.commit(None, BASE | scheduler_files(real=False))
     kv = upstream.commit(base, {"vllm/kv.py": "k = 1\n"}, "Make room")
@@ -299,6 +310,7 @@ def test_a_stacked_prs_own_conflict_with_main_is_reported(tmp_path, upstream):
     assert expected in proc.stdout
 
 
+@needs_merge_tree
 def test_a_pr_merged_into_main_or_whose_changes_main_has_is_reported(tmp_path, upstream):
     base = upstream.commit(None, BASE | scheduler_files(real=False))
     kv = upstream.commit(base, {"vllm/kv.py": "k = 1\n"})
@@ -313,6 +325,7 @@ def test_a_pr_merged_into_main_or_whose_changes_main_has_is_reported(tmp_path, u
     assert "#63351: its changes are in main already\n" in proc.stdout
 
 
+@needs_merge_tree
 def test_offline_it_fails_saying_it_needs_the_network(tmp_path, upstream):
     nowhere = (tmp_path / "nowhere.git").as_uri()
     proc = run(tmp_path, nowhere)
@@ -362,6 +375,7 @@ def test_the_newest_release_and_a_newer_candidate(compat):
     assert compat.newest(["v0.33.0rc0"]) == []
 
 
+@needs_merge_tree
 @needs_vllm_src
 def test_the_patches_apply_to_the_pinned_release_and_a_shifted_one_names_its_hunk(
     tmp_path, upstream
@@ -384,6 +398,7 @@ def test_the_patches_apply_to_the_pinned_release_and_a_shifted_one_names_its_hun
     )
 
 
+@needs_merge_tree
 @needs_vllm_src
 def test_patches_that_do_not_apply_to_the_pinned_release_fail(tmp_path, upstream):
     base = upstream.commit(None, BASE | scheduler_files(real=True, shift=1), "v0.32.0, edited")
