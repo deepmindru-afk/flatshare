@@ -55,7 +55,7 @@ fi
 # docs/HARDWARE.md's estimates, in minutes, for --until (block 0 assumes staging did not warm the caches).
 minutes() {
   case $1 in
-    0) echo 40 ;; 1) echo 25 ;; 2) echo 26 ;; 3) echo 17 ;; 4) echo 29 ;; 5) echo 17 ;; 6 | 7 | 8 | 9) echo 28 ;;
+    0) echo 44 ;; 1) echo 25 ;; 2) echo 26 ;; 3) echo 17 ;; 4) echo 29 ;; 5) echo 17 ;; 6 | 7 | 8 | 9) echo 28 ;;
     10) echo 10 ;; cprime) echo 95 ;; branches) echo 45 ;; resubmit) echo 36 ;; batch) echo 15 ;; aprime) echo 80 ;;
     *) echo 0 ;;
   esac
@@ -120,10 +120,7 @@ block() { # block NAME: run one block unless it is done
     0)
       bash "$src/deploy/a100/bootstrap.sh" gpu
       # Staging may have warmed every compile configuration already (bootstrap.sh warm before the billed clock).
-      if "$root/venvs/bench/bin/python" -c 'import json, sys
-done = json.load(open(sys.argv[1]))["configurations"]
-sys.exit(0 if all(done.get(name, {}).get("ok") for name in ("frozen", "2048-0", "1536")) else 1)' \
-        "$root/cache/warm.json" 2>/dev/null; then
+      if "$root/venvs/bench/bin/python" "$src/deploy/a100/host.py" warmed "$node" >/dev/null 2>&1; then
         log "block 0: every compile configuration warm already (cache/warm.json)"
       else
         bash "$src/deploy/a100/bootstrap.sh" warm

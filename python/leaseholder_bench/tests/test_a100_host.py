@@ -394,6 +394,10 @@ def test_warm_starts_each_configuration_and_keeps_what_its_start_showed(
         "use frozen",
         "use frozen --max-num-batched-tokens 2048 --long-prefill-token-threshold 0",
         "use frozen --max-num-batched-tokens 1536 --long-prefill-token-threshold 768",
+        # vLLM 0.32.0 hashes additional_config into the compile key: the PRs' values compile their own graphs, which
+        # block 3, every E2 round's make-room point and the batch arm's "on" start from.
+        "use make-room --additional-config.make_room.reserve_tokens 0"
+        " --additional-config.make_room.budget_cap_tokens 48",
     ]
     frozen = record["configurations"]["frozen"]
     assert frozen["ok"] and frozen["block_size"] == 16 and frozen["num_gpu_blocks"] == 2275
@@ -402,6 +406,12 @@ def test_warm_starts_each_configuration_and_keeps_what_its_start_showed(
     failed = record["configurations"]["2048-0"]
     assert not failed["ok"] and "lh-engine failed" in failed["error"]
     assert json.loads((home / "leaseholder" / "cache" / "warm.json").read_text()) == record
+    # run.sh's block 0 asks whether every configuration is warm: not while the 2,048-token cap's start failed.
+    monkeypatch.setenv("HOME", str(home))
+    assert host_py.main(["warmed", str(out)]) == 1
+    record["configurations"]["2048-0"]["ok"] = True
+    (home / "leaseholder" / "cache" / "warm.json").write_text(json.dumps(record))
+    assert host_py.main(["warmed", str(out)]) == 0
     # A file of configurations, one a line.
     configs = tmp_path / "warm.conf"
     configs.write_text("# C'\n14b qwen3-14b --max-num-seqs 64\n")

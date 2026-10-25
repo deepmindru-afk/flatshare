@@ -115,9 +115,21 @@ WARM = (
         "frozen",
         ("--max-num-batched-tokens", "1536", "--long-prefill-token-threshold", "768"),
     ),
+    (
+        "pr",
+        "make-room",
+        (
+            "--additional-config.make_room.reserve_tokens",
+            "0",
+            "--additional-config.make_room.budget_cap_tokens",
+            "48",
+        ),
+    ),
 )
-"""The core's compile configurations: the frozen box's 512-token step cap (make-room's too), vLLM's default 2,048/0
-and the time-equivalent cap (docs/HARDWARE.md's R4, its central value; T = B/2)."""
+"""The core's compile configurations: the frozen box's 512-token step cap, vLLM's default 2,048/0, the time-equivalent
+cap (docs/HARDWARE.md's R4, its central value; T = B/2), and make-room at the PRs' values (block 3, every E2 round's
+make-room point, the batch arm's "on"), which compiles its own graphs at the box's cap: vLLM 0.32.0 hashes
+additional_config into the compile key (config/vllm.py), so make-room shares no graph with the frozen box."""
 ENGINE_LINES = re.compile(
     r"Selected \S+ for Fp8LinearMethod|native support for FP8|Using \S+ attention backend|"
     r"Using FlashAttention version|Using \S+ KV cache layout|cudaHostRegister|top-p & top-k sampling|"
@@ -1532,6 +1544,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--configs", type=Path, help="NAME VARIANT [FLAG...] lines instead of the core's three"
     )
+    p = commands.add_parser(
+        "warmed", help="whether every core compile configuration started (exit status 1 if not)"
+    )
+    p.add_argument("node", type=Path)
     p = commands.add_parser("headers", help="whether PYTHON has Python.h (exit status 1 if not)")
     p.add_argument("python", type=Path)
     p = commands.add_parser(
@@ -1562,6 +1578,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"host: wrote {write_env(node)} ({supervisor(node.host)} runs the units)")
         elif args.command == "supervisor":
             print(supervisor(node.host))
+        elif args.command == "warmed":
+            done = (_json(_home() / "leaseholder" / "cache" / "warm.json") or {}).get(
+                "configurations", {}
+            )
+            cold = [name for name, *_ in WARM if not (done.get(name) or {}).get("ok")]
+            print(
+                f"host: {'cold: ' + ', '.join(cold) if cold else 'every core compile configuration is warm'}"
+            )
+            return 1 if cold else 0
         elif args.command == "units":
             for link in install_units(node):
                 print(f"host: linked {link}")
