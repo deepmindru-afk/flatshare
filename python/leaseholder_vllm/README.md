@@ -76,3 +76,9 @@ The make-room probes' tests run in CI, with aiohttp from the test extra (the eng
 - `tests/test_probe.py`: `probe.py`'s requests sized from the engine's pool and context, the frozen box's sizes unchanged, and its result line as the committed outputs' check and the PR bodies' renderer parse it, on a loopback port and on a Unix socket.
 - `tests/test_tail.py`: `tail.py`'s accounting of failed call turns and stopped agents, its agents and their prompts (the frozen box's unchanged, others from the pool and context), whole replies, a run's lines and an engine on its Unix socket.
 - `tests/test_knee.py`: `knee.sh`, the budget cap's window sweep, against stand-ins for `variant.sh`, the engine, `journalctl` and `tail.py`.
+
+The upkeep checks' own tests:
+
+- `tests/test_perf_schedule.py`: the perf check's arithmetic (the ratios, the tolerance, the check, its notes and its measuring again, the tables), its exit statuses, the checked-in baseline's numbers against its rule, and, with torch and vLLM's scheduler, that each of the 13 steady states is steady for stock vLLM's scheduler as for make-room's and runs the path it is named for. `make test-vllm` runs its arithmetic, and `make test-make-room` all of it.
+- `tests/test_perf_control.py`: the perf check's negative control, which times the scheduler, so only `make perf-make-room` runs it (`LH_PERF=1`); elsewhere it skips.
+- `tests/test_compat_upstream.py`: `scripts/compat_upstream.py` against a fake upstream that it builds without the developer's git config: clean, conflicting, squash-merged and stacked PRs, PR tests that pass, fail, all skip or hang, an older git, no network. `make test-vllm` runs it; its 14 tests that merge need git 2.38 or newer and skip with an older one, and two need `VLLM_SRC`.
