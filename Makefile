@@ -6,16 +6,17 @@ VLLM_REF := v0.32.0
 VLLM_SRC ?= $(HOME)/.cache/leaseholder/vllm-$(VLLM_REF)
 # Every Python package except the engine variants' tests (test-vllm); each one has a `test` extra.
 PY_PACKAGES := $(filter-out python/leaseholder_vllm,$(patsubst %/pyproject.toml,%,$(wildcard python/*/pyproject.toml)))
-# The Python that make lint checks: the packages, and the scripts of lh-sim, E2 and the engine variants (not the
-# recorded runs' own scripts under benchmarks/results).
-PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py deploy/phastform/variants/*/*.py)
+# The Python that make lint checks: the packages, and the scripts of lh-sim, E2, the A100 run, the deployment and the
+# engine variants (not the recorded runs' own scripts under benchmarks/results).
+PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py benchmarks/a100/*.py deploy/*.py deploy/bin/*.py \
+  deploy/phastform/variants/*/*.py)
 # E2's committed records (lh-bench e2 export), one directory per point under its campaign, and where
 # reproduce-e2 writes their report.
 E2_RESULTS := benchmarks/results/2026-10-23-e2
 E2_REPORT ?= build/reproduce-e2
 
 .PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-python schema metrics \
-  reproduce-e1 reproduce-calibration reproduce-e2 e2-figures forecast-a100
+  reproduce-e1 reproduce-calibration reproduce-e2 e2-figures forecast-a100 profiles
 
 check: lint test
 
@@ -138,3 +139,9 @@ e2-figures:
 	@mkdir -p docs/figures
 	cp build/e2-figures/frontier-weka-x32-long.svg docs/figures/e2-frontier.svg
 	cp build/e2-figures/waterfall.svg docs/figures/e2-waterfall.svg
+
+# The frozen box's hardware profile against deploy/phastform (deploy/profile.py): `make profiles` checks that it
+# renders today's files byte for byte, and `make profiles UPDATE=1` writes them from deploy/templates after a
+# template changes.
+profiles:
+	uv run -q --no-project python deploy/profile.py $(if $(UPDATE),update,check) rtx-5060-ti
