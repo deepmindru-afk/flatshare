@@ -306,6 +306,40 @@ def test_the_w5_pr_campaign_rotates_the_prs_configurations_beside_the_frozen_box
         )
 
 
+W5_EXT = {
+    "w5-disc-a8c-resubmit-s24": "disc-a8c-resubmit-s24",
+    "w5-std-frozen-s16": "a4-b512-t256-s16",
+    "w5-std-pr-ab48-s16": "a4-b512-t256-s16",
+}
+"""The W5 extension's three configurations, each with the W4 arm whose agents, gateway and router it keeps."""
+
+
+def test_the_w5_extension_rotates_its_three_configurations_over_w5s_seeds() -> None:
+    rounds = [campaign_lines(BENCHMARKS / f"w5-ext-r{r}.campaign") for r in range(1, 6)]
+    assert [lines[0] for lines in rounds] == [f"agents-seed {seed}" for seed in range(11, 16)]
+    orders = [[Path(line).stem for line in lines[1:]] for lines in rounds]
+    assert orders[0] == list(W5_EXT)
+    for order, then in itertools.pairwise(orders):
+        assert then == [*order[1:], order[0]]  # rotated by one from round to round
+    for name, w4 in W5_EXT.items():
+        arm, before = (
+            load_arm(BENCHMARKS / "arms" / f"{name}.toml"),
+            load_arm(BENCHMARKS / "arms" / f"{w4}.toml"),
+        )
+        assert arm.voice == replace(before.voice, warmup_turns=1)
+        assert (arm.agents, arm.gateway, arm.router) == (
+            before.agents,
+            before.gateway,
+            before.router,
+        )
+    # The standard scenario's PR point runs the engine of W5's discriminating one.
+    engine = load_arm(BENCHMARKS / "arms" / "w5-std-pr-ab48-s16.toml").engine
+    assert engine == load_arm(BENCHMARKS / "arms" / "w5-disc-pr-ab48-s24.toml").engine
+    assert (
+        load_arm(BENCHMARKS / "arms" / "w5-disc-a8c-resubmit-s24.toml").engine.variant == "frozen"
+    )
+
+
 def test_flag_values_pair_each_flag_with_its_value() -> None:
     flags = ["--max-num-seqs", "12", "--no-async-scheduling", "--watermark", "0.1", "--x"]
     assert flag_values(flags) == {
