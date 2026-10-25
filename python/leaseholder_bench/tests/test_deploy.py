@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import socketserver
 import stat
 import subprocess
@@ -1032,45 +1033,99 @@ print("up", flush=True)
 time.sleep(30)
 """
 """A gateway's main process to the stop helper: on SIGTERM it drains for 0.5 s, marks that in a file and exits 0."""
+HUNG = """\
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+print("up", flush=True)
+time.sleep(60)
+"""
+"""A gateway's main process to the stop helper that never exits on SIGTERM: a drain that hangs."""
 needs_pidfds = pytest.mark.skipif(
     not hasattr(os, "pidfd_open"), reason="lh-gateway-stop holds the process by a pidfd (Linux)"
 )
 
 
 def stop_gateway(
-    work: Path, unit: str
+    work: Path, unit: str, gateway_py: str = DRAINING, *options: str, timeout: float = 30
 ) -> tuple[subprocess.CompletedProcess[str], subprocess.Popen[str], Path, float]:
-    """Runs deploy/bin/lh-gateway-stop UNIT PID against a main process of lh-gateway.service, as deploy/bin/lh-svc
-    runs one (LH_SVC_UNIT in its environment): what it did, the process, its mark and how long the stop took."""
+    """Runs deploy/bin/lh-gateway-stop [OPTIONS] UNIT PID against a main process of lh-gateway.service, as
+    deploy/bin/lh-svc runs one (LH_SVC_UNIT in its environment): what it did, the process, its mark and how long the
+    stop took. A stop that outlasts ``timeout`` raises, the process killed."""
     marked = work / "drained"
     gateway = subprocess.Popen(
-        [sys.executable, "-c", DRAINING, str(marked)],
+        [sys.executable, "-c", gateway_py, str(marked)],
         stdout=subprocess.PIPE,
         text=True,
         env=os.environ | {"LH_SVC_UNIT": "lh-gateway.service"},
     )
     assert gateway.stdout is not None and gateway.stdout.readline() == "up\n"
     started = time.monotonic()
-    done = subprocess.run(
-        [DEPLOY / "bin" / "lh-gateway-stop", unit, str(gateway.pid)],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    try:
+        done = subprocess.run(
+            [DEPLOY / "bin" / "lh-gateway-stop", *options, unit, str(gateway.pid)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        gateway.kill()
+        gateway.wait()
+        raise
     return done, gateway, marked, time.monotonic() - started
 
 
 @needs_pidfds
 def test_a_stop_returns_once_the_gateway_has_drained_and_exited(tmp_path: Path) -> None:
     # The unit's ExecStop, which systemd waits for: after a reload systemd itself would SIGKILL the successor at once.
+    # Its wait, 45 s, is the drain's limit (drain_timeout_s, 30 s) and a margin, inside systemd's 90 s stop timeout.
     service = (DEPLOY / "cyan" / "systemd" / "lh-gateway.service").read_text()
     assert exec_lines(service, "ExecStop") == [
-        "%h/leaseholder/src/deploy/bin/lh-gateway-stop %n $MAINPID"
+        "%h/leaseholder/src/deploy/bin/lh-gateway-stop --wait 45 %n $MAINPID"
     ]
     done, gateway, marked, took = stop_gateway(tmp_path, "lh-gateway.service")
     assert done.returncode == 0, done.stderr
     assert marked.read_text() == "drained" and took >= 0.5
     assert gateway.wait(timeout=5) == 0
+
+
+@needs_pidfds
+def test_a_stop_kills_a_gateway_still_running_at_the_end_of_its_wait(tmp_path: Path) -> None:
+    # A gateway that ignores SIGTERM (only a hung one runs on past its drain) gets SIGKILL once the wait is over, so
+    # that the stop takes the wait, not twice the unit's TimeoutStopSec (ExecStop's, then the SIGTERM's that
+    # follows it); the stop fails, as the drain did. Before, the stop waited for as long as the process ran.
+    done, gateway, marked, took = stop_gateway(
+        tmp_path, "lh-gateway.service", HUNG, "--wait", "1", timeout=10
+    )
+    try:
+        assert done.returncode == 1, done.stderr
+        assert "did not exit within 1 s of SIGTERM: sending SIGKILL" in done.stderr
+        assert 1 <= took < 3, took
+        assert gateway.wait(timeout=5) == -signal.SIGKILL and not marked.exists()
+    finally:
+        gateway.kill()
+        gateway.wait()
+
+
+def test_a_stops_wait_is_a_number_of_seconds() -> None:
+    for options in (["--wait"], ["--wait", "0"], ["--wait", "soon"], ["--wait", "nan"]):
+        done = subprocess.run(
+            [DEPLOY / "bin" / "lh-gateway-stop", *options, "lh-gateway.service"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert (done.returncode, done.stderr) == (
+            2,
+            "usage: lh-gateway-stop [--wait SECONDS] UNIT [PID]\n",
+        ), options
+    # Without a main process ($MAINPID empty) there is nothing to wait for, whatever the wait.
+    done = subprocess.run(
+        [DEPLOY / "bin" / "lh-gateway-stop", "--wait", "2.5", "lh-gateway.service"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert (done.returncode, done.stderr) == (0, "")
 
 
 @needs_pidfds
