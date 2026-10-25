@@ -10,14 +10,15 @@
 //!   upstream reads one (`X-Vllm-Priority`, the body's `priority` or `X-SMG-Priority`), with a per-tenant
 //!   `cache_salt`;
 //! - **admission**, E2's harness (`harness`): an `lh_core::admission` policy decides when a request goes
-//!   upstream, and the gateway does the waiting and the cancellation; under policy leaseholder it also follows the
-//!   realtime sessions' turns from lifecycle events and realtime requests;
+//!   upstream, and the gateway does the waiting and the cancellation; under the lifecycle policy it also follows
+//!   the realtime sessions' turns from lifecycle events and realtime requests;
+//! - **a reply cap** on every realtime request (`realtime_max_tokens`), without an admission policy as with one;
 //! - **relay**: responses pass through byte for byte, with backpressure, client-disconnect cancellation and a
 //!   stall timeout;
 //! - **lifecycle events** at `POST /v1/events`, deduplicated, then to the admission point and an [`EventSink`];
 //! - **metrics** at `GET /metrics` and one structured log line per request.
 //!
-//! The admission policies are E2's baselines and Leaseholder's own (E2 arm 9).
+//! The admission policies are E2's baselines and the lifecycle policy, which E2's arm 9 runs with make-room.
 
 mod auth;
 pub mod config;

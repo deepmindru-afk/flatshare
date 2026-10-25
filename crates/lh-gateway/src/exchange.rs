@@ -37,11 +37,11 @@ pub(crate) struct Exchange {
     pub forwarded: bool,
     /// How long the request waited at the admission point; `None` without one.
     pub admission_wait: Option<Duration>,
-    /// Why policy leaseholder deferred it.
+    /// Why the lifecycle policy deferred it.
     pub deferred: Option<Deferral>,
-    /// Whether policy leaseholder admitted it regardless, after `max_defer_s`.
+    /// Whether the lifecycle policy admitted it regardless, after `max_defer_s`.
     pub aged: bool,
-    /// Whether policy leaseholder capped its reply.
+    /// Whether the lifecycle policy's degrade capped its reply.
     pub degraded: bool,
     /// How many times it was sent upstream again after a preemption.
     pub resubmits: u32,

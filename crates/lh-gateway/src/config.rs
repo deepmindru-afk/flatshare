@@ -38,6 +38,10 @@ pub struct Config {
     pub metrics_key: Option<MetricsKey>,
     /// Largest accepted request body; larger requests get 413.
     pub max_body_bytes: usize,
+    /// The cap on every realtime reply, in tokens (`realtime_max_tokens`): each of a realtime request's reply caps
+    /// above it is lowered to it, and a body with none gets the route's own, as degrade caps a reply under the
+    /// lifecycle policy. `None` caps no reply.
+    pub realtime_max_tokens: Option<u32>,
     /// Frames buffered between the upstream and a client before backpressure reaches the upstream.
     pub stream_buffer_frames: usize,
     /// How long a full stream buffer may stay full before the stream is aborted as stalled.
@@ -208,6 +212,7 @@ struct RawConfig {
     cache_salt_secret_file: Option<PathBuf>,
     metrics_key_file: Option<PathBuf>,
     max_body_bytes: usize,
+    realtime_max_tokens: Option<u32>,
     stream_buffer_frames: usize,
     stall_timeout_s: f64,
     first_byte_timeout_s: f64,
@@ -232,6 +237,7 @@ impl Default for RawConfig {
             cache_salt_secret_file: None,
             metrics_key_file: None,
             max_body_bytes: 32 << 20,
+            realtime_max_tokens: None,
             stream_buffer_frames: 64,
             stall_timeout_s: 30.0,
             first_byte_timeout_s: 600.0,
@@ -365,6 +371,9 @@ impl RawConfig {
         if self.max_body_bytes == 0 {
             return Err("max_body_bytes must be positive".into());
         }
+        if self.realtime_max_tokens == Some(0) {
+            return Err("realtime_max_tokens must be positive".into());
+        }
         if self.stream_buffer_frames == 0 {
             return Err("stream_buffer_frames must be positive".into());
         }
@@ -394,6 +403,7 @@ impl RawConfig {
             cache_salt_secret,
             metrics_key,
             max_body_bytes: self.max_body_bytes,
+            realtime_max_tokens: self.realtime_max_tokens,
             stream_buffer_frames: self.stream_buffer_frames,
             stall_timeout: seconds("stall_timeout_s", self.stall_timeout_s)?,
             first_byte_timeout: seconds("first_byte_timeout_s", self.first_byte_timeout_s)?,
@@ -722,6 +732,19 @@ mod tests {
         );
         let err = Config::from_toml(&https).unwrap_err().to_string();
         assert!(err.contains("http://host:port"), "{err}");
+    }
+
+    #[test]
+    fn a_deployment_may_cap_every_realtime_reply() {
+        let a = format!("[tenants.a]\nkeys_sha256 = [\"{KEY}\"]");
+        assert_eq!(config("", &a).unwrap().realtime_max_tokens, None);
+        let capped = config("realtime_max_tokens = 64", &a).unwrap();
+        assert_eq!(capped.realtime_max_tokens, Some(64));
+        let err = config("realtime_max_tokens = 0", &a).unwrap_err();
+        assert!(
+            err.contains("realtime_max_tokens must be positive"),
+            "{err}"
+        );
     }
 
     #[test]

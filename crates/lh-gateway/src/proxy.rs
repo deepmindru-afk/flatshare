@@ -29,6 +29,7 @@ use hyper::body::Incoming;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::{Client, ResponseFuture};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use lh_proto::SloClass;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use tokio::net::UnixStream;
@@ -322,10 +323,6 @@ pub(crate) async fn inference(app: App, route: Route, request: Request) -> Respo
                     if let Some(ticket) = &ticket {
                         ex.deferred = ticket.deferred();
                         ex.aged = ticket.aged();
-                        if let Some(cap) = ticket.reply_cap() {
-                            body.json = cap_reply(&body.json, route, cap);
-                            ex.degraded = true;
-                        }
                     }
                     start += waited;
                     ticket
@@ -337,6 +334,16 @@ pub(crate) async fn inference(app: App, route: Route, request: Request) -> Respo
             }
         }
     };
+
+    // The reply cap: the deployment's on every realtime reply, and degrade's, the lower of the two.
+    let degrade = ticket.as_ref().and_then(Ticket::reply_cap);
+    let realtime = shared
+        .realtime_max_tokens
+        .filter(|_| class == SloClass::Realtime);
+    if let Some(cap) = realtime.into_iter().chain(degrade).min() {
+        body.json = cap_reply(&body.json, route, cap);
+    }
+    ex.degraded = degrade.is_some();
 
     let sent = (start, shared.metrics.overhead(route));
     let body = UpstreamBody {

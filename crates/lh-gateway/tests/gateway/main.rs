@@ -4,7 +4,7 @@ mod admission;
 mod common;
 mod drain;
 mod events;
-mod leaseholder;
+mod lifecycle;
 mod metrics;
 mod proxy;
 mod reload;

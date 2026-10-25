@@ -26,7 +26,7 @@ use crate::auth::{self, Tenants};
 use crate::config::{Config, ListenAddr, MetricsKey, PrioritySignals};
 use crate::events::{self, EventSink, Events};
 use crate::exchange::Exchange;
-use crate::harness::{self, Admission};
+use crate::harness::Admission;
 use crate::metrics::{Metrics, Route};
 use crate::proxy::{self, Upstream};
 use crate::systemd::Inherited;
@@ -49,6 +49,8 @@ pub(crate) struct Shared {
     pub metrics: Arc<Metrics>,
     pub events: Events,
     pub max_body_bytes: usize,
+    /// The cap on every realtime reply, in tokens.
+    pub realtime_max_tokens: Option<u32>,
     pub stream_buffer_frames: usize,
     pub stall_timeout: Duration,
     pub first_byte_timeout: Duration,
@@ -214,13 +216,10 @@ impl Server {
             };
             listeners.push((listener, tenant));
         }
-        // The harness's metric families, only with an admission point.
-        let harness = config
-            .admission
-            .as_ref()
-            .map(|admission| (admission, Arc::new(harness::Metrics::new())));
-        let metrics = Arc::new(match &harness {
-            Some((_, harness)) => Metrics::with_harness(harness),
+        // The harness, and its metric families, only with an admission policy.
+        let admission = config.admission.as_ref().map(Admission::new);
+        let metrics = Arc::new(match &admission {
+            Some(admission) => Metrics::with_harness(admission.metrics()),
             None => Metrics::new(),
         });
         let upstream = Upstream::new(
@@ -228,7 +227,6 @@ impl Server {
             config.upstream_idle_timeout,
             metrics.node_ready(),
         );
-        let admission = harness.map(|(admission, metrics)| Admission::new(admission, metrics));
         let shared = Shared {
             tenants,
             upstream,
@@ -237,6 +235,7 @@ impl Server {
             metrics,
             events: Events::new(config.event_dedup_capacity, config.event_dedup_ttl, sink),
             max_body_bytes: config.max_body_bytes,
+            realtime_max_tokens: config.realtime_max_tokens,
             stream_buffer_frames: config.stream_buffer_frames,
             stall_timeout: config.stall_timeout,
             first_byte_timeout: config.first_byte_timeout,

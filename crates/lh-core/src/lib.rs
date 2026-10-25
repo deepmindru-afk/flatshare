@@ -3,7 +3,7 @@
 //!
 //! Pure code: no I/O and no clock. Callers pass token counts and events, and get durations and decisions back.
 //! - [`admission`]: whether a request goes upstream now, waits or is refused: the E2 baselines the gateway
-//!   emulates, and Leaseholder's own policy (E2 arm 9);
+//!   emulates, and the lifecycle policy, which E2's arm 9 runs with make-room;
 //! - [`cost`]: what serving a prompt costs from each tier (the E0 model), and decode time;
 //! - [`step`]: what one engine step costs from what it carries, for a busy engine;
 //! - [`geometry`]: KV bytes per token, the engine block, and tier capacities in blocks.

@@ -22,6 +22,9 @@ cache_salt_secret_file = "<home>/.config/leaseholder/cache-salt-secret"
 # mode 600, which deploy/cyan/install.sh writes once. Prometheus reads the same file (ops/prometheus); on the
 # voice plane's socket, private to this user, no key is asked for.
 metrics_key_file = "<home>/.config/leaseholder/metrics-key"
+# A cap on every realtime reply, in tokens, with or without an admission policy; none by default. Undegraded, E2's
+# voice agent's replies ran 20 tokens at the median and 39 at most.
+# realtime_max_tokens = 64
 
 # The host network. Other users of cyan can reach loopback, so requests here need a key.
 [[listen]]
@@ -67,9 +70,10 @@ default_class = "background"
 #
 # policy = "preempt-resubmit"
 #
-# Leaseholder's own policy (E2 arm 9). headroom_tokens is one voice turn at its longest, for each armed session:
-# arm 1 averaged 646 prompt and 23 completion tokens a turn.
-# policy = "leaseholder"
+# The lifecycle policy, which E2's arm 9 runs with make-room ("leaseholder" in E2's arm files, the same policy).
+# headroom_tokens is one voice turn at its longest, for each armed session: arm 1 averaged 646 prompt and 23
+# completion tokens a turn.
+# policy = "lifecycle"
 # headroom_tokens = 1024
 # critical_prefill_budget_ms = 150
 # degrade_max_tokens = 16
@@ -81,6 +85,6 @@ default_class = "background"
 # An ablation switches one mechanism off and drops its keys: headroom = false (and trigger), throttle = false
 # (and critical_prefill_budget_ms, max_num_batched_tokens), degrade = false (and degrade_max_tokens).
 #
-# Every policy's queues (leaseholder refuses no request for its wait, and takes no queue_timeout_s):
+# Every policy's queues (lifecycle refuses no request for its wait, and takes no queue_timeout_s):
 # queue_limit = 1024
 # queue_timeout_s = 60

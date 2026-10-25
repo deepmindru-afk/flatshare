@@ -1,5 +1,5 @@
 //! Lifecycle events: `POST /v1/events` from trusted tenants, deduplicated by `(tenant, source, event_id)` within a
-//! bounded window, then handed to the admission point, where policy leaseholder follows the realtime sessions'
+//! bounded window, then handed to the admission point, where the lifecycle policy follows the realtime sessions'
 //! turns by them, and to an [`EventSink`], which records them ([`LogSink`]).
 
 use std::collections::{HashSet, VecDeque};

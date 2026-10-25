@@ -19,13 +19,13 @@
 //! gateway per policy with limits the runs never reach, so that what a policy adds is its bookkeeping and never
 //! a wait. "Added" there is over a gateway without a policy, which runs the same requests just before; each
 //! gateway's `lh_gateway_overhead_seconds` follows. Its realtime rows send voice requests, which flow control,
-//! preempt-resubmit and policy leaseholder hold. Policy leaseholder runs twice: alone, where no realtime session
+//! preempt-resubmit and the lifecycle policy hold. The lifecycle policy runs twice: alone, where no realtime session
 //! is in a turn, and with events, while a task posts a lifecycle event every millisecond (four voice sessions in
 //! turn, through speech onset, end of turn, playback and its end), so that requests are decided beside sessions
 //! that speak and are in their critical windows.
 //!
 //! A third table times `POST /v1/events`, batches of one and four events, through a gateway without a policy
-//! and through policy leaseholder, which moves its sessions by each event under the admission lock.
+//! and through the lifecycle policy, which moves its sessions by each event under the admission lock.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -83,8 +83,8 @@ const POLICIES: [(&str, &str); 5] = [
     ),
     ("preempt-resubmit", "policy = \"preempt-resubmit\""),
     (
-        "leaseholder",
-        "policy = \"leaseholder\"\npool_tokens = 1000000000\nheadroom_tokens = 1024\n\
+        "lifecycle",
+        "policy = \"lifecycle\"\npool_tokens = 1000000000\nheadroom_tokens = 1024\n\
          critical_prefill_budget_ms = 1000000000\ndegrade_max_tokens = 64",
     ),
 ];
@@ -137,7 +137,7 @@ fn main() {
         runtime: Some(gateway_rt.handle().clone()),
     };
     let targets = [direct, bare, gateway("")];
-    // A gateway without a policy for the policy table, with its own overhead histogram, and policy leaseholder
+    // A gateway without a policy for the policy table, with its own overhead histogram, and the lifecycle policy
     // once more for the run with events. These gateways have a voice tenant too.
     let voice = format!(
         "[tenants.voice]\nkeys_sha256 = [\"{}\"]\ntrusted = true\ndefault_class = \"realtime\"",
@@ -152,10 +152,10 @@ fn main() {
             events: false,
         })
         .collect();
-    let leaseholder = POLICIES[POLICIES.len() - 1].1;
+    let lifecycle = POLICIES[POLICIES.len() - 1].1;
     policies.push(Priced {
-        name: "leaseholder, with events",
-        target: gateway(&format!("{voice}\n[admission]\n{leaseholder}")),
+        name: "lifecycle, with events",
+        target: gateway(&format!("{voice}\n[admission]\n{lifecycle}")),
         events: true,
     });
     client_rt.block_on(async {
@@ -531,7 +531,7 @@ fn flow_events(
     (stop, poster)
 }
 
-/// The third table: `POST /v1/events` through a gateway without a policy and through policy leaseholder.
+/// The third table: `POST /v1/events` through a gateway without a policy and through the lifecycle policy.
 async fn time_events(gateways: &[&Priced]) {
     let client = http_client();
     for gateway in gateways {

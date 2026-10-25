@@ -1,4 +1,4 @@
-//! Policy leaseholder's view of the realtime sessions: where each one is in its turn, from the lifecycle events
+//! The lifecycle policy's view of the realtime sessions: where each one is in its turn, from the lifecycle events
 //! its emitter posts and from its own realtime requests. `lh_core::admission` decides from how many sessions are
 //! in each phase ([`Turns`]); this module keeps the phases, ends those that time out, and counts the headroom's
 //! false alarms.
@@ -17,14 +17,13 @@
 //!   false alarm, charged the token-seconds of background work the headroom held back meanwhile.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lh_core::admission::{Trigger, Turns};
 use lh_proto::{EventKind, SessionId};
 use prometheus_client::metrics::gauge::Gauge;
 
-use super::metrics::Metrics;
+use super::metrics::LifecycleMetrics;
 
 /// Realtime sessions followed at most, a bound on what emitters can make the gateway hold. A new session that
 /// finds the table full first forgets the idle ones; if every session is in a turn, it is not followed.
@@ -78,7 +77,7 @@ pub(crate) struct Realtime {
     trigger: Option<Trigger>,
     timeout: Duration,
     held: HeldBack,
-    metrics: Arc<Metrics>,
+    metrics: LifecycleMetrics,
 }
 
 #[derive(Debug)]
@@ -111,7 +110,7 @@ impl HeldBack {
 }
 
 impl Realtime {
-    pub fn new(trigger: Option<Trigger>, timeout: Duration, metrics: Arc<Metrics>) -> Self {
+    pub fn new(trigger: Option<Trigger>, timeout: Duration, metrics: LifecycleMetrics) -> Self {
         Self {
             sessions: HashMap::new(),
             counts: [0; 4],
@@ -279,9 +278,9 @@ mod tests {
         SessionId::new(id).unwrap()
     }
 
-    fn tracker(trigger: Option<Trigger>) -> (Realtime, Arc<Metrics>) {
-        let metrics = Arc::new(Metrics::new());
-        let realtime = Realtime::new(trigger, Duration::from_secs(10), Arc::clone(&metrics));
+    fn tracker(trigger: Option<Trigger>) -> (Realtime, LifecycleMetrics) {
+        let metrics = LifecycleMetrics::new();
+        let realtime = Realtime::new(trigger, Duration::from_secs(10), metrics.clone());
         (realtime, metrics)
     }
 

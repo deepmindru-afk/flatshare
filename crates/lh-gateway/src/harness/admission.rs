@@ -1,13 +1,13 @@
 //! The admission point, between resolving a request and sending it upstream. `lh_core::admission` decides
 //! whether a request goes upstream now, waits or is refused, and which admitted requests give way to it; this
 //! module carries the decisions out. Each held request has a watch channel on which it learns what was decided
-//! for it, so waiting never polls, and a wait ends after `queue_timeout_s` with a refusal, or under policy
-//! leaseholder after `max_defer_s` with an admission regardless.
+//! for it, so waiting never polls, and a wait ends after `queue_timeout_s` with a refusal, or under the lifecycle
+//! policy after `max_defer_s` with an admission regardless.
 //!
 //! A held request owns a [`Ticket`] from its arrival to the end of its response, and dropping the ticket is
 //! leaving: a client that goes away while it waits, or before its response ends, frees its place at once.
 //!
-//! Under policy leaseholder the admission point also follows the realtime sessions' turns ([`Realtime`]), from
+//! Under the lifecycle policy the admission point also follows the realtime sessions' turns ([`Realtime`]), from
 //! lifecycle events and realtime requests, and tells the core how many sessions are in each phase whenever that
 //! changes. A task ends the phases that time out.
 
@@ -23,7 +23,7 @@ use lh_proto::{LifecycleEvent, SessionId, SloClass};
 use tokio::sync::watch;
 
 use super::config;
-use super::metrics::{Metrics, Refusal};
+use super::metrics::{LifecycleMetrics, Metrics, Refusal};
 use super::realtime::Realtime;
 
 /// Sessions whose last usage is kept for token estimates.
@@ -36,7 +36,7 @@ pub(crate) struct Admission {
     policy: Policy,
     /// How long a request may wait.
     max_wait: Duration,
-    metrics: Arc<Metrics>,
+    metrics: Metrics,
 }
 
 #[derive(Debug)]
@@ -45,7 +45,7 @@ struct State {
     /// Where each held request learns what was decided for it.
     signals: HashMap<RequestId, watch::Sender<Signal>>,
     sessions: Sessions,
-    /// Policy leaseholder's realtime sessions.
+    /// The lifecycle policy's realtime sessions.
     realtime: Option<Realtime>,
 }
 
@@ -59,14 +59,18 @@ enum Signal {
 }
 
 impl Admission {
-    /// The admission point; under policy leaseholder, with the task that ends the realtime sessions' phases as
-    /// they time out.
-    pub fn new(config: &config::Admission, metrics: Arc<Metrics>) -> Arc<Self> {
-        let realtime = match (config.policy, config.state_timeout) {
-            (Policy::Leaseholder(lh), Some(timeout)) => {
-                Some(Realtime::new(lh.headroom, timeout, Arc::clone(&metrics)))
+    /// The admission point and its metric families, the lifecycle policy's only under it; under that policy, with
+    /// the task that ends the realtime sessions' phases as they time out.
+    pub fn new(config: &config::Admission) -> Arc<Self> {
+        let (metrics, realtime) = match config.policy {
+            Policy::Lifecycle(lifecycle) => {
+                let metrics = LifecycleMetrics::new();
+                let realtime = config
+                    .state_timeout
+                    .map(|timeout| Realtime::new(lifecycle.headroom, timeout, metrics.clone()));
+                (Metrics::new(Some(metrics)), realtime)
             }
-            _ => None,
+            _ => (Metrics::new(None), None),
         };
         // The throttle prices prefills by the frozen box's step model; another engine or GPU needs its own fit.
         let core = match config.step_tokens {
@@ -110,16 +114,16 @@ impl Admission {
             return Ok(None);
         }
         // Background requests are priced where a policy counts their tokens: token-reservation admits by them,
-        // preempt-resubmit counts those its preemptions discard, and policy leaseholder keeps its headroom and
-        // its prefill budget by them.
+        // preempt-resubmit counts those its preemptions discard, and the lifecycle policy's headroom, throttle and
+        // degrade read them.
         let priced = matches!(
             self.policy,
-            Policy::TokenReservation { .. } | Policy::PreemptResubmit | Policy::Leaseholder(_)
+            Policy::TokenReservation { .. } | Policy::PreemptResubmit | Policy::Lifecycle(_)
         );
         let estimated =
             (priced && class == SloClass::Background).then(|| (session.clone(), body_bytes as u64));
-        // Policy leaseholder follows a realtime request's session into its critical window.
-        let turn = (class == SloClass::Realtime && self.leaseholder()).then(|| session.clone());
+        // The lifecycle policy follows a realtime request's session into its critical window.
+        let turn = (class == SloClass::Realtime && self.lifecycle()).then(|| session.clone());
         // Every held request takes the lock, so what can be done before it is. Most requests are admitted at
         // once, so only one that waits has its signal changed under the lock.
         let (sender, signal) = watch::channel(Signal::Admitted);
@@ -187,10 +191,10 @@ impl Admission {
         Ok(Some(ticket))
     }
 
-    /// Lifecycle events the gateway accepted, in the order it received them: policy leaseholder follows the
+    /// Lifecycle events the gateway accepted, in the order it received them: the lifecycle policy follows the
     /// realtime sessions' turns by them.
     pub fn events<'a>(&self, events: impl IntoIterator<Item = &'a LifecycleEvent>) {
-        if !self.leaseholder() {
+        if !self.lifecycle() {
             return;
         }
         let mut state = self.lock();
@@ -208,8 +212,13 @@ impl Admission {
         self.policy
     }
 
-    fn leaseholder(&self) -> bool {
-        matches!(self.policy, Policy::Leaseholder(_))
+    /// The admission point's metric families, for the gateway's registry.
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    fn lifecycle(&self) -> bool {
+        matches!(self.policy, Policy::Lifecycle(_))
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -267,8 +276,8 @@ impl State {
         self.signals.remove(&id)
     }
 
-    /// Policy leaseholder: tells the core how many realtime sessions are in each phase, and carries out what
-    /// that frees.
+    /// The lifecycle policy: tells the core how many realtime sessions are in each phase, and carries out what that
+    /// frees.
     fn turns_changed(&mut self) {
         if let Some(realtime) = &self.realtime {
             let actions = self.core.set_turns(realtime.turns());
@@ -277,7 +286,7 @@ impl State {
         }
     }
 
-    /// Policy leaseholder: notes what the headroom holds back from now on, after a decision that may change it.
+    /// The lifecycle policy: notes what the headroom holds back from now on, after a decision that may change it.
     fn settle(&mut self) {
         if let Some(realtime) = &mut self.realtime {
             realtime.held_back(Instant::now(), self.core.held_back());
@@ -297,13 +306,13 @@ pub(crate) struct Ticket {
     /// The session and body size of a request whose tokens were estimated: its usage informs the next
     /// estimate for the session.
     estimated: Option<(SessionId, u64)>,
-    /// The session of a realtime request under policy leaseholder, whose critical window its end may close.
+    /// The session of a realtime request under the lifecycle policy, whose critical window its end may close.
     turn: Option<SessionId>,
-    /// Why policy leaseholder deferred the request.
+    /// Why the lifecycle policy deferred the request.
     deferred: Option<Deferral>,
     /// Whether it was admitted regardless, after `max_defer_s`.
     aged: bool,
-    /// The reply cap of a realtime request policy leaseholder degraded.
+    /// The reply cap of a realtime request the lifecycle policy degraded.
     reply_cap: Option<u32>,
     /// How long the request waited to be admitted.
     waited: Duration,
@@ -321,7 +330,7 @@ impl Ticket {
         self.waited
     }
 
-    /// Why policy leaseholder deferred the request, if it did.
+    /// Why the lifecycle policy deferred the request, if it did.
     pub fn deferred(&self) -> Option<Deferral> {
         self.deferred
     }
@@ -331,7 +340,7 @@ impl Ticket {
         self.aged
     }
 
-    /// The reply cap of a realtime request policy leaseholder degraded.
+    /// The reply cap of a realtime request the lifecycle policy degraded.
     pub fn reply_cap(&self) -> Option<u32> {
         self.reply_cap
     }
@@ -389,7 +398,7 @@ impl Ticket {
         true
     }
 
-    /// Waits until the request is admitted, for at most `queue_timeout_s`; under policy leaseholder, until it is
+    /// Waits until the request is admitted, for at most `queue_timeout_s`; under the lifecycle policy, until it is
     /// admitted regardless after `max_defer_s`.
     async fn wait(&mut self) -> Result<(), Refusal> {
         if *self.signal.borrow() == Signal::Admitted {
@@ -405,8 +414,8 @@ impl Ticket {
         if !state.core.is_waiting(self.id) {
             return Ok(());
         }
-        if self.admission.leaseholder() {
-            // Policy leaseholder refuses no request for its wait, so that background work is never starved.
+        if self.admission.lifecycle() {
+            // The lifecycle policy refuses no request for its wait, so that background work is never starved.
             let oversize = state.core.age(self.id).unwrap_or_default();
             state.signal(self.id, Signal::Admitted);
             state.settle();

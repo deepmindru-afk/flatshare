@@ -581,13 +581,13 @@ mod tests {
         out
     }
 
-    /// `metrics.txt` is the exposition of a gateway with an admission point before any traffic, every family the
+    /// `metrics.txt` is the exposition of a gateway under the lifecycle policy before any traffic, every family the
     /// gateway exports, its series in the order of their labels: every metric's name, type, help and labels, which
     /// the dashboards' and alerts' checks (`ops/`) read. `LH_GATEWAY_WRITE_METRICS=1` writes it anew (`make metrics`).
     #[test]
     fn the_checked_in_exposition_is_current() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("metrics.txt");
-        let metrics = Metrics::with_harness(&harness::Metrics::new());
+        let metrics = Metrics::with_harness(&harness::Metrics::every());
         // Requests by status and lifecycle events by type have no series before traffic, and a family without
         // one is left out of the exposition: one of each at zero, so that the file names them and their labels.
         create(

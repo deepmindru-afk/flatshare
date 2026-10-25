@@ -1,6 +1,7 @@
-//! The harness's metric families: the admission point's, and those of the realtime sessions' turns that policy
-//! leaseholder follows. A gateway with an admission point registers them in its registry, after its own; one without
-//! has none of them, so a scraper reads them as absent, not zero.
+//! The harness's metric families: the admission point's, and the lifecycle policy's (its deferrals, aging and
+//! degraded replies, and the realtime sessions' turns it follows). A gateway with an admission point registers them
+//! in its registry, after its own, the lifecycle policy's only under it; one without has none of them, so a scraper
+//! reads them as absent, not zero.
 
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -63,7 +64,7 @@ struct StateLabels {
     state: &'static str,
 }
 
-/// The harness's series: cloning a handle shares every one.
+/// The admission point's series: cloning a handle shares every one.
 #[derive(Clone, Debug)]
 pub(crate) struct Metrics {
     admitted: Family<ClassLabels, Counter>,
@@ -72,6 +73,13 @@ pub(crate) struct Metrics {
     refused: Family<RefusalLabels, Counter>,
     resubmits: Family<ClassLabels, Counter>,
     discarded_tokens: Family<ClassLabels, Counter>,
+    /// The lifecycle policy's, under it.
+    lifecycle: Option<LifecycleMetrics>,
+}
+
+/// The lifecycle policy's series: cloning a handle shares every one.
+#[derive(Clone, Debug)]
+pub(crate) struct LifecycleMetrics {
     deferred: Family<ReasonLabels, Counter>,
     deferral: Histograms<ReasonLabels>,
     aged: Family<OversizeLabels, Counter>,
@@ -83,8 +91,8 @@ pub(crate) struct Metrics {
 }
 
 impl Metrics {
-    /// Every series, at zero.
-    pub fn new() -> Self {
+    /// Every series of an admission point, at zero, with the lifecycle policy's under it.
+    pub fn new(lifecycle: Option<LifecycleMetrics>) -> Self {
         let metrics = Self {
             admitted: Family::default(),
             waiting: Family::default(),
@@ -92,14 +100,7 @@ impl Metrics {
             refused: Family::default(),
             resubmits: Family::default(),
             discarded_tokens: Family::default(),
-            deferred: Family::default(),
-            deferral: Family::new_with_constructor(|| Histogram::new(LATENCY_BUCKETS)),
-            aged: Family::default(),
-            degraded: Counter::default(),
-            false_alarms: Counter::default(),
-            false_alarm_token_seconds: Counter::default(),
-            realtime_sessions: Family::default(),
-            state_timeouts: Family::default(),
+            lifecycle,
         };
         for class in SloClass::ALL.map(SloClass::as_str) {
             for reason in Refusal::ALL.map(Refusal::as_str) {
@@ -111,20 +112,13 @@ impl Metrics {
             create(&metrics.resubmits, ClassLabels { class });
             create(&metrics.discarded_tokens, ClassLabels { class });
         }
-        for reason in Deferral::ALL.map(Deferral::as_str) {
-            create(&metrics.deferred, ReasonLabels { reason });
-            create(&metrics.deferral, ReasonLabels { reason });
-        }
-        for oversize in [false, true] {
-            create(&metrics.aged, OversizeLabels { oversize });
-        }
-        for state in Phase::ALL.map(Phase::as_str) {
-            create(&metrics.realtime_sessions, StateLabels { state });
-            if state != Phase::Idle.as_str() {
-                create(&metrics.state_timeouts, StateLabels { state });
-            }
-        }
         metrics
+    }
+
+    /// Every series an admission point can have, the lifecycle policy's too: those of `metrics.txt`.
+    #[cfg(test)]
+    pub fn every() -> Self {
+        Self::new(Some(LifecycleMetrics::new()))
     }
 
     /// Registers every series in `r`, the gateway's registry, in the order of the exposition.
@@ -161,53 +155,9 @@ impl Metrics {
              discarded",
             self.discarded_tokens.clone(),
         );
-        r.register(
-            "admission_deferred",
-            "Background requests policy leaseholder deferred, by what held them back when they arrived: the \
-             headroom of the armed realtime sessions, or the critical window's prefill budget",
-            self.deferred.clone(),
-        );
-        r.register_with_unit(
-            "admission_deferral",
-            "Time from arrival to admission of the background requests policy leaseholder deferred, by what \
-             held them back when they arrived",
-            Unit::Seconds,
-            self.deferral.clone(),
-        );
-        r.register(
-            "admission_aged",
-            "Deferred requests admitted regardless after max_defer_s; oversize: their estimate alone was over \
-             what the headroom leaves background requests",
-            self.aged.clone(),
-        );
-        r.register(
-            "admission_degraded",
-            "Realtime requests whose reply policy leaseholder capped, because the background requests in flight \
-             left less than one turn's headroom free",
-            self.degraded.clone(),
-        );
-        r.register(
-            "admission_false_alarms",
-            "Headroom armings that no realtime request of their session followed: the session left the armed \
-             states, timed out or closed first",
-            self.false_alarms.clone(),
-        );
-        r.register(
-            "admission_false_alarm_token_seconds",
-            "Estimated background tokens the headroom held back during false alarms, times how long",
-            self.false_alarm_token_seconds.clone(),
-        );
-        r.register(
-            "realtime_sessions",
-            "Realtime sessions policy leaseholder follows, by the state of their turn",
-            self.realtime_sessions.clone(),
-        );
-        r.register(
-            "realtime_state_timeouts",
-            "Realtime sessions that stayed in a state of their turn for state_timeout_s without an event, by the \
-             state: a lost or missing event",
-            self.state_timeouts.clone(),
-        );
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.register(r);
+        }
     }
 
     /// Counts a request as waiting at the admission point until the returned guard drops.
@@ -236,32 +186,133 @@ impl Metrics {
         self.resubmits.get_or_create(&labels).inc();
     }
 
-    /// Policy leaseholder deferred a background request.
-    pub fn deferred(&self, reason: Deferral) {
-        let labels = ReasonLabels {
+    pub fn refused(&self, class: SloClass, reason: Refusal) {
+        let labels = RefusalLabels {
+            class: class.as_str(),
             reason: reason.as_str(),
         };
-        self.deferred.get_or_create(&labels).inc();
+        self.refused.get_or_create(&labels).inc();
     }
 
-    /// A deferred background request was admitted after waiting `wait`.
+    /// The lifecycle policy deferred a background request.
+    pub fn deferred(&self, reason: Deferral) {
+        if let Some(lifecycle) = &self.lifecycle {
+            let labels = ReasonLabels {
+                reason: reason.as_str(),
+            };
+            lifecycle.deferred.get_or_create(&labels).inc();
+        }
+    }
+
+    /// A background request the lifecycle policy deferred was admitted after waiting `wait`.
     pub fn deferral(&self, reason: Deferral, wait: Duration) {
-        let labels = ReasonLabels {
-            reason: reason.as_str(),
-        };
-        self.deferral
-            .get_or_create(&labels)
-            .observe(wait.as_secs_f64());
+        if let Some(lifecycle) = &self.lifecycle {
+            let labels = ReasonLabels {
+                reason: reason.as_str(),
+            };
+            lifecycle
+                .deferral
+                .get_or_create(&labels)
+                .observe(wait.as_secs_f64());
+        }
     }
 
     /// A deferred request was admitted regardless.
     pub fn aged(&self, oversize: bool) {
-        self.aged.get_or_create(&OversizeLabels { oversize }).inc();
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle
+                .aged
+                .get_or_create(&OversizeLabels { oversize })
+                .inc();
+        }
     }
 
-    /// A realtime request's reply was capped.
+    /// A realtime request's reply was degraded.
     pub fn degraded(&self) {
-        self.degraded.inc();
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.degraded.inc();
+        }
+    }
+}
+
+impl LifecycleMetrics {
+    /// Every series, at zero.
+    pub fn new() -> Self {
+        let metrics = Self {
+            deferred: Family::default(),
+            deferral: Family::new_with_constructor(|| Histogram::new(LATENCY_BUCKETS)),
+            aged: Family::default(),
+            degraded: Counter::default(),
+            false_alarms: Counter::default(),
+            false_alarm_token_seconds: Counter::default(),
+            realtime_sessions: Family::default(),
+            state_timeouts: Family::default(),
+        };
+        for reason in Deferral::ALL.map(Deferral::as_str) {
+            create(&metrics.deferred, ReasonLabels { reason });
+            create(&metrics.deferral, ReasonLabels { reason });
+        }
+        for oversize in [false, true] {
+            create(&metrics.aged, OversizeLabels { oversize });
+        }
+        for state in Phase::ALL.map(Phase::as_str) {
+            create(&metrics.realtime_sessions, StateLabels { state });
+            if state != Phase::Idle.as_str() {
+                create(&metrics.state_timeouts, StateLabels { state });
+            }
+        }
+        metrics
+    }
+
+    /// Registers every series in `r`, the gateway's registry, in the order of the exposition.
+    fn register(&self, r: &mut Registry) {
+        r.register(
+            "admission_deferred",
+            "Background requests the lifecycle policy deferred, by what held them back when they arrived: the \
+             headroom of the armed realtime sessions, or the critical window's prefill budget",
+            self.deferred.clone(),
+        );
+        r.register_with_unit(
+            "admission_deferral",
+            "Time from arrival to admission of the background requests the lifecycle policy deferred, by what \
+             held them back when they arrived",
+            Unit::Seconds,
+            self.deferral.clone(),
+        );
+        r.register(
+            "admission_aged",
+            "Deferred requests admitted regardless after max_defer_s; oversize: their estimate alone was over \
+             what the headroom leaves background requests",
+            self.aged.clone(),
+        );
+        r.register(
+            "admission_degraded",
+            "Realtime requests whose reply the lifecycle policy capped, because the background requests in flight \
+             left less than one turn's headroom free",
+            self.degraded.clone(),
+        );
+        r.register(
+            "admission_false_alarms",
+            "Headroom armings that no realtime request of their session followed: the session left the armed \
+             states, timed out or closed first",
+            self.false_alarms.clone(),
+        );
+        r.register(
+            "admission_false_alarm_token_seconds",
+            "Estimated background tokens the headroom held back during false alarms, times how long",
+            self.false_alarm_token_seconds.clone(),
+        );
+        r.register(
+            "realtime_sessions",
+            "Realtime sessions the lifecycle policy follows, by the state of their turn",
+            self.realtime_sessions.clone(),
+        );
+        r.register(
+            "realtime_state_timeouts",
+            "Realtime sessions that stayed in a state of their turn for state_timeout_s without an event, by the \
+             state: a lost or missing event",
+            self.state_timeouts.clone(),
+        );
     }
 
     /// A headroom arming ended with no realtime request, having held back `token_seconds` of background work.
@@ -284,14 +335,6 @@ impl Metrics {
             state: phase.as_str(),
         };
         self.state_timeouts.get_or_create(&labels).inc();
-    }
-
-    pub fn refused(&self, class: SloClass, reason: Refusal) {
-        let labels = RefusalLabels {
-            class: class.as_str(),
-            reason: reason.as_str(),
-        };
-        self.refused.get_or_create(&labels).inc();
     }
 
     /// The false alarms, and their token-seconds.

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use lh_core::FROZEN_BOX_POOL_TOKENS;
-use lh_core::admission::{Ceilings, Leaseholder, Policy, Trigger};
+use lh_core::admission::{Ceilings, Lifecycle, Policy, Trigger};
 use serde::Deserialize;
 
 use crate::config::seconds;
@@ -15,13 +15,13 @@ pub struct Admission {
     pub policy: Policy,
     /// The requests each class's queue may hold; a request that would wait beyond them gets 429.
     pub queue_limit: usize,
-    /// How long a request may wait: `queue_timeout_s`, after which it gets 503, or under policy leaseholder,
+    /// How long a request may wait: `queue_timeout_s`, after which it gets 503, or under the lifecycle policy,
     /// which refuses no request for its wait, `max_defer_s`, after which it is admitted regardless.
     pub max_wait: Duration,
     /// How long a realtime session stays in a state of its turn that no event moves it on from
-    /// (`state_timeout_s`). Only policy leaseholder keeps the sessions' states.
+    /// (`state_timeout_s`). Only the lifecycle policy keeps the sessions' states.
     pub state_timeout: Option<Duration>,
-    /// The engine's step budget (`max_num_batched_tokens`), in whose steps policy leaseholder's throttle prices a
+    /// The engine's step budget (`max_num_batched_tokens`), in whose steps the lifecycle policy's throttle prices a
     /// background request's prefill; `None` without the throttle.
     pub step_tokens: Option<u64>,
 }
@@ -67,7 +67,9 @@ enum PolicyName {
     TokenReservation,
     FlowControl,
     PreemptResubmit,
-    Leaseholder,
+    /// The lifecycle policy; `leaseholder`, its name until 2026-10-25, is what E2's arm files say.
+    #[serde(alias = "leaseholder")]
+    Lifecycle,
 }
 
 impl PolicyName {
@@ -78,12 +80,12 @@ impl PolicyName {
             Self::TokenReservation => "token-reservation",
             Self::FlowControl => "flow-control",
             Self::PreemptResubmit => "preempt-resubmit",
-            Self::Leaseholder => "leaseholder",
+            Self::Lifecycle => "lifecycle",
         }
     }
 }
 
-/// `trigger`: what arms policy leaseholder's headroom.
+/// `trigger`: what arms the lifecycle policy's headroom.
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum TriggerName {
@@ -108,7 +110,7 @@ impl RawAdmission {
             ],
             PolicyName::FlowControl => &["ceilings", "queue_limit", "queue_timeout_s"],
             PolicyName::PreemptResubmit => &["queue_limit", "queue_timeout_s"],
-            PolicyName::Leaseholder => &[
+            PolicyName::Lifecycle => &[
                 "pool_tokens",
                 "headroom",
                 "headroom_tokens",
@@ -155,8 +157,8 @@ impl RawAdmission {
         }
         // SMG's bulk class queues 1,024 requests.
         let queue_limit = self.queue_limit.unwrap_or(1024);
-        if let PolicyName::Leaseholder = self.policy {
-            return self.leaseholder(queue_limit).map(Some);
+        if let PolicyName::Lifecycle = self.policy {
+            return self.lifecycle(queue_limit).map(Some);
         }
         let needs = |key: &str| format!("admission: policy {name} needs {key}");
         let policy = match self.policy {
@@ -213,7 +215,7 @@ impl RawAdmission {
                 }
             }
             PolicyName::PreemptResubmit => Policy::PreemptResubmit,
-            PolicyName::Leaseholder => unreachable!("validated above"),
+            PolicyName::Lifecycle => unreachable!("validated above"),
         };
         Ok(Some(Admission {
             policy,
@@ -229,9 +231,9 @@ impl RawAdmission {
         }))
     }
 
-    /// Policy leaseholder. Each mechanism is on unless switched off, needs its own keys while it is on, and
+    /// The lifecycle policy. Each mechanism is on unless switched off, needs its own keys while it is on, and
     /// takes none while it is off.
-    fn leaseholder(self, queue_limit: usize) -> Result<Admission, String> {
+    fn lifecycle(self, queue_limit: usize) -> Result<Admission, String> {
         let headroom = self.headroom.unwrap_or(true);
         let throttle = self.throttle.unwrap_or(true);
         let degrade = self.degrade.unwrap_or(true);
@@ -272,9 +274,8 @@ impl RawAdmission {
                 return Err(format!("admission.{key} does not apply with {off}"));
             }
         }
-        let needs = |key: &str, off: &str| {
-            format!("admission: policy leaseholder needs {key}, unless {off}")
-        };
+        let needs =
+            |key: &str, off: &str| format!("admission: policy lifecycle needs {key}, unless {off}");
         let pool_tokens = self.pool_tokens.unwrap_or(FROZEN_BOX_POOL_TOKENS);
         let headroom_tokens = match self.headroom_tokens {
             Some(tokens) if (1..pool_tokens).contains(&tokens) => tokens,
@@ -315,13 +316,13 @@ impl RawAdmission {
             None | Some(TriggerName::Onset) => Trigger::Onset,
             Some(TriggerName::Request) => Trigger::Request,
         };
-        let policy = Policy::Leaseholder(Leaseholder {
+        let lifecycle = Lifecycle {
             pool_tokens,
             headroom_tokens,
             headroom: headroom.then_some(trigger),
             critical_prefill_budget,
             degrade_max_tokens,
-        });
+        };
         // Longer than an E2 caller's turn is armed (about 4 s from speech onset to the reply's first audio), so
         // aging admits only what a stuck or unbroken arming holds back.
         let max_defer_s = self.max_defer_s.unwrap_or(10.0);
@@ -329,7 +330,7 @@ impl RawAdmission {
         // audio), so only a lost event ends a state by timeout.
         let state_timeout_s = self.state_timeout_s.unwrap_or(10.0);
         Ok(Admission {
-            policy,
+            policy: Policy::Lifecycle(lifecycle),
             queue_limit,
             max_wait: seconds("admission.max_defer_s", max_defer_s)?,
             state_timeout: Some(seconds("admission.state_timeout_s", state_timeout_s)?),
@@ -449,13 +450,31 @@ mod tests {
     }
 
     #[test]
-    fn policy_leaseholder_switches_each_mechanism_with_its_own_keys() {
+    fn leaseholder_is_the_lifecycle_policys_name_in_e2s_arm_files() {
+        let keys =
+            "headroom_tokens = 1024\ncritical_prefill_budget_ms = 150\ndegrade_max_tokens = 16";
+        let lifecycle = parse(&format!("policy = \"lifecycle\"\n{keys}")).unwrap();
+        assert!(matches!(
+            lifecycle,
+            Some(Admission {
+                policy: Policy::Lifecycle(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            parse(&format!("policy = \"leaseholder\"\n{keys}")).unwrap(),
+            lifecycle
+        );
+    }
+
+    #[test]
+    fn the_lifecycle_policy_switches_each_mechanism_with_its_own_keys() {
         let admission =
-            |keys: &str| parse(&format!("policy = \"leaseholder\"\n{keys}")).map(Option::unwrap);
+            |keys: &str| parse(&format!("policy = \"lifecycle\"\n{keys}")).map(Option::unwrap);
         let all =
             "headroom_tokens = 1024\ncritical_prefill_budget_ms = 250\ndegrade_max_tokens = 24";
         let arm9 = admission(all).unwrap();
-        let full = Leaseholder {
+        let full = Lifecycle {
             pool_tokens: FROZEN_BOX_POOL_TOKENS,
             headroom_tokens: 1024,
             headroom: Some(Trigger::Onset),
@@ -465,7 +484,7 @@ mod tests {
         assert_eq!(
             arm9,
             Admission {
-                policy: Policy::Leaseholder(full),
+                policy: Policy::Lifecycle(full),
                 queue_limit: 1024,
                 max_wait: Duration::from_secs(10),
                 state_timeout: Some(Duration::from_secs(10)),
@@ -477,12 +496,12 @@ mod tests {
              queue_limit = 16\nmax_num_batched_tokens = 1024"
         ))
         .unwrap();
-        let request = Leaseholder {
+        let request = Lifecycle {
             pool_tokens: 20_000,
             headroom: Some(Trigger::Request),
             ..full
         };
-        assert_eq!(tuned.policy, Policy::Leaseholder(request));
+        assert_eq!(tuned.policy, Policy::Lifecycle(request));
         assert_eq!(
             (tuned.queue_limit, tuned.max_wait, tuned.state_timeout),
             (
@@ -495,13 +514,13 @@ mod tests {
 
         // The ablations: each mechanism off, without its keys.
         let ablation = |keys: &str| match admission(keys).unwrap().policy {
-            Policy::Leaseholder(lh) => lh,
+            Policy::Lifecycle(lh) => lh,
             other => panic!("{other:?}"),
         };
         let no_throttle = "headroom_tokens = 1024\ndegrade_max_tokens = 24\nthrottle = false";
         assert_eq!(
             ablation(no_throttle),
-            Leaseholder {
+            Lifecycle {
                 critical_prefill_budget: None,
                 ..full
             }
@@ -511,7 +530,7 @@ mod tests {
                            degrade_max_tokens = 24";
         assert_eq!(
             ablation(no_headroom),
-            Leaseholder {
+            Lifecycle {
                 headroom: None,
                 ..full
             }
@@ -520,7 +539,7 @@ mod tests {
             "headroom_tokens = 1024\ncritical_prefill_budget_ms = 250\ndegrade = false";
         assert_eq!(
             ablation(no_degrade),
-            Leaseholder {
+            Lifecycle {
                 degrade_max_tokens: None,
                 ..full
             }
@@ -528,7 +547,7 @@ mod tests {
         let throttle_alone = "headroom = false\ndegrade = false\ncritical_prefill_budget_ms = 0";
         assert_eq!(
             ablation(throttle_alone),
-            Leaseholder {
+            Lifecycle {
                 headroom_tokens: 0,
                 headroom: None,
                 critical_prefill_budget: Some(Duration::ZERO),
@@ -540,7 +559,7 @@ mod tests {
         for (keys, cause) in [
             (
                 "",
-                "leaseholder needs headroom_tokens, unless headroom = false and degrade = false",
+                "lifecycle needs headroom_tokens, unless headroom = false and degrade = false",
             ),
             (
                 "headroom_tokens = 1024\ndegrade_max_tokens = 24",
@@ -576,7 +595,7 @@ mod tests {
             ),
             (
                 &format!("{all}\nqueue_timeout_s = 60"),
-                "queue_timeout_s does not apply to policy leaseholder",
+                "queue_timeout_s does not apply to policy lifecycle",
             ),
             (
                 "headroom_tokens = 36400\ncritical_prefill_budget_ms = 250\ndegrade_max_tokens = 24",
