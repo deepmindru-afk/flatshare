@@ -27,6 +27,14 @@ fn lifecycle(keys: &str) -> String {
     format!("[admission]\npolicy = \"lifecycle\"\npool_tokens = 1000\n{keys}")
 }
 
+/// The lifecycle policy's throttle alone, which reads no pool, with a budget of `budget_ms`.
+fn throttle_alone(budget_ms: u32) -> String {
+    format!(
+        "[admission]\npolicy = \"lifecycle\"\nheadroom = false\ndegrade = false\n\
+         critical_prefill_budget_ms = {budget_ms}"
+    )
+}
+
 /// A background request of the agents tenant, named `tag`, whose answer the mock engine holds.
 fn background(tag: &'static str) -> Vec<(&'static str, &'static str)> {
     vec![AGENTS_AUTH, (TAG, tag), (GATE, "1")]
@@ -124,8 +132,7 @@ async fn background_waits_while_a_turn_is_imminent_and_goes_after_it() {
 async fn the_critical_window_spends_a_budget_of_predicted_prefill_time() {
     let mock = Mock::start(Script::Json("{}")).await;
     // The throttle alone: 100 ms of prefill per window, and each cold 600-token prompt takes 55 ms.
-    let keys = "headroom = false\ndegrade = false\ncritical_prefill_budget_ms = 100";
-    let gw = Gateway::start(mock.addr, &lifecycle(keys)).await;
+    let gw = Gateway::start(mock.addr, &throttle_alone(100)).await;
     post(&gw, &[("vw-1", "user_turn_ended")]).await;
     gw.await_metric(&sessions("critical"), 1.0).await;
     let first = spawn_call(&gw.tcp, background("bg1"), six_hundred());
@@ -306,8 +313,7 @@ async fn a_state_no_event_ends_times_out_and_its_arming_is_a_false_alarm() {
 async fn without_events_a_realtime_request_is_its_own_critical_window() {
     let mock = Mock::start(Script::Json("{}")).await;
     // The throttle admits no background prefill in a window.
-    let keys = "headroom = false\ndegrade = false\ncritical_prefill_budget_ms = 0";
-    let gw = Gateway::start(mock.addr, &lifecycle(keys)).await;
+    let gw = Gateway::start(mock.addr, &throttle_alone(0)).await;
     let voice = spawn_call(&gw.unix, realtime("rt", true), CHAT);
     mock.await_requests(1).await;
     gw.await_metric(&sessions("critical"), 1.0).await;

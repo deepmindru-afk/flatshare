@@ -83,7 +83,9 @@ default_class = "background"
 # max_defer_s = 10
 # state_timeout_s = 10
 # An ablation switches one mechanism off and drops its keys: headroom = false (and trigger), throttle = false
-# (and critical_prefill_budget_ms, max_num_batched_tokens), degrade = false (and degrade_max_tokens).
+# (and critical_prefill_budget_ms, max_num_batched_tokens), degrade = false (and degrade_max_tokens). With two off,
+# the keys only they read go too: pool_tokens and headroom_tokens without the headroom and degrade, max_defer_s and
+# queue_limit without the headroom and the throttle.
 #
 # Every policy's queues (lifecycle refuses no request for its wait, and takes no queue_timeout_s):
 # queue_limit = 1024

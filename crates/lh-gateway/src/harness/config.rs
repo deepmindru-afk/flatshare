@@ -27,7 +27,8 @@ pub struct Admission {
 }
 
 /// `[admission]` as written. Each key but `policy` belongs to some of the policies, and setting it for another
-/// one is an error, so no setting silently does nothing; nor is a key of a mechanism switched off.
+/// one is an error, so no setting silently does nothing; nor, under the lifecycle policy, is a key that no
+/// mechanism switched on reads.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawAdmission {
@@ -231,13 +232,16 @@ impl RawAdmission {
         }))
     }
 
-    /// The lifecycle policy. Each mechanism is on unless switched off, needs its own keys while it is on, and
-    /// takes none while it is off.
+    /// The lifecycle policy. Each mechanism is on unless switched off and needs its own keys while it is on, and a
+    /// key may be set only while a mechanism that reads it is on.
     fn lifecycle(self, queue_limit: usize) -> Result<Admission, String> {
         let headroom = self.headroom.unwrap_or(true);
         let throttle = self.throttle.unwrap_or(true);
         let degrade = self.degrade.unwrap_or(true);
+        // The headroom and degrade read the pool and a turn's headroom; the mechanisms that hold requests back,
+        // the headroom and the throttle, read the queue and how long a request may be deferred.
         let sizing = headroom || degrade;
+        let holding = headroom || throttle;
         for (key, set, on, off) in [
             (
                 "trigger",
@@ -268,6 +272,24 @@ impl RawAdmission {
                 self.headroom_tokens.is_some(),
                 sizing,
                 "headroom = false and degrade = false",
+            ),
+            (
+                "pool_tokens",
+                self.pool_tokens.is_some(),
+                sizing,
+                "headroom = false and degrade = false",
+            ),
+            (
+                "max_defer_s",
+                self.max_defer_s.is_some(),
+                holding,
+                "headroom = false and throttle = false",
+            ),
+            (
+                "queue_limit",
+                self.queue_limit.is_some(),
+                holding,
+                "headroom = false and throttle = false",
             ),
         ] {
             if set && !on {
@@ -624,5 +646,40 @@ mod tests {
             err.contains("max_defer_s does not apply to policy static-cap"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_lifecycle_key_applies_only_while_a_mechanism_that_reads_it_is_on() {
+        let admission =
+            |keys: &str| parse(&format!("policy = \"lifecycle\"\n{keys}")).map(Option::unwrap);
+        // The throttle alone reads no pool; degrade alone defers nothing, so ages nothing and queues nothing.
+        let throttle_alone = "headroom = false\ndegrade = false\ncritical_prefill_budget_ms = 100";
+        let degrade_alone =
+            "headroom = false\nthrottle = false\nheadroom_tokens = 200\ndegrade_max_tokens = 16";
+        for (keys, cause) in [
+            (
+                format!("{throttle_alone}\npool_tokens = 1000"),
+                "pool_tokens does not apply with headroom = false and degrade = false",
+            ),
+            (
+                format!("{degrade_alone}\nmax_defer_s = 5"),
+                "max_defer_s does not apply with headroom = false and throttle = false",
+            ),
+            (
+                format!("{degrade_alone}\nqueue_limit = 16"),
+                "queue_limit does not apply with headroom = false and throttle = false",
+            ),
+        ] {
+            let err = admission(&keys).unwrap_err();
+            assert!(err.contains(cause), "{keys}: {err}");
+        }
+        // Each is read while one mechanism that reads it is on, and the sessions are followed with every one off.
+        for keys in [
+            format!("{degrade_alone}\npool_tokens = 1000"),
+            format!("{throttle_alone}\nmax_defer_s = 5\nqueue_limit = 16"),
+            "headroom = false\nthrottle = false\ndegrade = false\nstate_timeout_s = 30".to_owned(),
+        ] {
+            assert!(admission(&keys).is_ok(), "{keys}");
+        }
     }
 }
