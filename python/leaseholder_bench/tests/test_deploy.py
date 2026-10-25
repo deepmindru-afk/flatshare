@@ -122,3 +122,71 @@ def test_cyans_install_makes_the_gateways_secret_and_metrics_key_once(tmp_path: 
     subprocess.run(install, env=env, check=True, capture_output=True)
     assert [path.read_text() for path in files] == made
     assert sorted(p.name for p in config.iterdir()) == ["cache-salt-secret", "metrics-key"]
+
+
+FAKE_SYSTEMCTL = """\
+#!/bin/sh
+# systemctl --user ...: a GPU node's user manager, every unit running; logs each call that changes something.
+shift
+if [ "$1" = is-active ]; then
+  shift
+  [ "$1" = -q ] || for unit; do echo active; done
+  exit 0
+fi
+echo "$*" >>"$HOME/systemctl.log"
+"""
+
+
+def test_the_engine_serves_its_development_routes_only_with_the_measurement_drop_in(
+    tmp_path: Path,
+) -> None:
+    unit = (DEPLOY / "phastform" / "systemd" / "lh-engine.service").read_text()
+    assert "VLLM_SERVER_DEV_MODE" not in unit
+    measure = DEPLOY / "phastform" / "measure" / "lh-engine.conf"
+    assert "Environment=VLLM_SERVER_DEV_MODE=1" in measure.read_text().splitlines()
+
+    home, bin_dir = tmp_path / "home", tmp_path / "bin"
+    home.mkdir()
+    bin_dir.mkdir()
+    (bin_dir / "systemctl").write_text(FAKE_SYSTEMCTL)
+    (bin_dir / "systemctl").chmod(0o755)
+    env = os.environ | {"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    drop_in = home / ".config" / "systemd" / "user" / "lh-engine.service.d" / "measure.conf"
+    log = home / "systemctl.log"
+
+    def variant(*args: str) -> str:
+        done = subprocess.run(
+            ["bash", str(DEPLOY / "phastform" / "variant.sh"), *args],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert done.returncode == 0, done.stderr
+        return done.stdout
+
+    # On: linked, and the running engine restarts to take it; asking again changes nothing.
+    variant("measure", "on")
+    assert drop_in.resolve() == measure
+    assert log.read_text().splitlines() == [
+        "daemon-reload",
+        "reset-failed lh-engine",
+        "restart lh-engine",
+    ]
+    log.unlink()
+    assert variant("measure", "on") == "variant: the measurement drop-in is already on\n"
+    assert not log.exists()
+    # Switching the engine's variant keeps it.
+    variant("use", "pr54530")
+    assert drop_in.resolve() == measure
+    assert (drop_in.parent / "variant-pr54530.conf").exists()
+    variant("use", "frozen")
+    assert drop_in.resolve() == measure
+    # Off: removed, and the engine restarts without the development routes.
+    log.unlink()
+    variant("measure", "off")
+    assert not drop_in.exists()
+    assert log.read_text().splitlines() == [
+        "daemon-reload",
+        "reset-failed lh-engine",
+        "restart lh-engine",
+    ]

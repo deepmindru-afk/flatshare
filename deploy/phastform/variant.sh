@@ -2,19 +2,45 @@
 # variant.sh on|off NAME: apply or remove a variant of the frozen box, then restart it.
 # variant.sh use NAME|frozen [FLAG...]: make NAME the box's only variant (frozen: none) and FLAG... the engine's extra
 # flags, restarting only what that changes; benchmarks/e2/campaign.sh switches the box this way before each point.
+# variant.sh measure on|off: link or remove the measurement drop-in (measure/lh-engine.conf, vLLM's development routes,
+# which E2 and the drills read) as lh-engine.service.d/measure.conf, restarting a running engine when that changes it.
+# use, on and off keep it as it is.
 # A variant is a directory variants/NAME/ of systemd drop-ins, one UNIT.conf per unit it changes. Each is linked into
 # ~/.config/systemd/user/UNIT.service.d/ as variant-NAME.conf. Engine flags go into a generated drop-in,
 # lh-engine.service.d/variant-flags.conf, that sets LH_ENGINE_FLAGS: they beat engine.yaml and the variant's own
 # flags. A restart takes ~2 min with warm caches (variants/README.md lists the variants).
 set -euo pipefail
-action=${1:?on|off|use} name=${2:?variant name}
+action=${1:?on|off|use|measure} name=${2:?variant name}
 shift 2
-[[ $action == on || $action == off || $action == use ]] || { echo "variant: action must be on, off or use" >&2; exit 2; }
+[[ $action == on || $action == off || $action == use || $action == measure ]] ||
+  { echo "variant: action must be on, off, use or measure" >&2; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
-[[ $action == use && $name == frozen ]] || [[ -d $here/variants/$name ]] ||
-  { echo "variant: no such variant: $here/variants/$name" >&2; exit 2; }
 units=$HOME/.config/systemd/user
 box=(leaseholder.target lh-engine lh-stt lh-tts)
+
+if [[ $action == measure ]]; then
+  [[ $name == on || $name == off ]] || { echo "variant: measure on or measure off" >&2; exit 2; }
+  drop_in=$units/lh-engine.service.d/measure.conf
+  if [[ $name == on && $(readlink "$drop_in" || true) != "$here/measure/lh-engine.conf" ]]; then
+    mkdir -p "$units/lh-engine.service.d"
+    ln -sfn "$here/measure/lh-engine.conf" "$drop_in"
+  elif [[ $name == off && ( -e $drop_in || -L $drop_in ) ]]; then
+    rm -f "$drop_in"
+  else
+    echo "variant: the measurement drop-in is already $name"
+    exit
+  fi
+  systemctl --user daemon-reload
+  # A stopped engine takes it at its next start; a running one restarts, keeping the audio servers.
+  if systemctl --user is-active -q lh-engine; then
+    systemctl --user reset-failed lh-engine 2>/dev/null || true
+    systemctl --user restart lh-engine
+  fi
+  echo "variant: the measurement drop-in is $name"
+  exit
+fi
+[[ $action == use && $name == frozen ]] || [[ -d $here/variants/$name ]] ||
+  { echo "variant: no such variant: $here/variants/$name" >&2; exit 2; }
 
 link() { # link NAME: link NAME's drop-ins into their units
   local conf unit

@@ -9,6 +9,17 @@ Every experiment runs on the frozen box ([`engine.yaml`](../engine.yaml) and the
 
 `variant.sh on|off NAME` adds or removes one variant and restarts the box, for work outside E2.
 
+## The measurement drop-in
+
+`lh-engine.service` runs vLLM without its development mode, so a production box serves none of its development or RL routes. A measured box needs two of them: `lh-bench e2 run` reads the engine's configuration from `/server_info` and empties its prefix cache with `/reset_prefix_cache` between points, and the drills read `/server_info`. [`measure/lh-engine.conf`](../measure/lh-engine.conf) sets `VLLM_SERVER_DEV_MODE=1`; `variant.sh measure on|off` links it as `lh-engine.service.d/measure.conf` or removes it and restarts a running engine (only the engine), `variant.sh use`, `on` and `off` keep it, and `benchmarks/e2/campaign.sh` turns it on before each point. Without it, `lh-bench e2 run` fails at its engine check and names the command. What vLLM 0.32.0 serves (`vllm/entrypoints/launchers/api_server/routers.py`, and the engine's own list of routes at start):
+
+| Box | Routes |
+|---|---|
+| Production and measured | The OpenAI API (`/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/models`, `/v1/messages` and the others under `/v1`), `/inference/v1/generate`, `/health`, `/ping`, `/load`, `/version`, `/metrics`, `/tokenize`, `/detokenize`, `/invocations`, `/kv_event_sources`, the render routes and `/scale_elastic_ep` |
+| Measured only (the drop-in) | Development: `/reset_prefix_cache`, `/reset_mm_cache`, `/reset_encoder_cache`, `/collective_rpc`, `/server_info`, `/sleep`, `/wake_up`, `/is_sleeping`, `/release_kv_cache_memory`. RL: `/pause`, `/resume`, `/is_paused`, `/abort_requests`, `/init_weight_transfer_engine`, `/shutdown_weight_transfer_engine`, `/start_weight_update`, `/start_draft_weight_update`, `/update_weights`, `/finish_weight_update`, `/update_weight_version`, `/weight_info`, `/weight_checker`, `/get_world_size` |
+
+The `sglang` variant serves SGLang's own routes, `/server_info` and `/flush_cache` among them, with or without the drop-in.
+
 ## Variants
 
 | Variant | Units | What it changes | E2 arm |
