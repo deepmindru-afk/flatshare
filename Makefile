@@ -16,7 +16,8 @@ PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py benchma
 E2_RESULTS := benchmarks/results/2026-10-23-e2
 E2_REPORT ?= build/reproduce-e2
 
-.PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-python schema metrics \
+.PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-make-room-ci \
+  test-python schema metrics \
   reproduce-e1 reproduce-calibration reproduce-e2 e2-figures forecast-a100 profiles reproduce-a100 check-a100-calibration
 
 check: lint test
@@ -49,10 +50,16 @@ $(VLLM_SRC):
 test-vllm: $(VLLM_SRC)
 	cd python/leaseholder_vllm && VLLM_SRC=$(VLLM_SRC) uv run -q --extra test pytest -q
 
+# The CPU suites' imports, checked before pytest runs: without one of them pytest would skip a suite, not fail it.
+CPU_SUITE_IMPORTS = cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -c \
+  'import aiohttp, pytest, torch, vllm.v1.core.sched.scheduler' || { echo "$(TORCH_PYTHON) cannot import aiohttp, \
+  pytest, torch or vLLM's scheduler from $(VLLM_SRC)" >&2; exit 1; }
+
 # The make-room variant's behavior suite on vLLM's real v1 scheduler, on CPU, outside make check: it needs an
 # interpreter with CPU torch 2.13 and vLLM 0.32.0's Python dependencies, and runs on the source checkout.
 test-make-room: $(VLLM_SRC)
 	@test -n "$(TORCH_PYTHON)" || { echo "usage: make test-make-room TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies>" >&2; exit 2; }
+	@$(CPU_SUITE_IMPORTS)
 	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -m pytest -q -p no:cacheprovider \
 	  tests/test_make_room.py tests/test_tail.py
 
@@ -62,8 +69,21 @@ test-make-room: $(VLLM_SRC)
 TRACE_SEEDS ?= 20
 test-trace: $(VLLM_SRC)
 	@test -n "$(TORCH_PYTHON)" || { echo "usage: make test-trace TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies> [TRACE_SEEDS=100]" >&2; exit 2; }
+	@$(CPU_SUITE_IMPORTS)
 	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) TRACE_SEEDS=$(TRACE_SEEDS) $(TORCH_PYTHON) -m pytest -q -p no:cacheprovider \
 	  tests/test_trace.py
+
+# Both CPU suites as CI's make-room job runs them: in the environment python/leaseholder_vllm/requirements-cpu.txt pins
+# (Python 3.12 on Linux x86_64, CPU torch), which uv builds in CPU_ENV, and with every test required to run
+# (LH_NO_SKIPS: a skip fails the session, tests/conftest.py).
+CPU_ENV ?= build/cpu-env
+$(CPU_ENV)/synced: python/leaseholder_vllm/requirements-cpu.txt
+	uv venv -q --allow-existing --python 3.12 $(CPU_ENV)
+	uv pip sync -q --python $(CPU_ENV)/bin/python --torch-backend cpu $<
+	@touch $@
+
+test-make-room-ci: $(CPU_ENV)/synced
+	LH_NO_SKIPS=1 $(MAKE) --no-print-directory test-make-room test-trace TORCH_PYTHON=$(abspath $(CPU_ENV))/bin/python
 
 # Integration tests need hosts (a LiveKit server, a running engine); CI runs everything else.
 test-python:
