@@ -1,4 +1,4 @@
-"""The make-room engine variant (deploy/phastform/variants/make-room) on vLLM's real v1 scheduler, on CPU: hand-made
+"""The make-room engine variant (src/leaseholder_vllm/make-room) on vLLM's real v1 scheduler, on CPU: hand-made
 requests, no model and no GPU, as vLLM's own tests/v1/core build a scheduler.
 
 The module under test is built from the installed vLLM's source, as the variant builds it at engine start, so these
@@ -6,7 +6,6 @@ tests need vLLM with torch: the engine environment on a GPU node (python/leaseho
 them there). Without them, as in CI, they skip.
 """
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -36,7 +35,7 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-BUILD = Path(__file__).resolve().parents[3] / "deploy/phastform/variants/make-room/build.py"
+BUILD = Path(__file__).resolve().parents[1] / "src/leaseholder_vllm/build.py"
 BLOCK = 16
 TOKEN = 7  # every sampled token; requests ignore EOS
 
@@ -48,7 +47,9 @@ def module(tmp_path_factory):
     """The generated lh_make_room_scheduler module."""
     out = tmp_path_factory.mktemp("make-room")
     subprocess.run(
-        [sys.executable, str(BUILD), "--source-tree", str(out)], check=True, capture_output=True
+        [sys.executable, str(BUILD), "make-room", str(out), "--source-tree"],
+        check=True,
+        capture_output=True,
     )
     sys.path.insert(0, str(out))
     try:
@@ -56,26 +57,6 @@ def module(tmp_path_factory):
     finally:
         sys.path.remove(str(out))
     return lh_make_room_scheduler
-
-
-@pytest.fixture(scope="session")
-def model(tmp_path_factory) -> str:
-    """A model directory with only a config: the scheduler reads the model's configuration, never its weights."""
-    path = tmp_path_factory.mktemp("model")
-    config = {
-        "architectures": ["LlamaForCausalLM"],
-        "model_type": "llama",
-        "hidden_size": 64,
-        "intermediate_size": 128,
-        "num_attention_heads": 4,
-        "num_key_value_heads": 4,
-        "num_hidden_layers": 1,
-        "vocab_size": 1024,
-        "max_position_embeddings": 4096,
-        "torch_dtype": "float16",
-    }
-    (path / "config.json").write_text(json.dumps(config))
-    return str(path)
 
 
 class Connector:

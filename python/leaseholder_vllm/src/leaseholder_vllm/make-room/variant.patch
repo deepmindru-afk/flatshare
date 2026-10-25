@@ -1,0 +1,233 @@
+What only Leaseholder's make-room variant has, on #63350 and #63351: the switches from
+--additional-config's make_room table, the reserve, and the counters with their log line.
+
+The scheduler.py part of these commits on vLLM v0.32.0 (5df63a720):
+
+  2069a439d Leaseholder make-room variant: switches, reserve and counters
+
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index fbf085e5c..1635b5d1b 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -79,6 +79,8 @@ from vllm.v1.structured_output.utils import strip_speculative_padding
+ from vllm.v1.utils import record_function_or_nullcontext
+ 
+ logger = init_logger(__name__)
++# Log as vLLM's scheduler does: vLLM's logging covers its loggers only.
++logger = init_logger("vllm.v1.core.sched.scheduler")
+ 
+ 
+ class Scheduler(SchedulerInterface):
+@@ -371,21 +373,39 @@ class Scheduler(SchedulerInterface):
+         self.scheduler_reserve_full_isl = (
+             self.scheduler_config.scheduler_reserve_full_isl
+         )
+-        self.max_priority_preemptions_per_step = (
+-            self.scheduler_config.max_priority_preemptions_per_step
++        # Make room for waiting requests of a higher priority: preempt running
++        # requests of a lower priority for their KV, hold lower-priority prefill
++        # back for a request's first tokens, and keep a KV reserve that requests
++        # of a positive priority value leave free.
++        make_room = self._make_room_switches(
++            vllm_config.additional_config.get("make_room", {})
+         )
++        self.max_priority_preemptions_per_step = make_room["max_preemptions_per_step"]
+         # Requests room was made for whose allocation the waiting loop has not
+         # tried since: no room is made for them again until it has.
+         self._make_room_untried: set[Request] = set()
+-        self.priority_prefill_budget_cap = (
+-            self.scheduler_config.priority_prefill_budget_cap
+-        )
+-        self.priority_prefill_budget_cap_tokens = (
+-            self.scheduler_config.priority_prefill_budget_cap_tokens
+-        )
++        self.priority_prefill_budget_cap = make_room["budget_cap"]
++        self.priority_prefill_budget_cap_tokens = make_room["budget_cap_tokens"]
+         # The step in which each KV load in flight was first seen: a load holds
+         # lower-priority prefill back for its first budget cap tokens steps.
+         self._load_hold_start: dict[Request, int] = {}
++        self.reserve_blocks = cdiv(make_room["reserve_tokens"], block_size)
++        num_max_len_blocks = cdiv(self.max_model_len, block_size)
++        if self.reserve_blocks and (
++            self.reserve_blocks + num_max_len_blocks >= num_gpu_blocks
++        ):
++            raise ValueError(
++                "make_room.reserve_tokens leaves no room for a request of "
++                "max_model_len tokens"
++            )
++        # What make-room did, for the operator (see _make_room_log).
++        self.make_room_held_steps = 0
++        self.make_room_held_tokens = 0
++        self.make_room_held_admissions = 0
++        self.make_room_preemptions = 0
++        self._make_room_held_step = -1
++        self._make_room_logged = (0, 0, 0, 0)
++        self._make_room_log_time = time.monotonic()
+ 
+         self.has_mamba_layers = kv_cache_config.has_mamba_layers
+         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+@@ -671,6 +691,7 @@ class Scheduler(SchedulerInterface):
+ 
+         # Priority policy: make room for the waiting request of the highest
+         # priority first, so that no request scheduled in this step is preempted.
++        self._make_room_log()
+         make_room_req = self._peek_make_room_request(defer_prefills)
+         make_room_hit = (
+             None if make_room_req is None else self._local_prefix_hit(make_room_req)
+@@ -735,6 +756,16 @@ class Scheduler(SchedulerInterface):
+             ):
+                 # A request of a higher priority awaits its first tokens: this
+                 # step is theirs and the decodes'.
++                num_held_tokens = (
++                    request.num_tokens_with_spec
++                    + request.num_output_placeholders
++                    - request.num_computed_tokens
++                )
++                if 0 < long_prefill_token_threshold < num_held_tokens:
++                    num_held_tokens = long_prefill_token_threshold
++                self._make_room_count_hold(
++                    min(num_held_tokens, token_budget, input_budget - draft_slots), 0
++                )
+                 req_index += 1
+                 continue
+ 
+@@ -1009,6 +1040,7 @@ class Scheduler(SchedulerInterface):
+                     and request.priority > first_tokens_priority
+                 ):
+                     # Nor does a prefill of a lower priority start meanwhile.
++                    self._make_room_count_hold(0, 1)
+                     if request_queue is self.kv_holding_waiting:
+                         # Requests holding KV blocks are drained first, so the
+                         # request whose first tokens are due may be behind it.
+@@ -1016,6 +1048,17 @@ class Scheduler(SchedulerInterface):
+                         continue
+                     break
+ 
++                if (
++                    request_queue is self.waiting
++                    and self.reserve_blocks
++                    and request.priority > 0
++                    and self._num_blocks_short(request, self._local_prefix_hit(request))
++                    > 0
++                ):
++                    # Nor one of a positive priority value that would take the
++                    # reserve.
++                    break
++
+                 if (
+                     request_queue is self.waiting
+                     and self.max_priority_preemptions_per_step
+@@ -3173,6 +3216,88 @@ class Scheduler(SchedulerInterface):
+             self._request_remaining_blocks(req) for req in self._inflight_prefills
+         )
+ 
++    def _make_room_switches(self, make_room: Any) -> dict[str, Any]:
++        """make_room's switches, from --additional-config's make_room table,
++        validated at engine start: a bad key or value fails it, named."""
++        switches: dict[str, Any] = {
++            "max_preemptions_per_step": 0,
++            "budget_cap": False,
++            "budget_cap_tokens": 16,
++            "reserve_tokens": 0,
++        }
++        if not isinstance(make_room, dict):
++            raise ValueError(f"make_room must be a table, not {make_room!r}")
++        for key, value in make_room.items():
++            if key == "budget_cap":
++                flag = {"true": True, "1": True, "false": False, "0": False}.get(
++                    str(value).lower()
++                )
++                if flag is None:
++                    raise ValueError(
++                        f"make_room.budget_cap must be true or false, not {value!r}"
++                    )
++                switches[key] = flag
++            elif key in switches:
++                least = 1 if key == "budget_cap_tokens" else 0
++                if (
++                    isinstance(value, bool)
++                    or not isinstance(value, int)
++                    or value < least
++                ):
++                    raise ValueError(
++                        f"make_room.{key} must be an integer of at least {least}, "
++                        f"not {value!r}"
++                    )
++                switches[key] = value
++            else:
++                raise ValueError(
++                    f"make_room has no key {key!r}; its keys are " + ", ".join(switches)
++                )
++        if self.policy != SchedulingPolicy.PRIORITY and (
++            switches["max_preemptions_per_step"]
++            or switches["budget_cap"]
++            or switches["reserve_tokens"]
++        ):
++            raise ValueError("make_room needs --scheduling-policy priority")
++        return switches
++
++    def _make_room_log(self) -> None:
++        """Log make-room's totals, at most every 10 s and when they moved: the
++        steps in which the budget cap held lower-priority prefill back, the
++        prefill tokens and admissions it held back in them, summed over the
++        steps, and the requests make-room preempted, apart from the running
++        loop's preemptions."""
++        now = time.monotonic()
++        if now - self._make_room_log_time < 10:
++            return
++        self._make_room_log_time = now
++        totals = (
++            self.make_room_held_steps,
++            self.make_room_held_tokens,
++            self.make_room_held_admissions,
++            self.make_room_preemptions,
++        )
++        if totals != self._make_room_logged:
++            self._make_room_logged = totals
++            logger.info(
++                "make-room: budget cap held lower-priority prefill back in %d "
++                "steps (%d prefill tokens and %d admissions, summed over the "
++                "steps); %d preemptions to make room",
++                *totals,
++            )
++
++    def _make_room_count_hold(self, num_tokens: int, num_admissions: int) -> None:
++        """Count a hold of the budget cap: the step, and the lower-priority
++        prefill tokens and admissions it holds back in it. A request held back
++        in several steps counts in each."""
++        if not (num_tokens or num_admissions):
++            return
++        if self._make_room_held_step != self.current_step:
++            self._make_room_held_step = self.current_step
++            self.make_room_held_steps += 1
++        self.make_room_held_tokens += num_tokens
++        self.make_room_held_admissions += num_admissions
++
+     def _peek_make_room_request(self, defer_prefills: bool) -> Request | None:
+         """The waiting request of the highest priority that the waiting loop can
+         schedule in this step, unless prefills are deferred or new requests
+@@ -3369,6 +3494,7 @@ class Scheduler(SchedulerInterface):
+                 victim, timestamp, drop_stale_output=self.requires_kv_delivery
+             )
+         self._make_room_untried.add(request)
++        self.make_room_preemptions += len(victims)
+         return set(victims)
+ 
+     def _num_blocks_short(
+@@ -3379,13 +3505,15 @@ class Scheduler(SchedulerInterface):
+         """Free blocks the waiting `request` lacks to be admitted with its whole
+         remaining sequence, net of its prefix-cache hit `hit`, beside the
+         watermark and what in-flight prefills still need, as an async KV load is
+-        admitted."""
++        admitted; with a positive priority value, the reserve too."""
+         num_blocks = self._inflight_prefill_reserved_blocks()
+         if request not in self._inflight_prefills:
+             num_blocks += self._make_room_remaining_blocks(request, hit)
+         if self.running:
+             # As allocate_slots applies the watermark.
+             num_blocks += self.kv_cache_manager.watermark_blocks
++        if request.priority > 0:
++            num_blocks += self.reserve_blocks
+         return num_blocks - self.kv_cache_manager.block_pool.get_num_free_blocks()
+ 
+     def _make_room_remaining_blocks(

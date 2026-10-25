@@ -14,7 +14,7 @@ PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py deploy/
 E2_RESULTS := benchmarks/results/2026-10-23-e2
 E2_REPORT ?= build/reproduce-e2
 
-.PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-python schema \
+.PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-python schema \
   reproduce-e1 reproduce-calibration reproduce-e2 e2-figures
 
 check: lint test
@@ -53,6 +53,15 @@ test-make-room: $(VLLM_SRC)
 	@test -n "$(TORCH_PYTHON)" || { echo "usage: make test-make-room TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies>" >&2; exit 2; }
 	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -m pytest -q -p no:cacheprovider \
 	  tests/test_make_room.py tests/test_tail.py
+
+# make-room against the PRs' own patches, step for step, on the same CPU environment (python/leaseholder_vllm/README.md):
+# the trace that keeps the variant equal to #63350 and #63351, with the PRs' one-line mutants as its negative control.
+# TRACE_SEEDS sets the random workloads' seeds; TRACE_REFERENCE, a generated module, replaces the PRs' as the other side.
+TRACE_SEEDS ?= 20
+test-trace: $(VLLM_SRC)
+	@test -n "$(TORCH_PYTHON)" || { echo "usage: make test-trace TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies> [TRACE_SEEDS=100]" >&2; exit 2; }
+	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) TRACE_SEEDS=$(TRACE_SEEDS) $(TORCH_PYTHON) -m pytest -q -p no:cacheprovider \
+	  tests/test_trace.py
 
 # Integration tests need hosts (a LiveKit server, a running engine); CI runs everything else.
 test-python:

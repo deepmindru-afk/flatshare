@@ -98,18 +98,18 @@ make reproduce-calibration EXPORTS=DIR CORPUS=DIR  # lh-sim's calibration, from 
 
 ## Repository layout
 
-**The engine change** is vLLM [#63350](https://github.com/vllm-project/vllm/pull/63350/files) and [#63351](https://github.com/vllm-project/vllm/pull/63351/files) (stacked on #63350). E2 ran it on vLLM 0.32.0 as the [`make-room` variant](deploy/phastform/variants/make-room), which `python/leaseholder_vllm` tests.
+**The engine change** is vLLM [#63350](https://github.com/vllm-project/vllm/pull/63350/files) and [#63351](https://github.com/vllm-project/vllm/pull/63351/files) (stacked on #63350). E2 ran it on vLLM 0.32.0 as the `make-room` variant, which [`python/leaseholder_vllm`](python/leaseholder_vllm) builds from the PRs' scheduler diff, backported to 0.32.0, and checks step for step against it.
 
 ```text
+python/leaseholder_vllm/  the engine change on vLLM 0.32.0: the PRs' scheduler diff and the variant's own as patches, the build, probes and tests
 crates/lh-proto/          wire types and their JSON Schemas
 crates/lh-core/           the cost and step-time models and KV geometry, shared with the simulator; admission and placement policies
 crates/lh-gateway/        the control-plane service in front of vLLM, with its overhead benchmark
 crates/lh-sim/            the KV cache simulator: AIPerf's replay, vLLM's two tiers, policy arms
-python/leaseholder_vllm/  the engine variants' tests: their builds from vLLM's source, make-room on the real scheduler
 python/leaseholder_bench/ trace conversion, AIPerf plugins and configs, latency probes, the E2 harness
 python/leaseholder_voice/ the voice agent, measurement callers, LiveKit integration and its hermetic barge-in test
 benchmarks/               E2's arm files and campaigns, the committed records, and runs against upstream projects
-deploy/                   per-host bootstrap, systemd units, engine variants, tunnels, smoke test
+deploy/                   per-host bootstrap, systemd units, the engine variants' drop-ins, tunnels, smoke test
 ops/                      the runbook; dashboards and alert rules are planned
 docs/                     architecture, protocol, SLOs, experiments, benchmarks, production guide, methods, prior art, ADRs, figures
 ```

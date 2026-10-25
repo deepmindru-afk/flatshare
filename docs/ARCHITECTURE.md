@@ -14,7 +14,7 @@ Neither depends on the card: the first appears wherever agents' contexts are lon
 
 ## 2. The engine change
 
-The variant `make-room` ([`deploy/phastform/variants`](../deploy/phastform/variants/README.md)) is generated at each engine start from the installed vLLM 0.32.0's scheduler by `build.py`, with asserted anchors, without modifying vLLM; the engine loads it with `--scheduler-cls`. It adds three switches to priority scheduling, each a key of `--additional-config` and off by default:
+The variant `make-room` ([`python/leaseholder_vllm`](../python/leaseholder_vllm/README.md)) is built at each engine start from the installed vLLM 0.32.0's scheduler, without modifying vLLM: `build.py` applies the PRs' scheduler diff, backported to 0.32.0, and the variant's own patch, every hunk where it must be, and the engine loads the module with `--scheduler-cls`. It adds three switches to priority scheduling, each a key of `--additional-config` and off by default:
 
 | Switch | Variant key | Upstream |
 |---|---|---|
@@ -33,7 +33,7 @@ What E2 found ([BENCHMARKS.md](BENCHMARKS.md#voice-under-agent-load-e2)): the bu
 - the KV shortfall counts the blocks of a request's cached prefix as needed, so the reserve and the in-flight gate can refuse a request that stock vLLM admits;
 - victims are sized before the next step's decode growth, so a turn can need a second preemption a step later.
 
-**Tests.** CPU tests run the variant on vLLM's real scheduler with CPU torch; CI builds the generated module from v0.32.0's source. GPU probes measure the KV case, the prefill case and closed-loop agents beside calls ([`probe.py`, `tail.py`](../deploy/phastform/variants/make-room)).
+**Tests.** CPU tests run the variant on vLLM's real scheduler with CPU torch, and trace it against the PRs' own patches step for step; CI builds the generated module from v0.32.0's source. GPU probes measure the KV case, the prefill case and closed-loop agents beside calls ([`probe.py`, `tail.py`](../python/leaseholder_vllm/src/leaseholder_vllm/make-room)).
 
 ## 3. The deployment
 

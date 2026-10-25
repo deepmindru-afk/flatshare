@@ -1,4 +1,4 @@
-"""The make-room variant's load check (deploy/phastform/variants/make-room/tail.py): a failed call turn counts at the
+"""The make-room variant's load check (src/leaseholder_vllm/make-room/tail.py): a failed call turn counts at the
 timeout, as E2's report censors a reply that never came, the percentiles are inclusive, as E2's report computes them,
 and the turns that failed and the agents that stopped early are printed. It needs aiohttp, which the engine environment
 has; without it, as in CI, these tests skip."""
@@ -12,7 +12,7 @@ import pytest
 
 aiohttp = pytest.importorskip("aiohttp")
 
-TAIL = Path(__file__).resolve().parents[3] / "deploy/phastform/variants/make-room/tail.py"
+TAIL = Path(__file__).resolve().parents[1] / "src/leaseholder_vllm/make-room/tail.py"
 
 
 @pytest.fixture(scope="module")
