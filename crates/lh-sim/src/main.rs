@@ -334,8 +334,12 @@ struct HardwareArgs {
     /// --token-scale scales no pool: each GPU has its own.
     #[command(flatten)]
     replay: ReplayArgs,
-    /// GPUs: rtx-5060-ti (the frozen box, measured), l4 and h100-sxm (modeled).
-    #[arg(long, value_delimiter = ',', default_value = "rtx-5060-ti,l4,h100-sxm")]
+    /// GPUs: rtx-5060-ti (the frozen box, measured), l4, a100-40gb and h100-sxm (modeled).
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "rtx-5060-ti,l4,a100-40gb,h100-sxm"
+    )]
     gpus: Vec<Gpu>,
     /// Replay the corpus on each GPU as close to the traces' original token counts as it can serve:
     /// at the least power-of-two scaling whose longest request fits its pool and the model's
@@ -1004,6 +1008,7 @@ mod tests {
         // and two calls.
         let d = hardware_args(&["hardware", "DATA"]);
         assert_eq!(d.gpus, hardware::GPUS);
+        assert_eq!(d.gpus[2], hardware::A100_40GB);
         assert_eq!(d.sessions[..7], [5, 8, 12, 16, 24, 32, 40]);
         assert_eq!((d.seeds, d.cpu_ratio, d.calls), (vec![11, 12, 13], 4.0, 2));
         assert!(!d.fit && d.replay.config().token_scale == 1);
