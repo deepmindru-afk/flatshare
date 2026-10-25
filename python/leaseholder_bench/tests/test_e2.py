@@ -774,7 +774,9 @@ def test_a_host_file_sets_the_hosts_fields(tmp_path: Path) -> None:
 def test_stopping_a_tool_kills_its_whole_process_group(tmp_path: Path) -> None:
     artifacts = tmp_path / "aiperf"
     env = os.environ | {"LH_BENCH_ARTIFACTS": str(artifacts), "FAKE_AIPERF": "stubborn"}
-    tool = Process("AIPerf", [sys.executable, str(FAKES / "fake_aiperf.py")], tmp_path / "log", env)
+    command = [sys.executable, str(FAKES / "fake_aiperf.py")]
+    tool = Process("AIPerf", command, tmp_path / "log", env, str(tmp_path))
+    assert tool.mark.startswith(f"{tmp_path}/")  # its scope, the test's own
     child = int(wait_for(artifacts / "child.pid").read_text())
     assert not tool.exited()
     assert tool.stop(grace=0.3) == -9  # it ignored SIGINT, so it was killed
@@ -791,23 +793,34 @@ def test_stopping_a_tool_kills_what_it_started_in_a_session_of_its_own(tmp_path:
     """AIPerf starts some services with setsid, out of its process group: its mark reaches them."""
     artifacts = tmp_path / "aiperf"
     env = os.environ | {"LH_BENCH_ARTIFACTS": str(artifacts), "FAKE_AIPERF": "orphan"}
-    tool = Process("AIPerf", [sys.executable, str(FAKES / "fake_aiperf.py")], tmp_path / "log", env)
+    command = [sys.executable, str(FAKES / "fake_aiperf.py")]
+    tool = Process("AIPerf", command, tmp_path / "log", env, str(tmp_path))
     child = int(wait_for(artifacts / "child.pid").read_text())
     assert os.getpgid(child) != tool.popen.pid
     assert tool.stop(grace=5) == 0  # it stopped on SIGINT
     assert gone(child)
 
 
+def marked(mark: str) -> subprocess.Popen:
+    """A process that lasts a minute, marked as a tool of e2 run with ``mark``."""
+    env = os.environ | {e2.TOOL_MARK: mark}
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env)
+
+
 @PROC
-def test_a_marked_process_left_by_an_earlier_run_is_found_and_killed() -> None:
-    env = os.environ | {e2.TOOL_MARK: "an-earlier-run"}
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env)
+def test_a_marked_process_left_by_an_earlier_run_is_found_and_killed(tmp_path: Path) -> None:
+    # A mark is its run's scope, the root its run lock is in, and the run's pid and the tool's start.
+    here, beside = tmp_path / "a" / "leaseholder", tmp_path / "a" / "leaseholder" / "b"
+    earlier, other = marked(f"{here}/123-456"), marked(f"{beside}/123-456")
     try:
-        assert e2.kill_marked("another-run") == []
-        assert e2.kill_marked() == [sleeper.pid]
-        assert sleeper.wait(timeout=5) == -9
+        assert e2.kill_marked(str(here), f"{here}/123-789") == []
+        assert e2.kill_marked(str(here)) == [earlier.pid]  # not a scope inside its root's
+        assert earlier.wait(timeout=5) == -9 and other.poll() is None
+        assert e2.kill_marked(str(beside), f"{beside}/123-456") == [other.pid]
+        assert other.wait(timeout=5) == -9
     finally:
-        sleeper.kill()
+        earlier.kill()
+        other.kill()
 
 
 def wait_for(path: Path, timeout: float = 10.0) -> Path:
@@ -1158,6 +1171,23 @@ def test_voice_alone_runs_the_calls_against_the_box_as_it_is(cyan: Cyan) -> None
     }  # fmt: skip
     assert summary["worker"] is None  # nor does this worker log turn lines
     assert json.loads((out / "summary.json").read_text()) == summary
+
+
+@PROC
+def test_a_point_kills_what_its_own_runs_left_and_not_another_sessions_tools(cyan: Cyan) -> None:
+    # Two test sessions on one host, each with its own home and run lock: a point's start killed
+    # every marked process of the user, so one session's point killed the other's tools (lane UP's
+    # make check saw them exit -9). It kills only what a run under its own lock left.
+    other_root = cyan.host.root.parent / "other-session" / "leaseholder"
+    left, others = marked(f"{cyan.host.root}/1-1"), marked(f"{other_root}/2-2")
+    try:
+        run(cyan, "a1-voice", VOICE_ALONE)
+        assert left.wait(timeout=5) == -9
+        assert others.poll() is None  # the other session's tool runs on
+        assert record(cyan, "a1-voice")["leftovers_killed"] == [left.pid]
+    finally:
+        left.kill()
+        others.kill()
 
 
 def test_a_point_with_agents_configures_cyan_and_stops_aiperf_after_the_calls(cyan: Cyan) -> None:

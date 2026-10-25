@@ -751,7 +751,8 @@ def _get_json(address: str, path: str, missing: str | None = None, **kwargs: Any
 
 
 TOOL_MARK = "LH_E2_TOOL"
-"""The environment variable that marks every process a tool of e2 run started, its children too."""
+"""The environment variable that marks every process a tool of e2 run started, its children too:
+``SCOPE/PID-NS``, the run's scope (:func:`tool_scope`), then its pid and the tool's start."""
 NEEDS_WAITID = (
     "lh-bench e2 run needs os.waitid, to watch its tools without reaping them: Linux, or macOS "
     "from Python 3.13"
@@ -765,11 +766,12 @@ class Process:
     out of the group's reach. Output goes to ``log``."""
 
     def __init__(
-        self, name: str, command: Sequence[str], log: Path, env: Mapping[str, str]
+        self, name: str, command: Sequence[str], log: Path, env: Mapping[str, str], scope: str
     ) -> None:
         self.name = name
         self.log = log
-        self.mark = f"{os.getpid()}-{time.monotonic_ns()}"
+        self.scope = scope
+        self.mark = f"{scope}/{os.getpid()}-{time.monotonic_ns()}"
         with log.open("ab") as out:
             self.popen = subprocess.Popen(
                 list(command),
@@ -801,7 +803,7 @@ class Process:
             # A group with nothing left but its exited leader answers ESRCH (Linux) or EPERM (macOS).
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(pid, signal.SIGKILL)
-            kill_marked(self.mark)
+            kill_marked(self.scope, self.mark)
             self.status = self.popen.wait()
         return self.status
 
@@ -811,9 +813,16 @@ class Process:
         return E2Error(f"{self.name} {what} (exit status {self.stop()}); {self.log}:\n{tail}")
 
 
-def kill_marked(mark: str | None = None) -> list[int]:
-    """Kill the processes whose environment carries ``mark`` under ``TOOL_MARK`` (any mark when
-    None), and return their pids. It reads ``/proc``, so it finds none off Linux."""
+def tool_scope(host: Host) -> str:
+    """The scope of a run's tools: the root its run lock is in (``host.root``). A run's start kills
+    what a run under the same lock left, and no tool of a run beside it under another root, as a
+    test session's runs are beside another's on one host."""
+    return str(host.root)
+
+
+def kill_marked(scope: str, mark: str | None = None) -> list[int]:
+    """Kill the processes whose environment carries a mark of ``scope`` under ``TOOL_MARK`` (``mark``
+    alone when given), and return their pids. It reads ``/proc``, so it finds none off Linux."""
     killed = []
     for environ in Path("/proc").glob("[0-9]*/environ"):
         try:
@@ -821,7 +830,8 @@ def kill_marked(mark: str | None = None) -> list[int]:
         except OSError:  # another user's process, or one that just exited
             continue
         marks = [v.split(b"=", 1)[1] for v in variables if v.startswith(f"{TOOL_MARK}=".encode())]
-        if marks and (mark is None or marks[0] == mark.encode()):
+        ours = marks and marks[0].rsplit(b"/", 1)[0] == scope.encode()
+        if ours and (mark is None or marks[0] == mark.encode()):
             pid = int(environ.parent.name)
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGKILL)
@@ -884,9 +894,9 @@ def run_point(
         record["agents_seed"] = seed if arm.agents.sessions else None
         # The KV sampler's interval, null where the point did not sample (voice alone, or 0).
         record["kv_sample_s"] = kv_sample_s if arm.agents.sessions else None
-        # Under the lock no other run's tools are alive: a marked process is left from a run that
-        # was killed before it could stop them.
-        if leftovers := kill_marked():
+        # Under the lock no other run's tools are alive: a process marked in its scope is left from a
+        # run that was killed before it could stop them.
+        if leftovers := kill_marked(tool_scope(host)):
             record["leftovers_killed"] = leftovers
             record.say(f"killed {len(leftovers)} processes left by an earlier run: {leftovers}")
         try:
@@ -1013,7 +1023,7 @@ def _start_aiperf(
     agents = arm.agents
     record.say(f"AIPerf: {agents.sessions} session trees through the gateway, seed {seed}")
     env = _aiperf_env(arm, host, out, seed, model)
-    aiperf = Process("AIPerf", host.aiperf(), out / "aiperf.log", env)
+    aiperf = Process("AIPerf", host.aiperf(), out / "aiperf.log", env, tool_scope(host))
     running.callback(aiperf.stop, AIPERF_STOP_S)
     deadline = time.monotonic() + PROFILING_TIMEOUT_S
     while PROFILING not in aiperf.log.read_text(errors="replace"):
@@ -1058,7 +1068,7 @@ def _call(
     if save_audio:
         command.append("--save-audio")
     env = os.environ | read_env(host.config / "livekit.env")
-    bots = Process("lh-voice bots", command, out / "bots.log", env)
+    bots = Process("lh-voice bots", command, out / "bots.log", env, tool_scope(host))
     running.callback(bots.stop, 30.0)
     deadline = time.monotonic() + CALL_TURN_S * (voice.warmup_turns + voice.turns) + 120
     while not bots.exited():
