@@ -60,6 +60,10 @@ status=0
 event=$($ssh "$gpu" "date +%s.%N; systemctl --user reset-failed $units 2>/dev/null || true
   systemctl --user stop $target; systemctl --user start $target" | sed -n 1p) || status=$?
 event=${event:-$before}
+# leaseholder.target only Wants= its units, so its start succeeds without them: each must be active.
+for unit in $units; do
+  $ssh "$gpu" "systemctl --user is-active --quiet $unit" || { log "$unit is not active after the start"; status=1; }
+done
 if ((status)); then
   log "$what restarted at $event$caches_note, and its start FAILED (exit status $status)"
 else
