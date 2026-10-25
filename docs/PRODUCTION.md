@@ -46,6 +46,8 @@ The budget cap protects a reply for its first N tokens. The caller hears nothing
 
 A longer window holds background prefill for longer each turn: the agents' throughput is 2% lower at 48 than at 16 (3,236 against 3,298 tokens/s over the calls' first 240 s, in the same rounds of W5's PR campaign).
 
+A sweep of the window against whole replies of 40 tokens, beside the box's closed-loop agents, places the knee ([`knee.sh`'s records](../benchmarks/results/2026-10-25-window-knee/README.md), 2026-10-25): the reply's 40th token came 3,759 ms after the request at p95 with a 16-token window, 2,642 at 24, 1,854 at 32 and 1,037 at 48, and no sooner at 64 (1,018 ms), while the first token stayed at 326–448 ms. Those agents' prompt throughput, all of it prefill, fell 8% from 16 to 48 and no further at 64: a hold ends when its reply ends, so a window longer than the replies costs no more than one just long enough. When in doubt, choose N on the long side of your agent's first sentence.
+
 ### The audio models
 
 - Whisper and Kokoro share the GPU by time-slicing; MPS does not help ([Voice on the shared GPU](BENCHMARKS.md#voice-on-the-shared-gpu)): the interference that matters is inside the LLM engine. Sharing still costs them a little: in the shared configurations of [What it buys](#what-it-buys), endpointing takes 822–825 ms instead of 756, and TTS's first audio 232–250 ms instead of 211 (means over W5's replies, from [W5's report](../benchmarks/results/2026-10-24-e2-w5/report/frontier.md#stage-waterfall)).

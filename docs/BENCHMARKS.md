@@ -499,6 +499,20 @@ The frozen box schedules asynchronously: vLLM schedules a step before it has pro
 
 Only a reply of at least the window's tokens meets that step, since a shorter one ends the hold when it ends. At the 16-token window, each such reply held agent prefill back a 17th step: 81% (248 of 305) of the replies in W5's 16-token points. At the 48-token window, 1 of the 2,469 replies in W5's 48-token points reached 48 tokens, so their measurements stand but for that one. The probes above measure the first token and the 16th, both before the step.
 
+### The window's knee
+
+`knee.sh` on Phastform on 2026-10-25, on the box's units and pool: make-room with the PRs' switches at a budget-cap window of 16, 24, 32, 48 and 64 tokens, each read back from the engine, and for each two 240 s runs of `tail.py` beside the box's closed-loop agents, with fresh prompts and call replies of 40 tokens timed to their first, 16th and last token ([the records](../benchmarks/results/2026-10-25-window-knee/README.md)). The medians of each window's two runs, in ms; no turn failed:
+
+| Window (tokens) | First token p95 | 16th token p95 | 40th token p95 | Agents' prompt tokens/s |
+|---:|---:|---:|---:|---:|
+| 16 | 448 | 726 | 3,759 | 3,483 |
+| 24 | 387 | 648 | 2,642 | 3,443 |
+| 32 | 326 | 572 | 1,854 | 3,300 |
+| 48 | 347 | 616 | 1,037 | 3,205 |
+| 64 | 366 | 612 | 1,018 | 3,246 |
+
+The reply's tail falls until the window covers the reply, 3.8 s at 16 tokens to 1.0 s at 48, and moves no further at 64; the first token, which the window does not touch, stays at 326–448 ms. The agents' prompt throughput falls 8% from 16 to 48 and no further, since a hold ends with its reply: a window longer than the replies costs no more than one just long enough ([choosing N](PRODUCTION.md#the-replys-first-tokens)).
+
 ## Agent replay on the frozen box: a first retention-headroom signal
 
 Measured in W0: AIPerf `agentic_replay` of the 32×-scaled Claude Code corpus, 16 agent sessions, think times capped at 120 s, `ignore_eos`, 10 minutes, against the frozen box through the tunnel. `lh-bench kv-metrics` compared vLLM's sampled KV block histograms over the run.
