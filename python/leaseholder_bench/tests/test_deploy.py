@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -265,6 +266,47 @@ def test_wait_healthy_reaches_a_server_on_its_unix_socket() -> None:
     )
     assert done.returncode == 1
     assert f"on {socket} not healthy after 0s" in done.stderr
+    # --pid=PID, the unit's main process ($MAINPID): an empty one is no PID, as before.
+    done = subprocess.run(
+        [*wait, "--unix-socket", str(socket), "--pid=", "http://localhost/health", "0"],
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 1 and "not healthy after 0s" in done.stderr
+
+
+def test_wait_healthy_gives_up_once_the_server_it_waits_for_is_gone() -> None:
+    # A server that dies in its start (a model that does not fit, a library that does not load) fails the start at
+    # once, not after the unit's whole timeout (1,200 s for the engine), whether it was reaped already or is a
+    # zombie its supervisor has not reaped yet (lh-svc's runner reaps its main process only after ExecStartPost).
+    wait = ["bash", str(DEPLOY / "bin" / "wait-healthy")]
+    nobody = "http://127.0.0.1:9/health"  # the discard port: never healthy
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    zombie = subprocess.Popen(["true"])
+    time.sleep(0.5)  # it has exited, unreaped
+    try:
+        for pid in (gone.pid, zombie.pid):
+            start = time.monotonic()
+            done = subprocess.run(
+                [*wait, f"--pid={pid}", nobody, "60"], capture_output=True, text=True
+            )
+            assert done.returncode == 1, done.stderr
+            assert f"the server (pid {pid}) exited before {nobody} was healthy" in done.stderr
+            assert time.monotonic() - start < 10
+    finally:
+        zombie.wait()
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        done = subprocess.run(
+            [*wait, f"--pid={alive.pid}", nobody, "0"], capture_output=True, text=True
+        )
+        assert (
+            done.returncode == 1 and "not healthy after 0s" in done.stderr
+        )  # its own timeout, as before
+    finally:
+        alive.kill()
+        alive.wait()
 
 
 FAKE_SS = """\
@@ -654,7 +696,7 @@ def test_the_gpu_nodes_servers_listen_on_their_sockets_in_a_private_directory() 
             assert f"/usr/bin/rm -f {socket}" in pre, unit
         [ready] = exec_lines(text, "ExecStartPost")
         assert ready.startswith(
-            f"%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket {socket} "
+            f"%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket {socket} --pid=${{MAINPID}} "
         ), unit
     engine = (phastform / "systemd" / "lh-engine.service").read_text()
     assert "Environment=LH_ENGINE_SOCKET=%t/lh/engine.sock" in engine.splitlines()

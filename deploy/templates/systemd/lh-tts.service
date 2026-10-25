@@ -23,7 +23,7 @@ Environment=WEB_PLAYER_PATH=%h/leaseholder/vendor/Kokoro-FastAPI/web
 ExecStartPre=/usr/bin/install -d -m 0700 %t/lh
 ExecStartPre=%h/leaseholder/src/deploy/bin/gpu-guard
 ExecStart=%h/leaseholder/venvs/tts/bin/uvicorn api.src.main:app --uds %t/lh/tts.sock --timeout-keep-alive 60 --no-access-log
-ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket %t/lh/tts.sock http://localhost/health 600
+ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket %t/lh/tts.sock --pid=${MAINPID} http://localhost/health 600
 {{text.audio_numa}}
 CPUAffinity={{units.audio_cpus}}
 NUMAPolicy=preferred

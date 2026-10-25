@@ -481,6 +481,8 @@ class Runner:
         finally:
             if notify is not None:
                 notify.close()
+        # The control commands know the main process, as systemd's do ($MAINPID: wait-healthy --pid=${MAINPID}).
+        env = env | {"MAINPID": str(self.main.pid)}
         if (
             not ready
             or not self.control(unit, "ExecStartPost", env, deadline)

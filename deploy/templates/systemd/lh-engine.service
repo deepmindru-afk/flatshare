@@ -41,7 +41,7 @@ ExecStartPre=%h/leaseholder/src/deploy/bin/gpu-guard
 # line beat engine.yaml.
 Environment=LH_ENGINE_FLAGS=
 ExecStart=%h/leaseholder/venvs/engine/bin/vllm serve --config {{profile.deploy_dir}}/engine.yaml --uds ${LH_ENGINE_SOCKET} $LH_ENGINE_FLAGS
-ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket ${LH_ENGINE_SOCKET} http://localhost/health 1200
+ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket ${LH_ENGINE_SOCKET} --pid=${MAINPID} http://localhost/health 1200
 {{text.engine_numa}}
 CPUAffinity={{units.engine_cpus}}
 NUMAPolicy=preferred

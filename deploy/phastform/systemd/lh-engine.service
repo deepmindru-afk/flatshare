@@ -38,7 +38,7 @@ ExecStartPre=%h/leaseholder/src/deploy/bin/gpu-guard
 # line beat engine.yaml.
 Environment=LH_ENGINE_FLAGS=
 ExecStart=%h/leaseholder/venvs/engine/bin/vllm serve --config %h/leaseholder/src/deploy/phastform/engine.yaml --uds ${LH_ENGINE_SOCKET} $LH_ENGINE_FLAGS
-ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket ${LH_ENGINE_SOCKET} http://localhost/health 1200
+ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket ${LH_ENGINE_SOCKET} --pid=${MAINPID} http://localhost/health 1200
 # NUMA node 1 is local to the GPU. "preferred" spills to node 0 when node 1 is short: the measured cost of a remote
 # CPU tier is under 1% of pinned bandwidth.
 CPUAffinity=8-15

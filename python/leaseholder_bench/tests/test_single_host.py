@@ -314,6 +314,24 @@ def test_the_host_python_runs_the_supervisor_and_the_forwarder(host: dict) -> No
         )
 
 
+def test_a_start_whose_server_dies_fails_at_once_not_at_its_timeout(host: dict) -> None:
+    # As the GPU units: ExecStartPost waits for the server with wait-healthy --pid=${MAINPID}, which lh-svc sets for
+    # its control commands as systemd does; a server that dies in its start fails the start in seconds.
+    py, units = sys.executable, host["units"]
+    (units / "dies.service").write_text(
+        "[Service]\n"
+        f"ExecStart={py} -c 'import time; time.sleep(0.5)'\n"
+        f"ExecStartPost={BIN / 'wait-healthy'} --pid=${{MAINPID}} http://127.0.0.1:9/health 600\n"
+        "TimeoutStartSec=700\n"
+    )
+    start = time.monotonic()
+    done = ctl(host, "--user", "start", "dies.service")
+    assert done.returncode == 1 and "Job for dies.service failed" in done.stderr
+    assert time.monotonic() - start < 30
+    journal = ctl(host, "-u", "dies", "-o", "cat", tool="journalctl").stdout
+    assert "exited before http://127.0.0.1:9/health was healthy" in journal
+
+
 def test_the_shims_answer_what_the_scripts_ask(host: dict) -> None:
     assert ctl(host, "--user", "daemon-reload").returncode == 0
     assert ctl(host, "--user", "enable", "-q", "svc-a.service").returncode == 0
