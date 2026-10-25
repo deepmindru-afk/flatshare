@@ -309,6 +309,27 @@ def test_until_starts_no_point_that_would_end_after_it(hosts: Hosts) -> None:
     assert hosts.run(campaign, "--until", "25:00").returncode == 2
 
 
+def test_until_epoch_is_one_deadline_that_has_no_tomorrow(hosts: Hosts) -> None:
+    # The A100 run hands every campaign its one deadline as an epoch: one that has passed stops every point, where
+    # --until HH:MM would take tomorrow's; one far off runs them all.
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c10", ["arms/a1.toml"], {"a1": VOICE})
+    past = int(datetime.now(UTC).timestamp()) - 60
+    done = hosts.run(campaign, "--until-epoch", str(past))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert runs(hosts) == []
+    log = (hosts.results / "c10" / "campaign.log").read_text()
+    hhmm = datetime.fromtimestamp(past, UTC).strftime("%H:%M")
+    assert f"until {hhmm} UTC (epoch {past})" in log
+    assert f"a1: 9 minutes would end after {hhmm} UTC" in log
+    done = hosts.run(campaign, "--until-epoch", str(past + 7200))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert len(runs(hosts)) == 1
+    both = hosts.run(campaign, "--until", "12:00", "--until-epoch", str(past))
+    assert both.returncode == 2 and "--until or --until-epoch, not both" in both.stderr
+    assert hosts.run(campaign, "--until-epoch", "soon").returncode == 2
+
+
 def test_pull_copies_a_single_hosts_results_and_runs(hosts: Hosts, tmp_path: Path) -> None:
     home = hosts.home("a100")
     (home / "leaseholder" / "results" / "e2" / "core").mkdir(parents=True)

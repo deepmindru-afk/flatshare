@@ -24,10 +24,14 @@
 # runs here (deploy/bin/lh-local in place of ssh), the node is localhost, and the results go to ~/leaseholder/results/e2
 # unless LH_E2_RESULTS says otherwise. --until HH:MM (UTC; tomorrow's when today's has passed) starts no point that
 # cannot end before then, by W5's durations: 13 minutes for a point with agents, 7 without, and 2 more for an engine
-# switch.
+# switch. --until-epoch SECONDS does the same at an absolute time, which has no tomorrow: benchmarks/a100/run.sh
+# hands its one deadline to every campaign of a run so.
 set -euo pipefail
-usage() { echo "usage: campaign.sh [--dry-run] [--pause] [--local] [--until HH:MM] CAMPAIGN" >&2; exit 2; }
-dry_run=false pause=false local=false until=""
+usage() {
+  echo "usage: campaign.sh [--dry-run] [--pause] [--local] [--until HH:MM | --until-epoch SECONDS] CAMPAIGN" >&2
+  exit 2
+}
+dry_run=false pause=false local=false until="" until_epoch=""
 while [[ ${1:-} == --* ]]; do
   case $1 in
     --dry-run) dry_run=true ;;
@@ -36,6 +40,11 @@ while [[ ${1:-} == --* ]]; do
     --until)
       [[ ${2:-} =~ ^([01][0-9]|2[0-3]):([0-5][0-9])$ ]] || usage
       until=$2
+      shift
+      ;;
+    --until-epoch)
+      [[ ${2:-} =~ ^[0-9]+$ ]] || usage
+      until_epoch=$2
       shift
       ;;
     *) usage ;;
@@ -56,11 +65,15 @@ fi
 node_dir=${LH_NODE_DIR:-leaseholder/src/deploy/phastform}
 [[ $node_dir =~ ^[A-Za-z0-9._/-]+$ && $node_dir != /* ]] ||
   { echo "campaign: LH_NODE_DIR is a directory under the GPU node's home: '$node_dir'" >&2; exit 2; }
+[[ -z $until || -z $until_epoch ]] || { echo "campaign: --until or --until-epoch, not both" >&2; exit 2; }
 deadline=""
 if [[ -n $until ]]; then
   now=$(date -u +%s)
   deadline=$((now - now % 86400 + 10#${until%:*} * 3600 + 10#${until#*:} * 60))
   ((deadline > now)) || deadline=$((deadline + 86400))
+elif [[ -n $until_epoch ]]; then
+  deadline=$until_epoch
+  until=$(date -u -d "@$deadline" +%H:%M 2>/dev/null || date -u -r "$deadline" +%H:%M) # GNU date, else BSD's
 fi
 bad_gpus() { echo "campaign: LH_GPU names each GPU node's host once, separated by commas: '${LH_GPU-}'" >&2; exit 2; }
 ((${#gpus[@]})) || bad_gpus
@@ -121,7 +134,7 @@ if [[ -n $seed ]]; then seeded=", the agents' seed $seed"; fi
 if [[ -n $sampling ]]; then
   if [[ $sampling =~ ^0+(\.0+)?$ ]]; then seeded+=", no KV sampler"; else seeded+=", the KV sampler every $sampling s"; fi
 fi
-log "campaign $name: ${#points[@]} points, arm files at $(git -C "$here" describe --always --dirty 2>/dev/null || echo '?')$seeded"
+log "campaign $name: ${#points[@]} points, arm files at $(git -C "$here" describe --always --dirty 2>/dev/null || echo '?')$seeded${deadline:+, until $until UTC (epoch $deadline)}"
 
 # Copy the arm files to cyan, where lh-bench reads them, and check each one there.
 $ssh "$cyan" mkdir -p "$runs/arms"

@@ -13,9 +13,11 @@
 #   3. its first starts (host.py warm: the frozen engine and the stock setting, each compiling its own graphs), the
 #      pool checked against the profile's 7,334 blocks, smoke.sh (a reply with no <think>), E0 with one rep;
 #   4. the arm files and campaigns written into ~/leaseholder/runs/a100/cprime, and the campaigns run.
-# A campaign done before is skipped by campaign.sh's own resume.
+# A campaign done before is skipped by campaign.sh's own resume. --until-epoch SECONDS hands each round's campaign
+# that deadline (benchmarks/a100/run.sh's); a round it stopped with points left ends C' with exit status 3.
 set -euo pipefail
-sessions=40 rounds=3 cap=1536
+sessions=40 rounds=3 cap=1536 until_epoch=""
+usage() { echo "usage: cprime.sh [--sessions N] [--rounds N] [--cap TOKENS] [--until-epoch SECONDS]" >&2; exit 2; }
 while (($#)); do
   case $1 in
     --sessions | --rounds | --cap)
@@ -23,7 +25,12 @@ while (($#)); do
       case $1 in --sessions) sessions=$2 ;; --rounds) rounds=$2 ;; *) cap=$2 ;; esac
       shift
       ;;
-    *) echo "usage: cprime.sh [--sessions N] [--rounds N] [--cap TOKENS]" >&2; exit 2 ;;
+    --until-epoch)
+      [[ ${2:-} =~ ^[0-9]+$ ]] || usage
+      until_epoch=$2
+      shift
+      ;;
+    *) usage ;;
   esac
   shift
 done
@@ -88,6 +95,17 @@ if [[ ! -f $out/e0/summary.json ]]; then
 fi
 
 # 4. The arms and the campaigns.
+points_done() { # points_done CAMPAIGN: whether every point of the campaign file is complete (as run.sh's)
+  local file=$1 name line
+  name=$(basename "$file" .campaign)
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%%#*}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [[ -z $line || $line == agents-seed* || $line == kv-sample-s* ]] && continue
+    grep -qs '"status": "complete"' "$root/runs/e2/$name/$(basename "$line" .toml)/run.json" || return 1
+  done <"$file"
+}
 arm() { # arm FILE LABEL VARIANT [FLAG...]: an agents arm at C''s sessions on the long corpus, on VARIANT (or frozen)
   local file=$1 label=$2 variant=$3 flag list=""
   shift 3
@@ -123,6 +141,12 @@ for ((n = 1; n <= rounds; n++)); do
   } >"$out/a100-cprime-r$n.campaign"
   log "round $n"
   (cd "$HOME" && LH_NODE_DIR=leaseholder/node-14b LH_PROFILE=$profile \
-    bash "$src/benchmarks/e2/campaign.sh" --local "$out/a100-cprime-r$n.campaign")
+    bash "$src/benchmarks/e2/campaign.sh" --local ${until_epoch:+--until-epoch "$until_epoch"} \
+    "$out/a100-cprime-r$n.campaign")
+  # campaign.sh exits 0 with points left only where the deadline stopped it.
+  if ! points_done "$out/a100-cprime-r$n.campaign"; then
+    log "round $n stopped before its deadline with points left: C' stops here"
+    exit 3
+  fi
 done
 log "complete"

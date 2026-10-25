@@ -16,7 +16,8 @@
 # (branches.sh run, once branches.sh stage has built the two envs), resubmit (the stock engine behind the gateway's
 # preempt-resubmit, seeds 13 to 15), batch (batch.sh) and aprime (the box's pool at 32 sessions, two rounds).
 # --until HH:MM (UTC; tomorrow's when today's has passed) starts no block that the page's estimate says cannot end
-# before then, and hands the deadline to each campaign, which then starts no point that cannot. Each block's start
+# before then, and hands the deadline, once computed, as an epoch, to each campaign and to cprime.sh, which then start
+# no point that cannot. Each block's start
 # and end go to ~/leaseholder/runs/a100/blocks.log; a block done leaves blocks/BLOCK.done.
 set -euo pipefail
 usage() { echo "usage: run.sh [--until HH:MM] [--cap TOKENS] [BLOCK...]" >&2; exit 2; }
@@ -74,8 +75,9 @@ points_done() { # points_done CAMPAIGN: whether every point of the campaign file
 
 campaign() { # campaign FILE: its points on this host, as campaign.sh --local runs them
   local status=0
-  (cd "$HOME" && LH_NODE_DIR=leaseholder/node bash "$src/benchmarks/e2/campaign.sh" --local ${until:+--until "$until"} \
-    "$1") || status=$?
+  # The run's one deadline, as an epoch: a campaign that ends after HH:MM hands the next none 24 hours away.
+  (cd "$HOME" && LH_NODE_DIR=leaseholder/node bash "$src/benchmarks/e2/campaign.sh" --local \
+    ${deadline:+--until-epoch "$deadline"} "$1") || status=$?
   points_done "$1" && return 0
   # campaign.sh exits 0 with points left only where --until stopped it; any other status is a failure.
   if [[ -n $deadline && $status == 0 ]]; then
@@ -137,7 +139,15 @@ sys.exit(0 if all(done.get(name, {}).get("ok") for name in ("frozen", "2048-0", 
     5) bash "$here/calibration.sh" --sessions 16 ;;
     6 | 7 | 8 | 9) campaign "$here/a100-r$((name - 4)).campaign" ;;
     10) systemctl --user stop leaseholder.target lh-engine lh-stt lh-tts ;;
-    cprime) bash "$here/cprime.sh" --cap "$cap" ;;
+    cprime) # its rounds take the run's deadline; it exits 3 where that stopped it with points left
+      local status=0
+      bash "$here/cprime.sh" --cap "$cap" ${deadline:+--until-epoch "$deadline"} || status=$?
+      if ((status == 3)) && [[ -n $deadline ]]; then
+        log "cprime stopped before its deadline ($until UTC) with points left"
+        exit 0
+      fi
+      ((status == 0)) || { log "cprime did not complete (cprime.sh exit status $status)"; exit 1; }
+      ;;
     branches) bash "$here/branches.sh" run ;;
     batch) bash "$here/batch.sh" ;;
     resubmit) for n in 3 4 5; do campaign "$here/a100-resubmit-r$n.campaign"; done ;;
