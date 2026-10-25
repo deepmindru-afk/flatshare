@@ -147,15 +147,24 @@ def test_lh_profile_names_the_gpu_nodes_profile_for_the_engine_check(hosts: Host
 
 
 def test_a_gpu_node_without_its_revision_runs_the_point_with_none(hosts: Hosts) -> None:
-    gray = "gray.cis.upenn.edu"
-    hosts.gpu(PHASTFORM)
-    hosts.gpu(gray, deployed=None)
+    hosts.gpu(PHASTFORM, deployed=None)
     campaign = hosts.campaign("c2", ["arms/a1.toml"], {"a1": VOICE})
-    done = hosts.run(campaign, gpus=f"{PHASTFORM},{gray}")
+    done = hosts.run(campaign)
     assert done.returncode == 0, done.stdout + done.stderr
     [run] = runs(hosts)
-    assert run.endswith(f" --gpu-source phastform={DEPLOYED} --gpu-source gray=")
-    assert "a1: gray has no DEPLOYED" in (hosts.results / "c2" / "campaign.log").read_text()
+    assert run.endswith(" --gpu-source phastform=")
+    assert "a1: phastform has no DEPLOYED" in (hosts.results / "c2" / "campaign.log").read_text()
+
+
+def test_a_campaign_runs_on_one_gpu_node(hosts: Hosts) -> None:
+    # The points on several GPU nodes are on the two-node branch.
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c9", ["arms/a1.toml"], {"a1": VOICE})
+    for gpus in (f"{PHASTFORM},gray.cis.upenn.edu", f"{PHASTFORM} gray.cis.upenn.edu"):
+        done = hosts.run(campaign, gpus=gpus)
+        assert done.returncode == 2, gpus
+        assert f"LH_GPU names the GPU node's host, one: '{gpus}'" in done.stderr
+    assert runs(hosts) == []
 
 
 def test_a_campaign_sets_its_points_agents_seed(hosts: Hosts) -> None:
