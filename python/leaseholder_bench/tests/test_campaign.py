@@ -103,7 +103,9 @@ def test_each_point_runs_with_the_gpu_nodes_deployed_revision(hosts: Hosts) -> N
     assert runs(hosts) == [
         f"{runs_of.format(point)} --gpu-source phastform={DEPLOYED}" for point in ("a1", "a2")
     ]
-    assert hosts.calls(PHASTFORM, "variant") == ["variant.sh use frozen"] * 2
+    # Each point's engine, with the measurement drop-in's routes, which lh-bench e2 run reads.
+    switch = ["variant.sh measure on", "variant.sh use frozen"]
+    assert hosts.calls(PHASTFORM, "variant") == switch * 2
     assert f"a1: phastform has {DEPLOYED}" in (hosts.results / "c1" / "campaign.log").read_text()
 
 

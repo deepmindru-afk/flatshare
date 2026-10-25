@@ -1470,6 +1470,17 @@ def test_a_wrong_engine_fails_before_anything_starts(cyan: Cyan) -> None:
     assert (out / "engine.json").exists()
 
 
+@pytest.mark.parametrize("route", ["/server_info", "/reset_prefix_cache"])
+def test_an_engine_without_the_measurement_drop_in_fails_the_point_and_says_so(
+    cyan: Cyan, route: str
+) -> None:
+    # A production box: vLLM without its development mode has neither route.
+    del cyan.engine.routes[route]
+    with pytest.raises(E2Error, match=f"no {route}.*variant.sh measure on"):
+        run(cyan, "a1-voice", VOICE_ALONE)
+    assert record(cyan, "a1-voice")["status"] == "failed"
+
+
 def test_a_point_on_make_room_fails_on_the_frozen_box(cyan: Cyan) -> None:
     error = (
         f"the engine runs scheduler_cls = None, the point needs --scheduler-cls {MAKE_ROOM_CLS}: "

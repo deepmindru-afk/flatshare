@@ -4,6 +4,7 @@
 # `agents-seed N` sets AIPerf's seed for all of its points (lh-bench e2 run --agents-seed), in place of each arm
 # file's [agents] seed. For each point whose run directory on cyan is not complete, in order, it
 #   1. switches each GPU node to the arm's engine (deploy/phastform/variant.sh use, with what lh-bench e2 engine prints),
+#      with the measurement drop-in on (variant.sh measure on: vLLM's development routes, which lh-bench e2 run reads),
 #   2. measures the point on cyan (lh-bench e2 run) into ~/leaseholder/runs/e2/CAMPAIGN/POINT, with each GPU node's
 #      deployed revision (its ~/leaseholder/src/DEPLOYED as the point starts) for run.json, sampling each GPU's
 #      clocks and temperature once a second meanwhile into that directory's gpu.csv (gpu-NODE.csv on several nodes),
@@ -131,7 +132,8 @@ for i in "${!points[@]}"; do
   sources=""
   for gpu in "${gpus[@]}"; do
     log "$point: ${gpu%%.*} runs ${engines[$i]}"
-    $ssh "$gpu" "bash leaseholder/src/deploy/phastform/variant.sh use ${engines[$i]}" 2>&1 |
+    variant="bash leaseholder/src/deploy/phastform/variant.sh"
+    $ssh "$gpu" "$variant measure on && $variant use ${engines[$i]}" 2>&1 |
       tee -a "$results/campaign.log" || die "$point: ${gpu%%.*} did not start ${engines[$i]} (journalctl there)"
     # The node's deployed revision as the point starts (deploy/deploy.sh writes it), for run.json beside cyan's; empty
     # when the node has none.

@@ -118,7 +118,7 @@ The frozen box is `deploy/phastform/engine.yaml` and the units in `deploy/phastf
 - **`sglang`**: SGLang 0.5.22 on the engine's port. Build its environment once with `bash ~/leaseholder/src/deploy/phastform/variants/sglang/install.sh`. Its unit counts as started only after one sampled request, because the first one compiles FlashInfer's kernels for minutes.
 - **`mps`**: the three servers as clients of one CUDA MPS daemon (`lh-mps.service`); the frozen box uses time-slicing ([BENCHMARKS.md](../docs/BENCHMARKS.md#voice-on-the-shared-gpu)).
 
-`systemctl --user cat lh-engine` shows what the box runs. The generated variants (`pr54530`, `make-room`) build their scheduler module when the engine starts, and `variant.sh` restarts only for a change of drop-ins or flags: after deploying a change to a variant's `build.py`, run `systemctl --user restart lh-engine`, or the engine keeps the module it built before. `variant.sh on|off NAME` adds or removes a single variant, for work outside E2.
+`systemctl --user cat lh-engine` shows what the box runs. The generated variants (`pr54530`, `make-room`) build their scheduler module when the engine starts, and `variant.sh` restarts only for a change of drop-ins or flags: after deploying a change to a variant's `build.py`, run `systemctl --user restart lh-engine`, or the engine keeps the module it built before. `variant.sh on|off NAME` adds or removes a single variant, for work outside E2. `variant.sh measure on|off` adds or removes the measurement drop-in, vLLM's development routes, which `lh-bench e2 run` and the drills read and a production box does without; a campaign turns it on itself ([the routes](../deploy/phastform/variants/README.md#the-measurement-drop-in)).
 
 ## E2 points
 
@@ -133,7 +133,7 @@ Beside AIPerf's and the callers' records, each point keeps the gateway's request
 
 One point runs at a time: the pid of the running one is in `~/leaseholder/runs/.lh-bench-e2.lock` on cyan, and SIGINT to it stops AIPerf and the callers and marks the point failed.
 
-**Demo points.** The demo video needs a point whose callers saved their audio. `campaign.sh` does not pass that option, so measure such a point by hand on cyan, with the GPU node already on the arm's engine: `~/leaseholder/venvs/bench/bin/lh-bench e2 run ARM --out ~/leaseholder/runs/e2/demo/POINT --save-audio`. Each caller writes `call-<i>.wav` and `call-<i>.json` beside its turns; `uv run benchmarks/e2/demo.py LEFT RIGHT` renders the video from two such points ([`benchmarks/e2/README.md`](../benchmarks/e2/README.md)).
+**Demo points.** The demo video needs a point whose callers saved their audio. `campaign.sh` does not pass that option, so measure such a point by hand on cyan, with the GPU node already on the arm's engine and the measurement drop-in on (`variant.sh measure on`): `~/leaseholder/venvs/bench/bin/lh-bench e2 run ARM --out ~/leaseholder/runs/e2/demo/POINT --save-audio`. Each caller writes `call-<i>.wav` and `call-<i>.json` beside its turns; `uv run benchmarks/e2/demo.py LEFT RIGHT` renders the video from two such points ([`benchmarks/e2/README.md`](../benchmarks/e2/README.md)).
 
 ## Drills
 
@@ -170,6 +170,7 @@ The failure drills run from a workstation with SSH to the hosts, on the variant 
 | Some voice turns wait about 3 s before the agent answers | LiveKit's end-of-turn model is waiting its maximum endpointing delay | Link the `vad-turns` worker variant |
 | A caller run fails with "the agent never listened" | The worker is not registered ("registered worker" missing from its log), or LiveKit was restarted under it | `journalctl --user -u lh-voice-worker -n 50`; `systemctl --user restart lh-voice-worker` |
 | `lh-bench e2 run` fails at its engine check | The GPU node runs another variant or other flags than the arm names | `variant.sh use` with what `lh-bench e2 engine ARM` prints; a campaign does this itself |
+| `lh-bench e2 run` or `lh-bench drill cpu-tier`: "no /server_info" | The engine runs without the measurement drop-in, as a production box does | `variant.sh measure on` (restarts the engine); a campaign does this itself |
 | `lh-bench e2 run`: "another lh-bench e2 run or reset holds" the lock | A point is still running, or one was interrupted | The pid is in `~/leaseholder/runs/.lh-bench-e2.lock`; stop it with SIGINT, or wait |
 | The gateway does not start for a point, and `run.json` quotes its log | The arm's `[gateway]` table sets a key this gateway build does not know | Deploy a gateway build that has it, or fix the arm; `lh-bench e2 reset` restores `gateway.toml` |
 | The gateway answers 429 `queue_full` or 503 `queue_timeout` | An `[admission]` policy's queue is full or its wait ran out | Expected under the E2 policies, and counted in `lh_gateway_admission_refused_total` |

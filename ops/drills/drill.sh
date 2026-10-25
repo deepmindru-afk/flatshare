@@ -9,7 +9,8 @@
 # end, the GPU node's /dev/shm before and after (the CPU tier lives there), the engine's scheduler class, and for
 # engine-kill the engine's journal from the kill on; then it prints `lh-bench drill report`. LH_SSH, LH_CYAN and LH_GPU
 # as for benchmarks/e2/campaign.sh, with one GPU node. The drill runs on whatever variant the node runs: switch it
-# first with deploy/phastform/variant.sh use.
+# first with deploy/phastform/variant.sh use. The scheduler class comes from /server_info, which only the measurement
+# drop-in serves (variant.sh measure on); without it the scheduler file is empty.
 set -euo pipefail
 usage() { echo "usage: drill.sh engine-kill|gateway-restart [NAME]" >&2; exit 2; }
 (($# >= 1 && $# <= 2)) || usage

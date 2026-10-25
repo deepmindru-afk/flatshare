@@ -25,7 +25,8 @@ from typing import Any
 import httpx
 import orjson
 
-from leaseholder_bench.e2.run import Host, read_env
+from leaseholder_bench.e2.arm import E2Error
+from leaseholder_bench.e2.run import MEASURE, Host, read_env
 from leaseholder_bench.kv_metrics import metric_samples
 from leaseholder_bench.load import random_prompt, summarize
 from leaseholder_bench.protocol import DEFAULT_MODEL, SloClass
@@ -353,7 +354,10 @@ async def fill_cpu_tier(
     config = TiersConfig(url=str(client.base_url), model=DEFAULT_MODEL, lengths=(), priority=None)
     async with client:
         probe = TierProbe(client, config)
-        info = (await client.get("/server_info", params={"config_format": "json"})).json()
+        answer = await client.get("/server_info", params={"config_format": "json"})
+        if answer.status_code == 404:
+            raise E2Error(f"the engine has no /server_info. {MEASURE}")
+        info = answer.json()
         capacity = int(
             info["vllm_config"]["kv_transfer_config"]["kv_connector_extra_config"][
                 "cpu_bytes_to_use"

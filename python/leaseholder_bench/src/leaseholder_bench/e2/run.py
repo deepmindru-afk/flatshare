@@ -21,7 +21,8 @@ nodes (``LH_NODES``, so that each call's STT and TTS follow its node), and repor
 total.
 
 The run reaches every engine by its address (:mod:`leaseholder_bench.transport`): on cyan, the tunnel's
-socket.
+socket. Its engine check and cache resets need vLLM's development routes, which only the measurement
+drop-in serves (``deploy/phastform/variant.sh measure on``, which ``benchmarks/e2/campaign.sh`` runs).
 
 The GPU nodes' engines are switched by ``benchmarks/e2/campaign.sh`` (``variant.sh use``), never here.
 A failure ends the point: ``run.json`` keeps ``"status": "failed"`` and the error, and every process
@@ -458,10 +459,16 @@ equal). A vLLM point expects them wherever its flags say nothing else, so it can
 earlier point left on the box."""
 
 
+MEASURE = (
+    "vLLM serves /server_info and the cache resets only in its development mode, which the measurement "
+    "drop-in sets: deploy/phastform/variant.sh measure on"
+)
+
+
 def describe_engine(engine: str) -> EngineInfo:
-    """The engine at the address ``engine``: vLLM (``/server_info`` needs VLLM_SERVER_DEV_MODE=1, which
-    lh-engine.service sets) or SGLang."""
-    info = _get_json(engine, "/server_info", params={"config_format": "json"})
+    """The engine at the address ``engine``: vLLM (whose ``/server_info`` needs its development mode, from
+    the measurement drop-in) or SGLang."""
+    info = _get_json(engine, "/server_info", params={"config_format": "json"}, missing=MEASURE)
     if "vllm_config" in info:
         config = info["vllm_config"]
         settings = {**config.get("cache_config", {}), **config.get("scheduler_config", {})}
@@ -624,6 +631,8 @@ def reset_prefix_cache(engine: str, server: str, timeout: float = 120.0) -> None
     def done() -> bool:
         with client(engine, timeout=30) as http:
             response = http.post(path)
+        if response.status_code == 404:
+            raise E2Error(f"{engine}: no {path.split('?')[0]}. {MEASURE}")
         if server == "vllm":
             return response.status_code == 200 and response.json().get("success") is True
         return response.status_code == 200
@@ -631,11 +640,13 @@ def reset_prefix_cache(engine: str, server: str, timeout: float = 120.0) -> None
     _until(done, timeout, f"the engine did not reset its prefix cache within {timeout:.0f} s")
 
 
-def _get_json(address: str, path: str, **kwargs: Any) -> dict[str, Any]:
-    """The JSON of ``GET path`` from the server at ``address``."""
+def _get_json(address: str, path: str, missing: str | None = None, **kwargs: Any) -> dict[str, Any]:
+    """The JSON of ``GET path`` from the server at ``address``; ``missing`` says why a 404 may come."""
     try:
         with client(address, timeout=30) as http:
             response = http.get(path, **kwargs)
+        if response.status_code == 404 and missing:
+            raise E2Error(f"{address}: no {path}. {missing}")
         response.raise_for_status()
         return response.json()
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
