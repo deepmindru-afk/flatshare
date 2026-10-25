@@ -10,7 +10,6 @@ lh=unix:${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/lh
 engine=${1:-$lh/engine.sock}
 stt=${2:-$lh/stt.sock}
 tts=${3:-$lh/tts.sock}
-model=Qwen/Qwen3-4B-Instruct-2507-FP8
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
@@ -29,6 +28,7 @@ at() {
 
 for server in "$engine" "$stt" "$tts"; do at "$server" /health -fsS -m 5 -o /dev/null; done
 stage health ok
+model=$(at "$engine" /v1/models -fsS -m 5 | field '["data"][0]["id"]') # the engine's own model
 
 t=$(at "$tts" /v1/audio/speech -fsS -o "$work/question.wav" -w '%{time_total}' -H 'Content-Type: application/json' \
   -d '{"model":"kokoro","voice":"af_heart","response_format":"wav","input":"What is the capital of France?"}')

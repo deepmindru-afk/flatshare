@@ -87,6 +87,6 @@ Without any engine change, aborting background requests that have no first byte 
 
 ## Checking it on your hardware
 
-- `python/leaseholder_vllm/src/leaseholder_vllm/make-room/probe.py URL kv` sends a voice-sized request at priority 0 while two long priority-2 requests hold the pool, and `probe.py URL prefill` sends it behind three long prefills; each takes about a minute and prints the turn's first token and its 16th, with the engine's state before and after.
-- `tail.py URL SECONDS [AGENTS] [fresh|grow]` runs closed-loop agents beside two calls and prints the calls' TTFT distribution.
+- `python/leaseholder_vllm/src/leaseholder_vllm/make-room/probe.py ENGINE kv` sends a voice-sized request at priority 0 while long priority-2 requests hold the pool, and `probe.py ENGINE prefill` sends it behind three long prefills; each sizes its requests from the engine's pool and context, takes about a minute and prints the turn's first token and its 16th, with the engine's state before and after (`--reply 40`: a whole 40-token reply, timed to its last token too). ENGINE is the engine's address, `unix:` and its socket (the GPU node's, by default) or `http://host:port`.
+- `tail.py ENGINE SECONDS [AGENTS] [fresh|grow] [--reply TOKENS]` runs closed-loop agents beside two calls, by default as many as keep the frozen box's KV pressure on your pool (12 on the box's), and prints the calls' TTFT distribution and the agents' throughput; `--reply` times whole replies to their 16th and last token.
 - The whole measurement: an E2 arm file with your traces and `lh-bench e2 run` ([benchmarks/e2](../benchmarks/e2/README.md)).
