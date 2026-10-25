@@ -108,7 +108,8 @@ it fails) and how to check it on your hardware.
 - **Rounds.** Every configuration runs in each round, in a rotated order, on the round's own sample of the agents; a
   call opens with an unmeasured warm-up turn. Baselines are configured as their authors recommend.
 - **Reproducible.** `make reproduce-e2` rebuilds every table and figure from the committed records; the gateway adds
-  0.38 ms to a request's first token.
+  0.29 ms to a voice request's first token, paired against the engine's own socket on the final transport
+  ([W6](docs/BENCHMARKS.md#the-control-plane-lh-gateway-in-front-of-the-engine)).
 
 ## Documentation
 
