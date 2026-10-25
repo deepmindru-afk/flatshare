@@ -70,9 +70,9 @@ default_class = "background"
 #
 # policy = "preempt-resubmit"
 #
-# The lifecycle policy, which E2's arm 9 runs with make-room ("leaseholder" in E2's arm files, the same policy).
-# headroom_tokens is one voice turn at its longest, for each armed session: arm 1 averaged 646 prompt and 23
-# completion tokens a turn.
+# The lifecycle policy (policy = "lifecycle"; E2's arm files spell it "leaseholder"), which E2's arm 9 runs with
+# make-room. headroom_tokens is one voice turn at its longest, for each armed session: arm 1 averaged 646 prompt and
+# 23 completion tokens a turn.
 # policy = "lifecycle"
 # headroom_tokens = 1024
 # critical_prefill_budget_ms = 150
