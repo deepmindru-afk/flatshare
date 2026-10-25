@@ -373,8 +373,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum by (class) (rate(lh_gateway_error_events_total[5m]))",
-          "legendFormat": "error events, {{class}}",
+          "expr": "sum by (class, type) (rate(lh_gateway_error_events_total[5m]))",
+          "legendFormat": "error events, {{class}}, {{type}}",
           "refId": "B"
         }
       ]

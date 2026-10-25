@@ -15,7 +15,7 @@ use axum::routing::{MethodRouter, get, post};
 use axum::serve::ListenerExt;
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use http::{Method, StatusCode, Uri};
-use lh_proto::LifecycleEvent;
+use lh_proto::{LifecycleEvent, SloClass};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -49,6 +49,7 @@ pub(crate) struct Shared {
     pub stream_buffer_frames: usize,
     pub stall_timeout: Duration,
     pub first_byte_timeout: Duration,
+    pub drain: Drain,
     /// What `GET /metrics` asks of a request on a TCP listener.
     metrics_key: Option<MetricsKey>,
     /// When the one upstream's `/health` last succeeded.
@@ -68,6 +69,52 @@ impl Shared {
             Some(placement) => placement.events(&self.nodes, events),
         }
     }
+}
+
+/// A drain's cut: the moment, `background_drain_s` into a drain, when the background requests still running are
+/// ended. It never comes before a drain.
+#[derive(Debug)]
+pub(crate) struct Drain {
+    cut: watch::Sender<bool>,
+    /// `background_drain_s`.
+    pub grace: Duration,
+}
+
+impl Drain {
+    fn new(grace: Duration) -> Self {
+        Self {
+            cut: watch::channel(false).0,
+            grace,
+        }
+    }
+
+    /// What a request of `class` waits on for the cut, which ends background requests only.
+    pub fn cut_for(&self, class: Option<SloClass>) -> Option<watch::Receiver<bool>> {
+        (class == Some(SloClass::Background)).then(|| self.cut.subscribe())
+    }
+
+    fn cut(&self) {
+        self.cut.send_replace(true);
+    }
+}
+
+/// Completes at the drain's cut; never for a request the cut does not end (`None`).
+pub(crate) async fn cut(cut: &mut Option<watch::Receiver<bool>>) {
+    match cut {
+        Some(cut) => {
+            let _ = cut.wait_for(|cut| *cut).await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Why the drain's cut ended a request, which its client reads in the error.
+pub(crate) fn drain_message(grace: Duration) -> String {
+    format!(
+        "the gateway is stopping or reloading: background requests end {}s into its drain (background_drain_s); \
+         send the request again",
+        grace.as_secs_f64()
+    )
 }
 
 /// The state of one listener's routes.
@@ -163,6 +210,7 @@ impl Server {
             stream_buffer_frames: config.stream_buffer_frames,
             stall_timeout: config.stall_timeout,
             first_byte_timeout: config.first_byte_timeout,
+            drain: Drain::new(config.background_drain),
             metrics_key: config.metrics_key,
             healthy_at: Mutex::new(None),
         };
@@ -172,6 +220,12 @@ impl Server {
             sockets,
             drain_timeout: config.drain_timeout,
         })
+    }
+
+    /// The gateway's metrics, readable in process at any time, before it serves and after it stops: what
+    /// `GET /metrics` answers.
+    pub fn metrics(&self) -> MetricsReader {
+        MetricsReader(Arc::clone(&self.shared.metrics))
     }
 
     /// Where the listeners are bound, in configuration order, with the assigned port for TCP port 0.
@@ -186,7 +240,8 @@ impl Server {
     }
 
     /// Serves until `shutdown` completes, then stops accepting and lets in-flight requests finish for up to the
-    /// drain timeout. Unix socket files are removed before it returns.
+    /// drain timeout, except background ones, which are cut `background_drain_s` into the drain. Unix socket files
+    /// are removed before it returns.
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let shared = &self.shared;
         let admission = shared.nodes[0].admission.as_ref();
@@ -253,12 +308,28 @@ impl Server {
             }
         }
         shutdown.await;
+        let grace = shared.drain.grace;
         tracing::info!(
             drain_timeout_s = self.drain_timeout.as_secs_f64(),
+            background_drain_s = grace.as_secs_f64(),
             "shutting down: no new connections; draining in-flight requests"
         );
         drop(stop);
-        let drain = async { while serving.join_next().await.is_some() {} };
+        let drained = async { while serving.join_next().await.is_some() {} };
+        let cut = async {
+            tokio::time::sleep(grace).await;
+            tracing::info!(
+                "background_drain_s reached: cutting the background requests still in flight"
+            );
+            shared.drain.cut();
+            std::future::pending::<()>().await;
+        };
+        let drain = async {
+            tokio::select! {
+                () = drained => {}
+                () = cut => {}
+            }
+        };
         if tokio::time::timeout(self.drain_timeout, drain)
             .await
             .is_err()
@@ -441,6 +512,17 @@ async fn ready(State(app): State<App>) -> Response {
         (StatusCode::OK, "ready\n").into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "upstream not ready\n").into_response()
+    }
+}
+
+/// A gateway's metrics, read in process ([`Server::metrics`]).
+#[derive(Clone, Debug)]
+pub struct MetricsReader(Arc<Metrics>);
+
+impl MetricsReader {
+    /// The OpenMetrics exposition of `GET /metrics`.
+    pub fn encode(&self) -> String {
+        self.0.encode()
     }
 }
 

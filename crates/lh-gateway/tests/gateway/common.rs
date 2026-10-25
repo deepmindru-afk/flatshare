@@ -22,7 +22,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
-use lh_gateway::{AcceptedEvent, Config, EventSink, ListenAddr, LogSink, Server};
+use lh_gateway::{AcceptedEvent, Config, EventSink, ListenAddr, LogSink, MetricsReader, Server};
 use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -378,6 +378,8 @@ fn event_stream(body: Body) -> Response {
 pub struct Gateway {
     pub tcp: Target,
     pub unix: Target,
+    /// Its metrics, read in process: during a drain, when no listener takes the requests of [`Gateway::metrics`].
+    pub exposition: MetricsReader,
     shutdown: Option<oneshot::Sender<()>>,
     done: Option<JoinHandle<()>>,
 }
@@ -543,6 +545,7 @@ impl Gateway {
                 ListenAddr::Unix(path) => Target::Unix(path),
             });
         let (tcp, unix) = (targets.next().unwrap(), targets.next().unwrap());
+        let exposition = server.metrics();
         let (shutdown, stop) = oneshot::channel::<()>();
         let done = tokio::spawn(server.run(async move {
             let _ = stop.await;
@@ -550,6 +553,7 @@ impl Gateway {
         Self {
             tcp,
             unix,
+            exposition,
             shutdown: Some(shutdown),
             done: Some(done),
         }

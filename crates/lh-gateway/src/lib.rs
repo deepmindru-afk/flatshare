@@ -38,4 +38,4 @@ mod usage;
 
 pub use config::{Config, ConfigError, ListenAddr};
 pub use events::{AcceptedEvent, EventSink, LogSink};
-pub use server::Server;
+pub use server::{MetricsReader, Server};

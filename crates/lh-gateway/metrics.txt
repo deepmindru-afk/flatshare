@@ -5,16 +5,19 @@ lh_gateway_requests_total{tenant="",route="other",class="",status="404"} 0
 # TYPE lh_gateway_request_outcomes counter
 lh_gateway_request_outcomes_total{class="background",outcome="cancelled"} 0
 lh_gateway_request_outcomes_total{class="background",outcome="completed"} 0
+lh_gateway_request_outcomes_total{class="background",outcome="drained"} 0
 lh_gateway_request_outcomes_total{class="background",outcome="error"} 0
 lh_gateway_request_outcomes_total{class="background",outcome="shed"} 0
 lh_gateway_request_outcomes_total{class="background",outcome="stalled"} 0
 lh_gateway_request_outcomes_total{class="interactive",outcome="cancelled"} 0
 lh_gateway_request_outcomes_total{class="interactive",outcome="completed"} 0
+lh_gateway_request_outcomes_total{class="interactive",outcome="drained"} 0
 lh_gateway_request_outcomes_total{class="interactive",outcome="error"} 0
 lh_gateway_request_outcomes_total{class="interactive",outcome="shed"} 0
 lh_gateway_request_outcomes_total{class="interactive",outcome="stalled"} 0
 lh_gateway_request_outcomes_total{class="realtime",outcome="cancelled"} 0
 lh_gateway_request_outcomes_total{class="realtime",outcome="completed"} 0
+lh_gateway_request_outcomes_total{class="realtime",outcome="drained"} 0
 lh_gateway_request_outcomes_total{class="realtime",outcome="error"} 0
 lh_gateway_request_outcomes_total{class="realtime",outcome="shed"} 0
 lh_gateway_request_outcomes_total{class="realtime",outcome="stalled"} 0
@@ -275,11 +278,14 @@ lh_gateway_upstream_errors_total{kind="body"} 0
 lh_gateway_upstream_errors_total{kind="connect"} 0
 lh_gateway_upstream_errors_total{kind="request"} 0
 lh_gateway_upstream_errors_total{kind="timeout"} 0
-# HELP lh_gateway_error_events Error events sent on event streams the upstream broke off, before the gateway aborted them.
+# HELP lh_gateway_error_events Error events sent on event streams before the gateway aborted them, by type: upstream_unavailable when the upstream broke the stream off, draining when a draining gateway cut a background stream.
 # TYPE lh_gateway_error_events counter
-lh_gateway_error_events_total{class="background"} 0
-lh_gateway_error_events_total{class="interactive"} 0
-lh_gateway_error_events_total{class="realtime"} 0
+lh_gateway_error_events_total{class="background",type="draining"} 0
+lh_gateway_error_events_total{class="background",type="upstream_unavailable"} 0
+lh_gateway_error_events_total{class="interactive",type="draining"} 0
+lh_gateway_error_events_total{class="interactive",type="upstream_unavailable"} 0
+lh_gateway_error_events_total{class="realtime",type="draining"} 0
+lh_gateway_error_events_total{class="realtime",type="upstream_unavailable"} 0
 # HELP lh_gateway_events Lifecycle events by type, source and whether they repeated an earlier event.
 # TYPE lh_gateway_events counter
 lh_gateway_events_total{type="turn_started",source="client",duplicate="false"} 0

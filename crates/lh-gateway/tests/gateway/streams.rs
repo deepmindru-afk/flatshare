@@ -319,8 +319,11 @@ async fn an_event_stream_the_upstream_breaks_off_ends_with_a_typed_error_then_an
         error,
         serde_json::json!({"error": {"message": message, "type": "upstream_unavailable", "param": null, "code": 502}})
     );
-    gw.await_metric("lh_gateway_error_events_total{class=\"realtime\"}", 1.0)
-        .await;
+    gw.await_metric(
+        "lh_gateway_error_events_total{class=\"realtime\",type=\"upstream_unavailable\"}",
+        1.0,
+    )
+    .await;
     gw.await_metric("lh_gateway_upstream_errors_total{kind=\"body\"}", 1.0)
         .await;
     gw.await_metric(
@@ -346,8 +349,11 @@ async fn a_break_inside_an_event_ends_that_event_before_the_error() {
     let relayed = [&partial[..], b"\n\n"].concat();
     let error = broken_off(&relayed, &bytes);
     assert_eq!(error["error"]["type"], "upstream_unavailable");
-    gw.await_metric("lh_gateway_error_events_total{class=\"background\"}", 1.0)
-        .await;
+    gw.await_metric(
+        "lh_gateway_error_events_total{class=\"background\",type=\"upstream_unavailable\"}",
+        1.0,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -366,6 +372,7 @@ async fn a_json_body_the_upstream_breaks_off_gets_no_event() {
     gw.await_metric("lh_gateway_upstream_errors_total{kind=\"body\"}", 1.0)
         .await;
     let metrics = gw.metrics().await;
-    let series = "lh_gateway_error_events_total{class=\"background\"}";
+    let series =
+        "lh_gateway_error_events_total{class=\"background\",type=\"upstream_unavailable\"}";
     assert_eq!(metric(&metrics, series), Some(0.0));
 }

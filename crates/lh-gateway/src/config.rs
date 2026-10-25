@@ -48,6 +48,10 @@ pub struct Config {
     pub first_byte_timeout: Duration,
     /// How long a shutdown waits for in-flight requests.
     pub drain_timeout: Duration,
+    /// How far into a drain background requests go on before the gateway cuts them, so that a stop or a reload
+    /// is not held up by the longest agent turn: a stream then ends with a `draining` error event, and a request
+    /// without a response yet gets 503. Realtime and interactive requests have the whole drain timeout.
+    pub background_drain: Duration,
     /// Lifecycle-event ids remembered for deduplication, and for how long.
     pub event_dedup_capacity: usize,
     pub event_dedup_ttl: Duration,
@@ -252,6 +256,7 @@ struct RawConfig {
     stall_timeout_s: f64,
     first_byte_timeout_s: f64,
     drain_timeout_s: f64,
+    background_drain_s: f64,
     event_dedup_capacity: usize,
     event_dedup_ttl_s: f64,
     log_format: LogFormat,
@@ -277,6 +282,7 @@ impl Default for RawConfig {
             stall_timeout_s: 30.0,
             first_byte_timeout_s: 600.0,
             drain_timeout_s: 30.0,
+            background_drain_s: 5.0,
             event_dedup_capacity: 100_000,
             event_dedup_ttl_s: 600.0,
             log_format: LogFormat::Text,
@@ -521,6 +527,16 @@ impl RawConfig {
         if self.event_dedup_capacity == 0 {
             return Err("event_dedup_capacity must be positive".into());
         }
+        let drain_timeout = seconds("drain_timeout_s", self.drain_timeout_s)?;
+        let background_drain = Duration::try_from_secs_f64(self.background_drain_s)
+            .ok()
+            .filter(|grace| *grace <= drain_timeout)
+            .ok_or_else(|| {
+                format!(
+                    "background_drain_s must be a number of seconds from 0 to drain_timeout_s ({})",
+                    self.drain_timeout_s
+                )
+            })?;
         Ok(Config {
             upstream,
             placement,
@@ -538,7 +554,8 @@ impl RawConfig {
             stream_buffer_frames: self.stream_buffer_frames,
             stall_timeout: seconds("stall_timeout_s", self.stall_timeout_s)?,
             first_byte_timeout: seconds("first_byte_timeout_s", self.first_byte_timeout_s)?,
-            drain_timeout: seconds("drain_timeout_s", self.drain_timeout_s)?,
+            drain_timeout,
+            background_drain,
             event_dedup_capacity: self.event_dedup_capacity,
             event_dedup_ttl: seconds("event_dedup_ttl_s", self.event_dedup_ttl_s)?,
             log_format: self.log_format,
@@ -1137,9 +1154,10 @@ mod tests {
             [
                 config.stall_timeout,
                 config.first_byte_timeout,
-                config.drain_timeout
+                config.drain_timeout,
+                config.background_drain
             ],
-            [30, 600, 30].map(Duration::from_secs)
+            [30, 600, 30, 5].map(Duration::from_secs)
         );
         assert_eq!(
             (config.event_dedup_capacity, config.event_dedup_ttl),
@@ -1183,6 +1201,17 @@ mod tests {
                 "stall_timeout_s must be a positive",
             ),
             (
+                "background_drain_s = 31",
+                &a,
+                "background_drain_s must be a number of seconds from 0 to drain_timeout_s (30)",
+            ),
+            (
+                "drain_timeout_s = 2\nbackground_drain_s = 3",
+                &a,
+                "from 0 to drain_timeout_s (2)",
+            ),
+            ("background_drain_s = -1", &a, "from 0 to drain_timeout_s"),
+            (
                 "",
                 "[[listen]]\ntcp = \"127.0.0.1:1\"\ntenant = \"a\"\n[tenants.a]",
                 "TCP listener cannot",
@@ -1201,6 +1230,15 @@ mod tests {
         );
         let err = Config::from_toml(&https).unwrap_err().to_string();
         assert!(err.contains("http://host:port"), "{err}");
+    }
+
+    #[test]
+    fn background_requests_may_be_cut_from_the_drains_start_to_its_end() {
+        let a = format!("[tenants.a]\nkeys_sha256 = [\"{KEY}\"]");
+        let at_once = config("background_drain_s = 0", &a).unwrap();
+        assert_eq!(at_once.background_drain, Duration::ZERO);
+        let whole = config("drain_timeout_s = 10\nbackground_drain_s = 10", &a).unwrap();
+        assert_eq!(whole.background_drain, whole.drain_timeout);
     }
 
     #[test]

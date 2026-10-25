@@ -31,19 +31,19 @@ use hyper_util::client::legacy::{Client, ResponseFuture};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use prometheus_client::metrics::histogram::Histogram;
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, watch};
 
 use crate::admission::Ticket;
 use crate::config::UpstreamAddr;
 use crate::exchange::Exchange;
-use crate::metrics::{Outcome, Refusal, Route, UpstreamError};
+use crate::metrics::{ErrorEvent, Outcome, Refusal, Route, UpstreamError};
 use crate::placement::{self, InFlight, Node};
 use crate::sanitize::{
     REQUEST_ID, cap_reply, names_session, resolve_class, resolve_session, rewrite_body,
     sanitize_headers, set_engine_headers, strip_hop_by_hop,
 };
-use crate::server::{App, Shared};
+use crate::server::{self, App, Shared};
 use crate::usage::Scanner;
 
 /// The pooled HTTP/1.1 client to the engine, over TCP or its Unix socket.
@@ -254,7 +254,18 @@ pub(crate) async fn inference(app: App, route: Route, request: Request) -> Respo
         None => None,
         Some(admission) => {
             let arrived = Instant::now();
-            match admission.admit(class, session, body.json.len()).await {
+            // A background request still waiting at the drain's cut leaves the queue.
+            let mut cut = shared.drain.cut_for(Some(class));
+            let admitted = tokio::select! {
+                biased;
+                () = server::cut(&mut cut) => None,
+                admitted = admission.admit(class, session, body.json.len()) => Some(admitted),
+            };
+            let Some(admitted) = admitted else {
+                ex.admission_wait = Some(arrived.elapsed());
+                return ex.drained(shared.drain.grace);
+            };
+            match admitted {
                 Ok(ticket) => {
                     let waited = ticket.as_ref().map_or(Duration::ZERO, Ticket::waited);
                     ex.admission_wait = Some(waited);
@@ -362,21 +373,30 @@ async fn forward(
     parts.extensions.clear();
 
     ex.forwarded = true;
-    let sent = match &mut ticket {
-        Some(ticket) if ticket.preemptible() => {
-            resubmitting(shared, upstream, &mut ex, parts, body, ticket).await
-        }
-        Some(ticket) if ticket.sheddable() => {
-            let request = http::Request::from_parts(parts, body);
-            tokio::select! {
-                sent = send(shared, upstream, request) => sent.map(|response| (response, None)),
-                // Dropping the request future closes its connection, which aborts the engine request.
-                () = ticket.shed() => return ex.shed(),
+    // A background request without a response at the drain's cut is dropped, as is a shed one: dropping the
+    // request future closes its connection, which aborts the engine request.
+    let mut cut = shared.drain.cut_for(ex.class);
+    let sending = async {
+        match &mut ticket {
+            Some(ticket) if ticket.preemptible() => {
+                resubmitting(shared, upstream, &mut ex, parts, body, ticket).await
             }
+            Some(ticket) if ticket.sheddable() => {
+                let request = http::Request::from_parts(parts, body);
+                tokio::select! {
+                    sent = send(shared, upstream, request) => sent.map(|response| (response, None)),
+                    () = ticket.shed() => Err(Failure::Shed),
+                }
+            }
+            _ => send(shared, upstream, http::Request::from_parts(parts, body))
+                .await
+                .map(|response| (response, None)),
         }
-        _ => send(shared, upstream, http::Request::from_parts(parts, body))
-            .await
-            .map(|response| (response, None)),
+    };
+    let sent = tokio::select! {
+        biased;
+        () = server::cut(&mut cut) => Err(Failure::Drained),
+        sent = sending => sent,
     };
     let (response, first) = match sent {
         Ok(sent) => sent,
@@ -413,6 +433,7 @@ async fn forward(
         shared.stall_timeout,
         ticket,
         placed,
+        (cut, shared.drain.grace),
     ));
     let body = ClientBody {
         frames: receiver,
@@ -434,6 +455,10 @@ enum Failure {
     Body,
     /// A preempted request was not admitted again in time (503).
     Refused(Refusal),
+    /// The admission policy shed the request before its response, for a stricter class (429).
+    Shed,
+    /// A background request had no response yet at a drain's cut (503).
+    Drained,
 }
 
 impl Failure {
@@ -468,6 +493,8 @@ impl Failure {
                 ex.error(StatusCode::BAD_GATEWAY, "upstream_unavailable", message)
             }
             Self::Refused(refusal) => ex.refused(refusal),
+            Self::Shed => ex.shed(),
+            Self::Drained => ex.drained(shared.drain.grace),
         }
     }
 }
@@ -550,8 +577,9 @@ async fn first_frame(
         .unwrap_or(Err(Failure::Timeout("first byte")))
 }
 
-/// Relays an upstream body into the client's channel until either side ends, or until the admission policy
-/// sheds the request. The request's place on its node ends with the relay.
+/// Relays an upstream body into the client's channel until either side ends, until the admission policy sheds
+/// the request, or until a drain's cut ends a background one (`drain`: what it waits on, and the grace it had).
+/// The request's place on its node ends with the relay.
 #[allow(clippy::too_many_arguments)]
 async fn pump(
     mut upstream: Incoming,
@@ -562,14 +590,30 @@ async fn pump(
     stall_timeout: Duration,
     mut ticket: Option<Ticket>,
     _placed: Option<InFlight>,
+    drain: (Option<watch::Receiver<bool>>, Duration),
 ) {
     let _active = ex.class.map(|class| ex.metrics().stream_started(class));
     let sheddable = ticket.as_ref().is_some_and(Ticket::sheddable);
+    let (mut cut, grace) = drain;
     let outcome = loop {
         let frame = tokio::select! {
             biased;
             () = frames.closed() => break Outcome::Cancelled,
             () = shed(&mut ticket), if sheddable => break Outcome::Shed,
+            () = server::cut(&mut cut) => {
+                let message = server::drain_message(grace);
+                // At once or not at all: a drain does not wait for a client that stops reading.
+                if scanner.is_events()
+                    && frames
+                        .try_send(error_event(ErrorEvent::Draining, &message, scanner.at_event_boundary()))
+                        .is_ok()
+                    && let Some(class) = ex.class
+                {
+                    ex.metrics().error_event(class, ErrorEvent::Draining);
+                }
+                ex.note_error(message);
+                break Outcome::Drained;
+            }
             frame = upstream.frame() => frame,
         };
         let data = match frame {
@@ -579,10 +623,11 @@ async fn pump(
                 let message = format!("the upstream stream broke off: {}", causes(&err));
                 if scanner.is_events() {
                     // Within the stall timeout: a client that stops reading gets none.
-                    let event = error_event(&message, scanner.at_event_boundary());
+                    let event =
+                        error_event(ErrorEvent::Upstream, &message, scanner.at_event_boundary());
                     let sent = tokio::time::timeout(stall_timeout, frames.send(event)).await;
                     if let (Ok(Ok(())), Some(class)) = (sent, ex.class) {
-                        ex.metrics().error_event(class);
+                        ex.metrics().error_event(class, ErrorEvent::Upstream);
                     }
                 }
                 ex.note_error(message);
@@ -610,6 +655,10 @@ async fn pump(
             let sent = tokio::select! {
                 biased;
                 () = shed(&mut ticket), if sheddable => break Outcome::Shed,
+                () = server::cut(&mut cut) => {
+                    ex.note_error(server::drain_message(grace));
+                    break Outcome::Drained;
+                }
                 sent = tokio::time::timeout(stall_timeout, frames.send(data)) => sent,
             };
             match sent {
@@ -620,7 +669,10 @@ async fn pump(
         }
         scanner.feed(&scanned);
     };
-    if matches!(outcome, Outcome::Stalled | Outcome::Error | Outcome::Shed) {
+    if matches!(
+        outcome,
+        Outcome::Stalled | Outcome::Error | Outcome::Shed | Outcome::Drained
+    ) {
         aborted.store(true, Ordering::Release);
     }
     // An unfinished upstream body closes its connection when dropped, which aborts the engine request.
@@ -636,11 +688,11 @@ async fn pump(
 }
 
 /// The error event of vLLM's own streams (`data: {"error": {...}}`), which the gateway sends before it aborts an
-/// event stream the upstream broke off, so that a client learns why; a client that ignores it still sees the broken
-/// stream. After a partial event, a blank line ends that event first.
-fn error_event(message: &str, at_boundary: bool) -> Bytes {
+/// event stream, so that a client learns why: the upstream broke it off, or a draining gateway cut it. A client
+/// that ignores it still sees the broken stream. After a partial event, a blank line ends that event first.
+fn error_event(kind: ErrorEvent, message: &str, at_boundary: bool) -> Bytes {
     let error = serde_json::json!({
-        "error": {"message": message, "type": "upstream_unavailable", "param": null, "code": 502},
+        "error": {"message": message, "type": kind.as_str(), "param": null, "code": kind.code()},
     });
     let start = if at_boundary { "" } else { "\n\n" };
     Bytes::from(format!("{start}data: {error}\n\n"))

@@ -123,7 +123,7 @@ groups:
         annotations:
           summary: The gateway cannot relay the engine's /metrics (the engine or its tunnel is down)
       - alert: LhStreamsBroken
-        expr: sum(increase(lh_gateway_error_events_total[10m])) > 0
+        expr: sum(increase(lh_gateway_error_events_total{type="upstream_unavailable"}[10m])) > 0
         labels:
           severity: ticket
         annotations:

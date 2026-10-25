@@ -70,15 +70,19 @@ pub(crate) enum Outcome {
     /// The admission policy shed it to make room for a stricter class; the gateway cancelled the upstream
     /// request.
     Shed,
+    /// A background request still running `background_drain_s` into a drain: the gateway cut it, with a
+    /// `draining` error event on a stream or a 503 before the response.
+    Drained,
 }
 
 impl Outcome {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Completed,
         Self::Cancelled,
         Self::Stalled,
         Self::Error,
         Self::Shed,
+        Self::Drained,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -88,6 +92,34 @@ impl Outcome {
             Self::Stalled => "stalled",
             Self::Error => "error",
             Self::Shed => "shed",
+            Self::Drained => "drained",
+        }
+    }
+}
+
+/// Why the gateway ended an event stream with an error event: its `type`, and the HTTP status as its `code`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ErrorEvent {
+    /// The upstream broke the stream off (502).
+    Upstream,
+    /// A draining gateway cut a background stream (503): the client may send it again.
+    Draining,
+}
+
+impl ErrorEvent {
+    const ALL: [Self; 2] = [Self::Upstream, Self::Draining];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Upstream => "upstream_unavailable",
+            Self::Draining => "draining",
+        }
+    }
+
+    pub const fn code(self) -> u16 {
+        match self {
+            Self::Upstream => 502,
+            Self::Draining => 503,
         }
     }
 }
@@ -207,6 +239,12 @@ struct KindLabels {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ErrorEventLabels {
+    class: &'static str,
+    r#type: &'static str,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 struct EventLabels {
     r#type: &'static str,
     source: &'static str,
@@ -309,7 +347,7 @@ pub(crate) struct Metrics {
     sanitized: Family<FieldLabels, Counter>,
     class_clamped: Counter,
     upstream_errors: Family<KindLabels, Counter>,
-    error_events: Family<ClassLabels, Counter>,
+    error_events: Family<ErrorEventLabels, Counter>,
     events: Family<EventLabels, Counter>,
     usage_tokens: Family<UsageLabels, Counter>,
     admitted: Family<NodeClassLabels, Counter>,
@@ -415,7 +453,9 @@ impl Metrics {
             create(&metrics.first_byte, ClassLabels { class });
             create(&metrics.duration, ClassLabels { class });
             create(&metrics.streams_active, ClassLabels { class });
-            create(&metrics.error_events, ClassLabels { class });
+            for r#type in ErrorEvent::ALL.map(ErrorEvent::as_str) {
+                create(&metrics.error_events, ErrorEventLabels { class, r#type });
+            }
             for node in nodes {
                 let labels = NodeClassLabels {
                     node: node.clone(),
@@ -544,7 +584,8 @@ impl Metrics {
         );
         r.register(
             "error_events",
-            "Error events sent on event streams the upstream broke off, before the gateway aborted them",
+            "Error events sent on event streams before the gateway aborted them, by type: upstream_unavailable when \
+             the upstream broke the stream off, draining when a draining gateway cut a background stream",
             self.error_events.clone(),
         );
         r.register(
@@ -870,10 +911,11 @@ impl Metrics {
         self.upstream_errors.get_or_create(&labels).inc();
     }
 
-    /// An event stream the upstream broke off got an error event before its abort.
-    pub fn error_event(&self, class: SloClass) {
-        let labels = ClassLabels {
+    /// An event stream got an error event before its abort.
+    pub fn error_event(&self, class: SloClass, event: ErrorEvent) {
+        let labels = ErrorEventLabels {
             class: class.as_str(),
+            r#type: event.as_str(),
         };
         self.error_events.get_or_create(&labels).inc();
     }

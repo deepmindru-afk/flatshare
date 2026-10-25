@@ -172,6 +172,14 @@ impl Exchange {
         )
     }
 
+    /// The 503 for a background request that had no response yet at a drain's cut (`grace` into the drain):
+    /// `Retry-After: 1`, for the gateway that serves the sockets next.
+    pub fn drained(mut self, grace: Duration) -> Response {
+        self.outcome = Some(Outcome::Drained);
+        let message = crate::server::drain_message(grace);
+        self.not_ready("draining", message, Duration::from_secs(1))
+    }
+
     /// Records why a response already begun went wrong, for the request's log line.
     pub fn note_error(&mut self, message: String) {
         self.error = Some(message);

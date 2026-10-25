@@ -2,6 +2,7 @@
 
 mod admission;
 mod common;
+mod drain;
 mod events;
 mod leaseholder;
 mod metrics;
