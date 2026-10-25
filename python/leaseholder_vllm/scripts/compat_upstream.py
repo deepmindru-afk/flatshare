@@ -14,7 +14,8 @@ release tags into it, and reports:
   git 2.40);
 - with ``--python``, an interpreter with CPU torch and the Python dependencies of vLLM's main: on each clean merge, the
   test files the PR adds or changes (``tests/**/test_*.py`` in its diff), run on CPU from the merge's source; a test
-  that fails on main too is main's, not the PR's. An interpreter that cannot import main's scheduler is reported as
+  that fails on main too is main's, not the PR's. Each step that runs the interpreter has ``--timeout`` seconds (900),
+  and a PR's test run that takes longer fails its files. An interpreter that cannot import main's scheduler is reported as
   such, and runs nothing;
 - make-room's patches on a sparse checkout of the newest release, and of a newer release candidate if there is one
   (``build.py make-room OUT --source-tree``): they apply, or the first hunk that does not.
@@ -44,6 +45,9 @@ BUILD = Path(__file__).resolve().parents[1] / "src/leaseholder_vllm/build.py"
 RELEASE = re.compile(r"v(\d+(?:\.\d+)+)(?:rc(\d+))?")
 # What a test run needs to import, from the source tree it runs on.
 IMPORTS = "import pytest, torch, vllm.v1.core.sched.scheduler"
+# Seconds each step that runs the interpreter may take: the import check, the collection of main's tests, and each PR's
+# test run (the PRs' test files take 20 to 40 s on a 2.1 GHz Xeon).
+TIMEOUT = 900
 
 
 class CannotCheck(Exception):
@@ -165,26 +169,37 @@ def source_env(tree: Path) -> dict[str, str]:
     }
 
 
-def can_import(python: str, tree: Path) -> str | None:
+def can_import(python: str, tree: Path, timeout: float = TIMEOUT) -> str | None:
     """None if ``python`` imports pytest, torch and the scheduler from ``tree``, or why not."""
     try:
         proc = subprocess.run(
-            [python, "-c", IMPORTS], cwd=tree, env=source_env(tree), capture_output=True, text=True
+            [python, "-c", IMPORTS],
+            cwd=tree,
+            env=source_env(tree),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except OSError as error:
         return str(error)
+    except subprocess.TimeoutExpired:
+        return f"the import timed out after {timeout:g} s"
     return None if proc.returncode == 0 else last_line(proc.stderr)
 
 
-def harness_error(python: str, tree: Path, dirs: list[str]) -> str | None:
+def harness_error(python: str, tree: Path, dirs: list[str], timeout: float = TIMEOUT) -> str | None:
     """None if pytest collects ``dirs`` from ``tree``: its conftest files and test modules import. Or why not."""
-    proc = subprocess.run(
-        [python, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", *dirs],
-        cwd=tree,
-        env=source_env(tree),
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [python, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider", *dirs],
+            cwd=tree,
+            env=source_env(tree),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"pytest's collection timed out after {timeout:g} s"
     if proc.returncode in (0, 5):  # 5: no tests collected
         return None
     output = proc.stdout + proc.stderr
@@ -192,20 +207,28 @@ def harness_error(python: str, tree: Path, dirs: list[str]) -> str | None:
     return errors[-1] if errors else last_line(output)
 
 
-def run_tests(python: str, tree: Path, files: list[str]) -> tuple[int, set[str], str]:
+def run_tests(
+    python: str, tree: Path, files: list[str], timeout: float = TIMEOUT
+) -> tuple[int, set[str], str]:
     """``files`` run with pytest from ``tree``, on CPU: how many tests passed (not failed, erred or skipped), the node
-    IDs of those that failed or erred, and pytest's summary line."""
+    IDs of those that failed or erred, and pytest's summary line. A run that takes more than ``timeout`` seconds is
+    stopped and its files fail."""
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "junit.xml"
         cmd = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={report}"]
         cmd += ["-o", "junit_family=xunit1", *files]
-        proc = subprocess.run(
-            cmd,
-            cwd=tree,
-            env=source_env(tree),
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=tree,
+                env=source_env(tree),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            late = f"timed out after {timeout:g} s"
+            return 0, {f"{' '.join(files)}: {late}"}, late
         if not report.exists():
             return (
                 0,
@@ -276,7 +299,9 @@ def builds(git: Git, tag: str) -> str | None:
     return None if proc.returncode == 0 else last_line(proc.stderr).removeprefix("build.py: ")
 
 
-def check(clone: Path, python: str | None, git_cmd: str, remote: str) -> int:
+def check(
+    clone: Path, python: str | None, git_cmd: str, remote: str, timeout: float = TIMEOUT
+) -> int:
     if git_version(git_cmd) < (2, 38):
         raise CannotCheck(
             f"git merge-tree --write-tree needs git 2.38 or newer, and {git_cmd} is "
@@ -331,10 +356,10 @@ def check(clone: Path, python: str | None, git_cmd: str, remote: str) -> int:
         tests = {pr: changed_tests(git, pr, base) for pr, (_, base) in merges.items()}
         dirs = {str(Path(f).parent) for files in tests.values() for f in files}
         dirs = sorted(d for d in dirs if (main_tree / d).is_dir())
-        why = can_import(python, main_tree)
+        why = can_import(python, main_tree, timeout)
         if why:
             cannot = f"{python} cannot import vLLM main's scheduler on CPU ({why}): no test ran"
-        elif dirs and (why := harness_error(python, main_tree, dirs)):
+        elif dirs and (why := harness_error(python, main_tree, dirs, timeout)):
             cannot = (
                 f"{python} cannot run vLLM main's tests in {', '.join(dirs)} ({why}): no test ran"
             )
@@ -350,11 +375,11 @@ def check(clone: Path, python: str | None, git_cmd: str, remote: str) -> int:
                 "-m", f"#{pr} merged into main",
             ).strip()  # fmt: skip
             tree = worktree(git, f"merge-{pr}", commit, ["vllm", "tests"])
-            passed, failures, summary = run_tests(python, tree, files)
+            passed, failures, summary = run_tests(python, tree, files, timeout)
             mains = set()
             on_main = [f for f in files if (main_tree / f).exists()]
             if failures and on_main:
-                mains = run_tests(python, main_tree, on_main)[1] & failures
+                mains = run_tests(python, main_tree, on_main, timeout)[1] & failures
             line = f"  #{pr}: {', '.join(files)}: {summary}"
             if mains:
                 line += f" ({len(mains)} of them fail on main too)"
@@ -405,10 +430,16 @@ def main() -> None:
     )
     parser.add_argument("--git", default="git")
     parser.add_argument("--remote", default=REMOTE)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=TIMEOUT,
+        help=f"seconds each interpreter step may take (default {TIMEOUT})",
+    )
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
     try:
-        sys.exit(check(args.clone, args.python, args.git, args.remote))
+        sys.exit(check(args.clone, args.python, args.git, args.remote, args.timeout))
     except CannotCheck as error:
         print(f"compat-upstream: {error}", file=sys.stderr)
         sys.exit(2)

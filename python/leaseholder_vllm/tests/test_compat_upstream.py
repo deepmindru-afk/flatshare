@@ -223,6 +223,20 @@ def test_a_pr_whose_tests_all_skip_has_not_been_checked(tmp_path, upstream, pyth
     assert "no test ran" in proc.stdout
 
 
+def test_a_pr_test_that_hangs_fails_its_file_when_the_time_runs_out(tmp_path, upstream, python):
+    base = upstream.commit(None, BASE | scheduler_files(real=False))
+    main = upstream.commit(base, {"vllm/main_only.py": "m = 1\n"})
+    hangs = "import time\n\n\ndef test_pr():\n    time.sleep(120)\n"
+    kv = upstream.commit(base, {"tests/test_pr.py": hangs})
+    cap = upstream.commit(base, {"vllm/cap.py": "c = 1\n"})
+    remote = upstream.serve(main, {63350: kv, 63351: cap}, {"v0.40.0": base})
+    proc = run(tmp_path, remote, "--python", python, "--timeout", "4")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "#63350: tests/test_pr.py: timed out after 4 s\n" in proc.stdout
+    assert "FAILED tests/test_pr.py: timed out after 4 s" in proc.stdout
+    assert "#63351: no test file added or changed" in proc.stdout
+
+
 def test_an_interpreter_that_cannot_import_mains_scheduler_runs_nothing(tmp_path, upstream, python):
     error = "ModuleNotFoundError: No module named 'torch'"
     proc = run(tmp_path, standard(upstream), "--python", python, env={"FAKE_IMPORT_ERROR": error})
