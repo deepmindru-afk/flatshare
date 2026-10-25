@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import pwd
+import re
 import shutil
 import socket
 import socketserver
@@ -541,3 +542,49 @@ def test_bootstrap_keeps_lh_svc_once_chosen_until_auto_moves_the_units(ubuntu: d
         assert "systemd runs the units" in env_sh and "export LH_SUPERVISOR=systemd\n" in env_sh
     finally:
         lh_svc("stop", "lh-gateway.service")
+
+
+FAKE_UV = """\
+#!/bin/sh
+# uv for bootstrap.sh's venv steps: logs each call; venv DIR makes DIR/bin/python, a stand-in whose headers' probe
+# answers yes when the call asked for uv's own Python (--managed-python), no otherwise (a system Python 3.12's).
+echo "uv $*" >>"$FAKE_HOST/uv.log"
+if [ "$1" = venv ]; then
+  for dir; do :; done
+  mkdir -p "$dir/bin"
+  case " $* " in *" --managed-python "*) headers=True ;; *) headers=False ;; esac
+  printf '#!/bin/sh\necho %s/include\necho %s\n' "$dir" "$headers" >"$dir/bin/python"
+  chmod +x "$dir/bin/python"
+fi
+"""
+
+
+def test_bootstrap_makes_the_venvs_from_uvs_own_python(ubuntu: dict) -> None:
+    # On Ubuntu 24.04 uv prefers the system's Python 3.12, which has no headers there (libpython3.12-dev is not
+    # installed), so Triton could not build its launcher at the engine's first start. The venvs come from uv's own
+    # Python, and an engine venv an earlier stage made from the system's is made anew.
+    node, root = ubuntu["node"], ubuntu["home"] / "leaseholder"
+    (ubuntu["state"] / "uv").write_text(FAKE_UV)
+    (ubuntu["state"] / "uv").chmod(0o755)
+    node.mkdir(parents=True)
+    (node / "node.json").write_text(json.dumps({"install": {"path": "cu130"}}))
+    old = root / "venvs" / "engine" / "bin"
+    old.mkdir(parents=True)
+    (old / "python").write_text("#!/bin/sh\necho /usr/include/python3.12\necho False\n")
+    (old / "python").chmod(0o755)
+    done = bootstrap(ubuntu, f"uv={ubuntu['state'] / 'uv'}", "venvs")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "has no Python.h" in done.stdout
+    log = lines(ubuntu["state"] / "uv.log")
+    assert log[0] == f"uv venv -q --managed-python --python 3.12 {root}/venvs/engine", log
+    assert log[1].startswith(
+        f"uv pip sync -q --python {root}/venvs/engine/bin/python --torch-backend cu130 "
+    )
+    assert (
+        subprocess.run([str(old / "python")], capture_output=True, text=True).stdout.split()[1]
+        == "True"
+    )
+    # Every uv command of bootstrap.sh's that chooses an interpreter asks for uv's own.
+    for line in BOOTSTRAP.read_text().splitlines():
+        if re.search(r'"\$uv" (venv|sync|python find)\b', line):
+            assert "--managed-python" in line, line

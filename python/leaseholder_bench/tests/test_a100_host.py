@@ -16,6 +16,7 @@ import socketserver
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 import tomllib
@@ -240,6 +241,9 @@ elif "torch.cuda.init" in code:
     if "torch" in fail:
         sys.exit("RuntimeError: CUDA driver error: system has unsupported display driver / cuda driver combination (803)")
     print("13.0 NVIDIA A100-SXM4-40GB (8, 0)")
+elif "Python.h" in code:  # the headers' probe: a system Python 3.12 without libpython3.12-dev has none
+    print("/usr/include/python3.12" if "headers" in fail else str(Path(sys.argv[0]).parents[1] / "include"))
+    print("headers" not in fail)
 """
 
 
@@ -465,6 +469,7 @@ def test_the_preflight_passes_a_ready_host_and_labels_what_the_card_changes(
         "Async scheduling",
         "Block size",
         "Engine starts",
+        "Python headers",
         "MIG",
         "systemd --user and linger",
         "User namespaces",
@@ -481,6 +486,22 @@ def test_the_preflight_passes_a_ready_host_and_labels_what_the_card_changes(
     out = host_py.write_preflight(node, checks)
     data = json.loads(out.read_text())
     assert data["counts"]["degraded"] >= 1 and len(data["checks"]) == len(checks)
+
+
+def test_the_preflight_refuses_an_engine_venv_without_pythons_headers(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # Triton compiles its CUDA launcher against Python.h at the engine's first start: a venv made from a system
+    # Python 3.12 without its headers (Ubuntu 24.04's, without libpython3.12-dev) would fail there, in warm.
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts())
+    (venv / "leaseholder" / "venvs" / "engine" / "bin" / "fail").write_text("headers")
+    checks = {c.check: c for c in host_py.preflight(node, home=venv, gateway_url=engine)}
+    row = checks["Python headers"]
+    assert row.status == "refused" and row.value == "no Python.h in /usr/include/python3.12", row
+    assert "Triton" in row.reason and "uv's own Python" in row.reason
+    # The probe, on a real interpreter: this one's, uv's own, which has them.
+    assert host_py.python_headers(Path(sys.executable)) == (True, sysconfig.get_paths()["include"])
+    assert host_py.python_headers(tmp_path / "no-venv") is None
 
 
 def test_the_corpus_row_refuses_traces_that_do_not_resolve_on_this_host(

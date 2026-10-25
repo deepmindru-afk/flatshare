@@ -38,7 +38,9 @@ choose_supervisor() { # LH_SUPERVISOR, checked before anything is written; previ
 }
 
 # uv at the version the locks were resolved with or newer (uv 0.10.8 could not resolve the engine lock's torchcodec
-# through --torch-backend), and its Python 3.12 for the stdlib tools below.
+# through --torch-backend), and its own Python 3.12 for the stdlib tools below and every venv (--managed-python: uv
+# prefers a system Python, and Ubuntu 24.04's 3.12 has no Python.h without libpython3.12-dev, which Triton compiles
+# its launcher against).
 uv=${UV:-$HOME/.local/bin/uv}
 uv_new_enough() {
   [[ -x $1 ]] && [[ $(printf '%s\n' 0.11.27 "$("$1" --version | awk '{print $2}')" | sort -V | head -1) == 0.11.27 ]]
@@ -49,7 +51,8 @@ tools() { # uv, its Python 3.12 (py), the compilers and ss
     curl -LsSf https://astral.sh/uv/0.11.27/install.sh | env UV_INSTALL_DIR="$HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh -s -- -q
     uv=$HOME/.local/bin/uv
   fi
-  py=$("$uv" python find 3.12 2>/dev/null) || { "$uv" python install -q 3.12 && py=$("$uv" python find 3.12); }
+  "$uv" python install -q 3.12
+  py=$("$uv" python find --managed-python 3.12)
   # Triton builds its launchers with a C compiler and nvcc needs a host C++ compiler.
   if ! command -v cc >/dev/null || ! command -v c++ >/dev/null; then
     log "no C or C++ compiler: build-essential"
@@ -137,6 +140,14 @@ shell_env() { # env.sh, which every command on this host sources: lh-svc's shims
   previous=$chosen
 }
 
+venv() { # venv DIR: a venv of uv's own Python 3.12; one an earlier stage made from a Python without Python.h goes
+  if [[ -x $1/bin/python ]] && ! host_py headers "$1/bin/python" >/dev/null; then
+    log "$1 has no Python.h (a system Python's): making it anew from uv's own Python 3.12"
+    rm -rf "$1"
+  fi
+  [[ -x $1/bin/python ]] || "$uv" venv -q --managed-python --python 3.12 "$1"
+}
+
 venvs() {
   local path lock backend
   path=$(field "$node/node.json" install path)
@@ -145,7 +156,7 @@ venvs() {
     cu129) lock=$src/deploy/a100/requirements/engine-cu129.txt backend=cu129 ;;
     *) log "no install path in node.json"; exit 2 ;;
   esac
-  [[ -x $root/venvs/engine/bin/python ]] || "$uv" venv -q --python 3.12 "$root/venvs/engine"
+  venv "$root/venvs/engine"
   log "engine venv: $path, ${lock#"$src/"}"
   "$uv" pip sync -q --python "$root/venvs/engine/bin/python" --torch-backend "$backend" "$lock"
   echo "$path" >"$root/venvs/engine/lh-install-path"
@@ -179,7 +190,7 @@ compilers() { # the files FlashInfer's JIT reads beside the compiler the units n
 }
 
 audio_and_models() {
-  [[ -x $root/venvs/tts/bin/python ]] || "$uv" venv -q --python 3.12 "$root/venvs/tts"
+  venv "$root/venvs/tts"
   "$uv" pip sync -q --python "$root/venvs/tts/bin/python" --torch-backend cu128 "$src/deploy/phastform/requirements/tts.txt"
   # Kokoro-FastAPI publishes no tag for 0.9.1-rc1, so the measured commit is the version pin (as on the box).
   local kokoro=$root/vendor/Kokoro-FastAPI
@@ -205,8 +216,8 @@ audio_and_models() {
 control_plane() {
   local venv
   for venv in voice:leaseholder_voice bench:leaseholder_bench; do
-    UV_PROJECT_ENVIRONMENT=$root/venvs/${venv%%:*} "$uv" sync -q --locked --python 3.12 --extra test \
-      --project "$src/python/${venv#*:}"
+    UV_PROJECT_ENVIRONMENT=$root/venvs/${venv%%:*} "$uv" sync -q --locked --managed-python --python 3.12 \
+      --extra test --project "$src/python/${venv#*:}"
   done
   HF_HUB_OFFLINE=1 "$root/venvs/voice/bin/python" -c \
     'from livekit.local_inference import init_eot; init_eot(); from livekit.plugins import silero; silero.VAD.load()'

@@ -823,6 +823,28 @@ def _gpu_processes() -> list[str] | None:
     return [line.strip() for line in done.stdout.splitlines() if line.strip()]
 
 
+HEADERS_PROBE = (
+    "import os, sysconfig; include = sysconfig.get_paths()['include']; "
+    "print(include); print(os.path.exists(os.path.join(include, 'Python.h')))"
+)
+
+
+def python_headers(python: Path) -> tuple[bool, str] | None:
+    """Whether ``python`` has its headers (Python.h in its sysconfig include directory), which Triton compiles its
+    CUDA launcher against at the engine's first start, and that directory; None where there is no such interpreter.
+    uv's own Python has them; a system Python 3.12 has them only with its -dev package."""
+    if not python.exists():
+        return None
+    try:
+        done = _run([str(python), "-c", HEADERS_PROBE], timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    found = done.stdout.split("\n")
+    if done.returncode or len(found) < 2:
+        return False, (done.stderr.strip().splitlines() or ["no output"])[-1]
+    return found[1].strip() == "True", found[0].strip()
+
+
 TORCH_PROBE = (
     "import torch; torch.cuda.init(); "
     "print(torch.version.cuda, torch.cuda.get_device_name(0), torch.cuda.get_device_capability(0))"
@@ -996,6 +1018,19 @@ def preflight(
         )
     else:
         add("Host compilers", "ok", f"{host['cc']}, {host['cxx']}")
+    headers = python_headers(root / "venvs" / "engine" / "bin" / "python")
+    if headers is None:
+        add("Python headers", "pending", "no engine venv", "bootstrap.sh stage makes it")
+    elif headers[0]:
+        add("Python headers", "ok", f"Python.h in {headers[1]}")
+    else:
+        add(
+            "Python headers",
+            "refused",
+            f"no Python.h in {headers[1]}",
+            "Triton compiles its CUDA launcher against Python.h at the engine's first start, which would fail: "
+            "bootstrap.sh stage makes the engine venv anew from uv's own Python 3.12, which has its headers",
+        )
 
     # The caches.
     cache = root / "cache"
@@ -1376,12 +1411,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--configs", type=Path, help="NAME VARIANT [FLAG...] lines instead of the core's three"
     )
+    p = commands.add_parser("headers", help="whether PYTHON has Python.h (exit status 1 if not)")
+    p.add_argument("python", type=Path)
     p = commands.add_parser(
         "with-engine-env", help="run a command with the engine unit's environment"
     )
     p.add_argument("node", type=Path)
     p.add_argument("cmd", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    if args.command == "headers":
+        found = python_headers(args.python)
+        print(
+            f"host: {args.python}: "
+            + (
+                f"Python.h in {found[1]}"
+                if found and found[0]
+                else f"no Python.h ({found[1] if found else 'no such interpreter'})"
+            )
+        )
+        return 0 if found and found[0] else 1
     if args.command == "with-engine-env":
         if not args.cmd:
             parser.error("with-engine-env needs a command")
