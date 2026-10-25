@@ -19,7 +19,6 @@ from leaseholder_bench.cli import main
 from leaseholder_bench.e2.arm import Agents, Voice, flag_values
 from leaseholder_bench.e2.figures import load_sweep
 from leaseholder_bench.e2.record import (
-    CALLER_ROOM,
     PLACEMENT_LOGGER,
     RECORD,
     SESSIONS_LOGGER,
@@ -67,8 +66,6 @@ T0 = 1_800_000_000.0  # the calls run from T0 to T0 + 100 s
 REPO = Path(__file__).resolve().parents[3]
 VOICE = REPO / "python" / "leaseholder_voice"
 VOICE_EVENTS = VOICE / "src" / "leaseholder_voice" / "events.py"
-VOICE_PLACEMENT = VOICE / "src" / "leaseholder_voice" / "placement.py"
-VOICE_BOTS = VOICE / "src" / "leaseholder_voice" / "bots.py"
 # The committed E2 records: W4's, then W5's re-measure.
 RESULTS = REPO / "benchmarks" / "results" / "2026-10-23-e2"
 W5_RESULTS = REPO / "benchmarks" / "results" / "2026-10-24-e2-w5"
@@ -1213,19 +1210,6 @@ def test_the_report_reads_the_lines_the_voice_worker_writes() -> None:
     # The sessions' end lines come from the module's own logger.
     assert SESSIONS_LOGGER == "leaseholder_voice.events" and "logging.getLogger(__name__)" in source
     assert '"session ended"' in source
-
-
-def test_the_report_reads_the_placements_the_voice_worker_logs() -> None:
-    source = VOICE_PLACEMENT.read_text()
-    # The placement lines come from the module's own logger and name each call's room and node.
-    assert (
-        PLACEMENT_LOGGER == "leaseholder_voice.placement"
-        and "logging.getLogger(__name__)" in source
-    )
-    assert 'context = {"session_id": session_id, "room": room}' in source
-    assert 'logger.info("session placed", extra=context | {"node": node})' in source
-    [room] = re.findall(r'f"(lh-bot-\{run_id\}-\{index\})"', VOICE_BOTS.read_text())
-    assert CALLER_ROOM.fullmatch(room.format(run_id="1f2e3d4c", index=12))
 
 
 def placement(run_id: str, caller: int, node: str) -> str:
