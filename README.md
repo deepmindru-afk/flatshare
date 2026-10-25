@@ -10,11 +10,11 @@ runs, their prefill shares every step of its reply. Two changes to the scheduler
 [#63350](https://github.com/vllm-project/vllm/pull/63350) and [#63351](https://github.com/vllm-project/vllm/pull/63351),
 bring it to 2.24 s, 0.20 s over its SLO, while the agents keep 97% of their throughput.
 
-![The same caller's second turn on each engine beside 24 coding-agent sessions: vLLM with the two PRs answers after 1.6 s, tuned vLLM after 10.8 s](docs/figures/e2-demo.gif)
+![The same caller's second turn on each engine beside 24 coding-agent sessions: vLLM with the two PRs answers after 1.9 s, tuned vLLM after 9.6 s](docs/figures/e2-demo.gif)
 
-*The same caller's second turn on each engine, beside the same agents (recorded 2026-10-24): the two PRs answer after
-1.6 s, tuned vLLM after 10.8 s; over both calls of each run, their V2V p95 was 2.2 and 10.9 s. The 75-second video, with
-sound, is in the [v0.3 release](https://github.com/StevenWang-CY/leaseholder/releases/tag/v0.3).*
+*The same caller's second turn on each engine, beside the same agents (recorded 2026-10-25): the two PRs answer after
+1.9 s, tuned vLLM after 9.6 s; over both calls of each run, their V2V p95 was 2.2 and 11.2 s. The 170-second video, with
+sound, is in the [v1.0 release](https://github.com/StevenWang-CY/leaseholder/releases/tag/v1.0).*
 
 ![Voice-to-voice p95 of each configuration over its runs, against the SLO: tuned vLLM near 10.5 s, a router that aborts and resubmits near 2.52 s, the two PRs at 2.24 s](docs/figures/e2-voice-p95.svg)
 
