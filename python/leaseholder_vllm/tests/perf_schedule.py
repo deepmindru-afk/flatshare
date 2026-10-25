@@ -27,6 +27,12 @@ step, the same on a machine that is uniformly faster or slower. Its cost off in 
 and the change's cost in µs that times the ratio, so that on = off x (1 + ratio). A run times every state in each of 3
 repetitions, a process each, the states in a rotated order.
 
+What it can see: a state fails when the change's own cost a step grows by the tolerance of the step with the switches
+on (the table's "fails past", in µs), which is a small share of the change's cost where the change costs much (the B
+states) and a large one where it costs little (the A states). And what it cannot: with 40 timed steps the
+10th-percentile step lies between the 4th and 5th fastest, so work added to fewer than about 9 steps in 10 does not
+move it. Each cell records the ratio by the median step as well, as information the check does not read.
+
 The check fails a state whose on/off exceeds the baseline's by more than the baseline's tolerance, a fraction of it
 (tolerance()), measured again over twice as many processes more and still exceeding it (confirm()). The baseline (benchmarks/perf/make-room-schedule.json) is two such runs, A and B, their repetitions
 interleaved and the off configuration timed twice in each process: its noise is off against off within each process,
@@ -344,18 +350,24 @@ def cheapest(schedulers: list[list[float]]) -> float:
 def cells(processes: list[dict]) -> dict[str, dict]:
     """Each state's cell from its processes, in STATES' order: the ratio, the median over the processes of each
     one's on/off - 1, which its turns pair; the cost off, the median over the processes, in µs, and the change's at
-    that cost; and where the off configuration was timed twice, the noise, the median of off2/off - 1."""
-    by_state: dict[str, list[dict[str, float]]] = {}
+    that cost; where the off configuration was timed twice, the noise, the median of off2/off - 1; and, as
+    information the check does not read, the same ratio by the median step, which work on fewer than about 9 steps
+    in 10 moves and the 10th-percentile step does not."""
+    by_state: dict[str, list[tuple[dict[str, float], dict[str, float]]]] = {}
     for proc in processes:
-        by_config = {c: cheapest(t) for c, t in proc["times_us"].items()}
-        by_state.setdefault(proc["state"], []).append(by_config)
+        p10 = {c: cheapest(t) for c, t in proc["times_us"].items()}
+        median = {c: min(map(statistics.median, t)) for c, t in proc["times_us"].items()}
+        by_state.setdefault(proc["state"], []).append((p10, median))
     out = {}
     for key in (s.key for s in STATES if s.key in by_state):
-        procs = by_state[key]
+        procs = [p10 for p10, _ in by_state[key]]
         ratios = [round(p["on"] / p["off"] - 1, 4) for p in procs]
         cell: dict = {"off_us": round(statistics.median(p["off"] for p in procs), 1)}
         cell |= costs(cell["off_us"], round(statistics.median(ratios), 4))
         cell["ratios"] = ratios
+        cell["median_ratio"] = round(
+            statistics.median(m["on"] / m["off"] - 1 for _, m in by_state[key]), 4
+        )
         if NOISE in procs[0]:
             cell["noises"] = [round(p[NOISE] / p["off"] - 1, 4) for p in procs]
             cell["noise"] = round(statistics.median(cell["noises"]), 4)
@@ -431,12 +443,13 @@ def confirm(result: dict, baseline: dict, again) -> tuple[dict[str, dict], list[
 
 
 def table(measured: dict[str, dict], baseline: dict | None) -> str:
-    """The cells as a Markdown table, in the PRs' rows' order."""
+    """The cells as a Markdown table, in the PRs' rows' order. Against a baseline, "fails past" is how many µs a step
+    more the change may cost before the state fails: the tolerance of the step with the switches on."""
     head = "| State | Running | off µs | on µs | change µs | ratio |"
     rule = "|---|---:|---:|---:|---:|---:|"
     if baseline:
-        head += " baseline | excess | |"
-        rule += "---:|---:|---|"
+        head += " baseline | excess | fails past | |"
+        rule += "---:|---:|---:|---|"
     lines = [head, rule]
     for state in STATES:
         cell = measured.get(state.key)
@@ -453,7 +466,9 @@ def table(measured: dict[str, dict], baseline: dict | None) -> str:
             else:
                 over = excess(cell["ratio"], base["ratio"])
                 verdict = "costlier" if over > baseline["tolerance"] else "ok"
-                line += f" {base['ratio']:+.2f} | {over:+.1%} | {verdict} |"
+                # The change may cost this much more a step before the state fails.
+                room = cell["off_us"] * baseline["tolerance"] * (1 + base["ratio"])
+                line += f" {base['ratio']:+.2f} | {over:+.1%} | +{room:,.0f} µs | {verdict} |"
         lines.append(line)
     return "\n".join(lines)
 

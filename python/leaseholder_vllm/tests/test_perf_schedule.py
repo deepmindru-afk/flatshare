@@ -102,13 +102,34 @@ def test_a_passing_run_is_not_measured_again():
     assert failures == [] and suspects == [] and measured["B64"]["ratio"] == 0.61
 
 
+def test_the_table_says_how_much_more_a_step_may_cost_before_a_state_fails():
+    """The change may cost the tolerance of the on step more before the state fails: off x tol x (1 + ratio)."""
+    measured = P.cells([process("B64", 1000, 1620)])
+    baseline = {"tolerance": 0.09, "cells": {"B64": {"ratio": 0.62}}}
+    head, _, line = P.table(measured, baseline).splitlines()
+    assert head.endswith("| baseline | excess | fails past | |")
+    assert line.endswith("| +0.62 | +0.0% | +146 µs | ok |")  # 1000 x 0.09 x 1.62
+
+
+def test_a_cell_records_the_median_step_too_which_sees_work_on_half_the_steps():
+    """The 10th-percentile step cannot see work done on fewer than about 9 steps in 10; the median-step ratio, kept
+    as information beside it, can."""
+    steps = {"off": [[100.0] * 40] * 2, "on": [[160.0] * 20 + [320.0] * 20] * 2}
+    cell = P.cells(
+        [{"run": "a", "rep": 1, "state": "C16", "order": ["off", "on"], "times_us": steps}]
+    )["C16"]
+    assert cell["ratio"] == 0.6 and cell["median_ratio"] == 1.4
+
+
 def test_the_table_shows_off_on_the_change_and_the_ratio_against_the_baseline():
     measured = P.cells([process("B64", 1000, 1620), process("C16", 250, 450)])
     baseline = {"tolerance": 0.09, "cells": {"B64": {"ratio": 0.62}, "C16": {"ratio": 0.6}}}
     lines = P.table(measured, baseline).splitlines()
     assert lines[0].startswith("| State | Running | off µs | on µs | change µs | ratio |")
-    assert lines[2] == "| B | 64 | 1,000 | 1,620 | +620 | +0.62 | +0.62 | +0.0% | ok |"
-    assert lines[3].endswith("| 16 | 250 | 450 | +200 | +0.80 | +0.60 | +12.5% | costlier |")
+    assert lines[2] == "| B | 64 | 1,000 | 1,620 | +620 | +0.62 | +0.62 | +0.0% | +146 µs | ok |"
+    assert lines[3].endswith(
+        "| 16 | 250 | 450 | +200 | +0.80 | +0.60 | +12.5% | +36 µs | costlier |"
+    )
     assert "baseline" not in P.table(measured, None)
 
 
