@@ -1,6 +1,7 @@
 """tests/perf_schedule.py (make perf-make-room): the cells' arithmetic, the tolerance and the check, the checked-in
-baseline, and, on vLLM's real scheduler, that each steady state is steady and runs the path it is named for. Nothing
-here times anything: tests/test_perf_control.py, the check's negative control, does, under make perf-make-room."""
+baseline, and, on vLLM's real scheduler, that each of the 13 steady states is steady, for stock vLLM's scheduler as for
+make-room's, and runs the path it is named for. Nothing here times anything: tests/test_perf_control.py, the check's
+negative control, does, under make perf-make-room."""
 
 import importlib.util
 import json
@@ -554,7 +555,7 @@ def test_stock_vllm_is_the_class_the_method_names(module):
     assert P.scheduler_class(module, "off") is P.scheduler_class(module, "on") is module.Scheduler
 
 
-@pytest.mark.parametrize("key", ["A16", "A64", "A64-nohit", "B16", "B64", "C16", "C64"])
+@pytest.mark.parametrize("key", list(P.BY_KEY))
 def test_each_state_is_steady_and_runs_the_path_it_is_named_for(module, long_model, key):
     assert steps(module, long_model, key, "stock") == [0] * (P.WARMUP + P.STEPS)  # steady too
     on, off = steps(module, long_model, key, "on"), steps(module, long_model, key, "off")
