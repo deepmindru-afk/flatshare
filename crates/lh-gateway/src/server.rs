@@ -410,7 +410,8 @@ async fn engine_metrics(State(app): State<App>, headers: HeaderMap, uri: Uri) ->
     }
 }
 
-/// 200 while the upstream's `/health` has answered within [`READY_WINDOW`]; otherwise it asks once more. With
+/// 200 while the upstream's `/health` has answered within [`READY_WINDOW`]; otherwise it asks once more. 503 at once
+/// while a request has found the upstream broken and its probe has not answered since (placement::recover). With
 /// `[nodes]`, 200 while a node answers its readiness probe.
 async fn ready(State(app): State<App>) -> Response {
     let shared = &app.shared;
@@ -420,6 +421,9 @@ async fn ready(State(app): State<App>) -> Response {
         } else {
             (StatusCode::SERVICE_UNAVAILABLE, "no node is ready\n").into_response()
         };
+    }
+    if !shared.nodes[0].ready() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "upstream not ready\n").into_response();
     }
     let upstream = &shared.nodes[0].upstream;
     let last = *shared

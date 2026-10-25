@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER};
 use lh_core::admission::Deferral;
 use lh_proto::{SessionId, SloClass};
 use tracing::Level;
@@ -121,6 +121,17 @@ impl Exchange {
         }
         self.error = Some(message);
         self.respond(status, &body)
+    }
+
+    /// The 503 for a request that no ready engine can take, sent without going upstream. `Retry-After` is `retry`,
+    /// the interval of the readiness probe that will say when an engine answers again, in whole seconds.
+    pub fn not_ready(self, code: &str, message: impl Into<String>, retry: Duration) -> Response {
+        let mut response = self.error(StatusCode::SERVICE_UNAVAILABLE, code, message);
+        let seconds = retry.as_secs_f64().ceil().max(1.0) as u64;
+        response
+            .headers_mut()
+            .insert(RETRY_AFTER, HeaderValue::from(seconds));
+        response
     }
 
     /// The 401 for a request without a known API key on a listener without a tenant.

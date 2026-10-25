@@ -138,9 +138,26 @@ impl Mock {
         mock
     }
 
+    /// A mock engine on 127.0.0.1 whose first connection closes at once, before any answer.
+    pub async fn start_flaky(script: Script) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listener = DropsFirst {
+            listener,
+            dropped: false,
+        };
+        let mut mock = Self::serve(script, listener, Arc::new(AtomicUsize::new(0)));
+        (mock.addr, mock.upstream) = (addr, format!("http://{addr}"));
+        mock
+    }
+
     /// A mock engine on a new Unix socket, as the engine serves on its GPU node or a tunnel on the control host.
     pub async fn start_unix(script: Script) -> Self {
-        let path = socket_path();
+        Self::start_unix_at(socket_path(), script).await
+    }
+
+    /// A mock engine on the Unix socket `path`, as an engine that comes back on its socket.
+    pub async fn start_unix_at(path: PathBuf, script: Script) -> Self {
         let listener = UnixListener::bind(&path).unwrap();
         let connections = Arc::new(AtomicUsize::new(0));
         let accepted = Arc::clone(&connections);
@@ -373,6 +390,31 @@ pub enum Target {
 }
 
 /// A Unix socket path unique to this test process and call, short enough for `sun_path`.
+/// A listener that closes the first connection it accepts at once, as a connection that breaks on its way to an
+/// engine that serves, and hands on every later one.
+struct DropsFirst {
+    listener: TcpListener,
+    dropped: bool,
+}
+
+impl axum::serve::Listener for DropsFirst {
+    type Io = TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (TcpStream, SocketAddr) {
+        loop {
+            let accepted = axum::serve::Listener::accept(&mut self.listener).await;
+            if std::mem::replace(&mut self.dropped, true) {
+                return accepted;
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.listener.local_addr()
+    }
+}
+
 pub fn socket_path() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);

@@ -326,10 +326,11 @@ pub(crate) struct Metrics {
     false_alarm_token_seconds: PerNode<Counter<f64, AtomicU64>>,
     realtime_sessions: Family<StateLabels, Gauge>,
     state_timeouts: Family<StateLabels, Counter>,
-    /// With `[nodes]` only: the sessions placed on each node, the placements, and the nodes' readiness.
+    /// With `[nodes]` only: the sessions placed on each node, and the placements.
     sessions: Family<NodeClassLabels, Gauge>,
     placements: Family<PlacementLabels, Counter>,
-    node_ready: Family<NodeLabel, Gauge>,
+    /// Each node's readiness; with one upstream, its own, without a label.
+    node_ready: PerNode<Gauge>,
 }
 
 impl Metrics {
@@ -389,7 +390,7 @@ impl Metrics {
             state_timeouts: Family::default(),
             sessions: Family::default(),
             placements: Family::default(),
-            node_ready: Family::default(),
+            node_ready: PerNode::new(nodes),
         };
         for class in SloClass::ALL.map(SloClass::as_str) {
             for outcome in Outcome::ALL.map(Outcome::as_str) {
@@ -466,9 +467,7 @@ impl Metrics {
                     create(&metrics.state_timeouts, labels);
                 }
             }
-            if policy.is_some() {
-                create(&metrics.node_ready, node.clone());
-            }
+            metrics.node_ready.of(node);
         }
         if let Some(policy) = policy {
             for reason in Reason::ALL.map(Reason::as_str) {
@@ -649,12 +648,14 @@ impl Metrics {
                  readiness (node_down), which leaves their KV behind",
                 self.placements.clone(),
             );
-            r.register(
-                "node_ready",
-                "Whether a node answers its readiness probe (1), or takes no new sessions (0)",
-                self.node_ready.clone(),
-            );
         }
+        self.node_ready.register(
+            r,
+            "node_ready",
+            "Whether a node answers its readiness probe (1), or takes no new sessions (0); with one upstream, \
+             whether it is ready (1), or a request found it broken and its /health has not answered since (0), \
+             while its requests are answered 503",
+        );
         self.registry = Arc::new(registry);
         self
     }
@@ -833,7 +834,7 @@ impl Metrics {
 
     /// The gauge of whether this handle's node answers its readiness probe.
     pub fn node_ready(&self) -> Gauge {
-        self.node_ready.get_or_create_owned(&self.node)
+        self.node_ready.of(&self.node)
     }
 
     /// A session was placed by `policy`, for `reason`.

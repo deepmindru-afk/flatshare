@@ -38,7 +38,7 @@ use crate::admission::Ticket;
 use crate::config::UpstreamAddr;
 use crate::exchange::Exchange;
 use crate::metrics::{Outcome, Refusal, Route, UpstreamError};
-use crate::placement::{InFlight, Node};
+use crate::placement::{self, InFlight, Node};
 use crate::sanitize::{
     REQUEST_ID, cap_reply, names_session, resolve_class, resolve_session, rewrite_body,
     sanitize_headers, set_engine_headers, strip_hop_by_hop,
@@ -179,6 +179,10 @@ impl Upstream {
     }
 }
 
+/// The message of the 503 that a request gets while the one upstream is not ready.
+const NOT_READY: &str =
+    "the engine is not ready: a request found it broken and its /health has not answered since";
+
 /// `POST /v1/chat/completions`, `/v1/completions` and `/v1/responses`.
 pub(crate) async fn inference(app: App, route: Route, request: Request) -> Response {
     let shared = &app.shared;
@@ -233,11 +237,14 @@ pub(crate) async fn inference(app: App, route: Route, request: Request) -> Respo
         else {
             ex.session = Some(session);
             let message = format!("no ready node takes {class} requests");
-            return ex.error(StatusCode::SERVICE_UNAVAILABLE, "no_ready_node", message);
+            return ex.not_ready("no_ready_node", message, placement.probe_interval());
         };
         node = &shared.nodes[in_flight.node()];
         ex.on_node(node);
         placed = Some(in_flight);
+    } else if !node.ready() {
+        ex.session = Some(session);
+        return ex.not_ready("upstream_not_ready", NOT_READY, placement::RECOVERY_PROBE);
     }
     let session = &*ex.session.insert(session);
 
@@ -293,9 +300,14 @@ pub(crate) async fn models(app: App, request: Request) -> Response {
     sanitize_headers(&mut parts.headers, tenant.trusted, &shared.metrics);
     parts.headers.insert(REQUEST_ID.clone(), ex.id.clone());
     // With `[nodes]`, any ready node knows the model.
-    let node = match shared.nodes.iter().find(|node| node.ready()) {
-        Some(node) => node,
-        None => &shared.nodes[0],
+    let Some(node) = shared.nodes.iter().find(|node| node.ready()) else {
+        return match &shared.placement {
+            Some(placement) => {
+                let message = "no node is ready";
+                ex.not_ready("no_ready_node", message, placement.probe_interval())
+            }
+            None => ex.not_ready("upstream_not_ready", NOT_READY, placement::RECOVERY_PROBE),
+        };
     };
     if shared.placement.is_some() {
         ex.on_node(node);
@@ -368,7 +380,14 @@ async fn forward(
     };
     let (response, first) = match sent {
         Ok(sent) => sent,
-        Err(failure) => return failure.answer(ex, shared),
+        Err(failure) => {
+            // The one upstream that a request found broken is probed until it answers; meanwhile its requests
+            // are answered 503 (placement::recover). With `[nodes]`, each node's probe runs all along.
+            if failure.broken() && shared.placement.is_none() && node.start_recovery() {
+                tokio::spawn(placement::recover(Arc::downgrade(&app.shared)));
+            }
+            return failure.answer(ex, shared);
+        }
     };
 
     let (mut parts, upstream_body) = response.into_parts();
@@ -418,6 +437,12 @@ enum Failure {
 }
 
 impl Failure {
+    /// Whether the upstream broke: no connection, or one that ended before the response began. A timeout is a
+    /// slow engine, which its probe would find serving, and a refusal the admission point's.
+    fn broken(&self) -> bool {
+        matches!(self, Self::Upstream(_) | Self::Body)
+    }
+
     /// The client's answer; the upstream error counts on the request's node.
     fn answer(self, ex: Exchange, shared: &Shared) -> Response {
         match self {
