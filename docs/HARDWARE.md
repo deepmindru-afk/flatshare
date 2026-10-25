@@ -19,7 +19,7 @@ The KV layout follows the CPU tier's connector, not the card: vLLM's `Offloading
 
 ## The hardware profile
 
-A GPU node's deployment is a function of a few inputs: the card (its memory, compute capability, driver), the host (CPUs by NUMA node, RAM, `/dev/shm`, systemd), the model and the rules below. [`deploy/profiles/`](../deploy/profiles) holds one profile per node type, and [`deploy/profile.py`](../deploy/profile.py) (Python's standard library only, so that a bare host runs it before any venv exists) writes a node's directory from one:
+A GPU node's deployment is a function of a few inputs: the card (its memory, compute capability, driver), the host (CPUs by NUMA node, RAM, `/dev/shm`, systemd), the model and the rules below. [`deploy/profiles/`](../deploy/profiles) holds one profile per node type, and [`deploy/profile.py`](../deploy/profile.py) (Python's standard library only, from 3.11 for `tomllib`, so that a bare host runs it before any venv exists: `bootstrap.sh` runs it on uv's Python 3.12) writes a node's directory from one:
 
 ```sh
 python3 deploy/profile.py detect --out host.json                # the host's facts: nvidia-smi, /sys, /proc, systemd, toolkits
