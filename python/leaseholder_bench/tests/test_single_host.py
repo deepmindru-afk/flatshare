@@ -315,8 +315,9 @@ def system_pythons() -> list[str]:
 
 
 @pytest.mark.skipif(not system_pythons(), reason="no system python3 of 3.10 or newer in /usr/bin")
-def test_the_host_python_runs_the_supervisor_and_the_forwarder(host: dict) -> None:
-    # A bare host's python3 runs them, as the shims and the scripts do: Ubuntu 22.04's is 3.10.
+def test_the_host_python_runs_the_hosts_scripts(host: dict) -> None:
+    # A bare host's python3 runs them, as the shims and the units do: Ubuntu 22.04's is 3.10. ruff's 3.10 target
+    # (ruff.toml) checks their syntax, not what they import, which only a run on 3.10 does.
     for python in system_pythons():
         done = subprocess.run(
             [python, str(BIN / "lh-svc"), "systemctl", "is-system-running"],
@@ -325,11 +326,21 @@ def test_the_host_python_runs_the_supervisor_and_the_forwarder(host: dict) -> No
             text=True,
         )
         assert done.returncode == 0 and done.stdout.strip() == "lh-svc", (python, done.stderr)
-        usage = subprocess.run([python, str(BIN / "lh-forward")], capture_output=True, text=True)
-        assert usage.returncode == 2 and "lh-forward LISTEN=TARGET" in usage.stderr, (
-            python,
-            usage.stderr,
-        )
+        for script, status, usage in (
+            ("lh-forward", 2, "lh-forward LISTEN=TARGET"),
+            ("lh-tunnel", 2, "usage: lh-tunnel NODE"),
+            ("lh-gateway-stop", 2, "usage: lh-gateway-stop"),
+            ("audit-listeners", 0, "usage: audit-listeners"),
+        ):
+            args = ["--help"] if script == "audit-listeners" else []
+            done = subprocess.run(
+                [python, str(BIN / script), *args], capture_output=True, text=True
+            )
+            assert done.returncode == status and usage in done.stdout + done.stderr, (
+                python,
+                script,
+                done.stderr,
+            )
 
 
 def test_a_start_whose_server_dies_fails_at_once_not_at_its_timeout(host: dict) -> None:
@@ -655,7 +666,7 @@ def test_a_vllm_servers_start_empties_its_own_directory_of_zmq_sockets(
     # vLLM names the ZMQ sockets between its API server and its engine core afresh at each start
     # (VLLM_RPC_BASE_PATH/<uuid4>) and removes none at a stop: the box's runtime directory held 111 after five hours of
     # engine switches. Each vLLM unit, the box's and the template's, keeps them in a directory of its own, which its
-    # start lines empty before the server starts (all of them but gpu-guard's, run as lh-svc runs them).
+    # start lines empty before the server starts (all of them but gpu-guard's, as lh-svc expands them).
     for name, value in host["env"].items():
         monkeypatch.setenv(name, value)
     lh_svc = _module("lh_svc", BIN / "lh-svc")
