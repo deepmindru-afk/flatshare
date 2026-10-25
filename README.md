@@ -115,11 +115,12 @@ it fails) and how to check it on your hardware.
 
 | To | Read |
 |---|---|
+| read the work as one paper: the problem, the change, the results and their limits | [docs/REPORT.md](docs/REPORT.md), the technical report |
 | deploy the change and watch it | [docs/PRODUCTION.md](docs/PRODUCTION.md) |
 | see how it works in vLLM's scheduler | [docs/ARCHITECTURE.md §2](docs/ARCHITECTURE.md#2-the-change-63350-and-63351), then the two PR diffs |
 | see every number, with runs and ranges | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | know how each experiment was designed and run | [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) |
-| read the story end to end | [docs/METHODS.md](docs/METHODS.md) |
+| follow the method: what was measured, in what order, and why | [docs/METHODS.md](docs/METHODS.md) |
 | compare with llm-d, Dynamo, SMG, SGLang and papers | [docs/PRIOR-ART.md](docs/PRIOR-ART.md) |
 | know why a decision was made | [docs/adr/](docs/adr) |
 | look up a term (arm 9, the frozen box, the window, W0 to W8) | [docs/GLOSSARY.md](docs/GLOSSARY.md) |
