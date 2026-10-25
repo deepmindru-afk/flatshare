@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from leaseholder_bench.e2 import run as e2run
+
 REPO = Path(__file__).resolve().parents[3]
 DEPLOY = REPO / "deploy"
 GIB = 1 << 30
@@ -281,6 +283,46 @@ def test_each_install_path_compiles_at_its_runtimes_cuda_version(tmp_path: Path)
     # R570 without them: cu129, and bootstrap.sh tries to install them.
     _, _, node = units("nocompat", gpu=A100 | {"driver": "570.86.15"})
     assert node["install"]["path"] == "cu129" and node["install"]["compat_eligible"] is True
+
+
+def test_the_second_models_profile_renders_the_cores_node_with_its_own_model_and_pool(
+    tmp_path: Path,
+) -> None:
+    host = {
+        "hostname": "a100-vm",
+        "gpu": {
+            "name": "NVIDIA A100-SXM4-40GB",
+            "memory_mib": 40960,
+            "compute_cap": "8.0",
+            "driver": "580.65.06",
+        },
+        "cpus": {"0": list(range(32))},
+        "memory": {"total_bytes": 200 << 30, "available_bytes": 190 << 30, "nodes": {}},
+        "shm": {"path": "/dev/shm", "total_bytes": 100 << 30, "free_bytes": 100 << 30},
+    }
+    core = profile.render(profile.load("a100-40gb"), host, tmp_path / "node")
+    second = profile.render(profile.load("a100-40gb-qwen3-14b"), host, tmp_path / "node-14b")
+    engine = (tmp_path / "node-14b" / "engine.yaml").read_text()
+    assert "\nmodel: Qwen/Qwen3-14B-FP8\n" in engine
+    assert "\nrevision: 9a283b4a5efbc09ce247e0ae5b02b744739e525a\n" in engine
+    assert '\ndefault-chat-template-kwargs: {"enable_thinking": false}\n' in engine
+    # 7,334 blocks of 16 tokens of the 14B's 160 KiB a token; the CPU tier four times it, as /dev/shm and RAM allow.
+    assert "kv-cache-memory: 19225640960\n" in engine and 19225640960 == 7334 * 16 * 160 * 1024
+    assert second["values"]["engine.cpu_bytes_to_use"] == str(71 << 30)
+    # Everything else is the core's: its STT, its plan and its units, in their own directory.
+    assert (tmp_path / "node-14b" / "stt.yaml").read_text() == (
+        tmp_path / "node" / "stt.yaml"
+    ).read_text()
+    assert second["plan"] == core["plan"]
+    for unit in ("lh-engine.service", "lh-stt.service", "lh-tts.service"):
+        ours = (tmp_path / "node-14b" / "systemd" / unit).read_text()
+        theirs = (tmp_path / "node" / "systemd" / unit).read_text()
+        ours = ours.replace("leaseholder/node-14b/", "leaseholder/node/")
+        assert ours.replace("Qwen3-14B-FP8", "Qwen3-4B-Instruct-2507-FP8") == theirs, unit
+    # The harness's engine check reads the same profile, its base's values under its own.
+    flags = dict(zip(*[iter(e2run.profile_flags("a100-40gb-qwen3-14b"))] * 2, strict=True))
+    assert flags["--model"] == "Qwen/Qwen3-14B-FP8" and flags["--max-num-batched-tokens"] == "512"
+    assert flags["--revision"] == second["values"]["model.revision"]
 
 
 def test_the_cpu_tier_shrinks_to_what_the_host_holds_and_is_refused_below_the_pool(

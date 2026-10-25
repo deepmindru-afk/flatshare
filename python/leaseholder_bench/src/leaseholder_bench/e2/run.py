@@ -507,14 +507,27 @@ MEASURE = (
 )
 
 
-def profile_flags(name: str, profiles: Path = PROFILES) -> tuple[str, ...]:
-    """The flags a GPU node's engine.yaml amounts to, by its hardware profile, among those the engine
-    reports: FROZEN's scheduler settings as the profile sets them, and its model, revision and context.
-    A vLLM point expects them wherever its flags say nothing else."""
+def load_profile(name: str, profiles: Path = PROFILES) -> dict[str, Any]:
+    """A hardware profile, its base's values under its own where its [profile] table names a base, as
+    deploy/profile.py loads it."""
     path = profiles / f"{name}.toml"
     if not path.is_file():
         raise E2Error(f"no hardware profile {name} in {profiles}")
     profile = tomllib.loads(path.read_text())
+    base = profile.get("profile", {}).pop("base", None)
+    if base is None:
+        return profile
+    merged = load_profile(base, profiles)
+    for section, table in profile.items():
+        merged[section] = merged.get(section, {}) | table if isinstance(table, dict) else table
+    return merged
+
+
+def profile_flags(name: str, profiles: Path = PROFILES) -> tuple[str, ...]:
+    """The flags a GPU node's engine.yaml amounts to, by its hardware profile, among those the engine
+    reports: FROZEN's scheduler settings as the profile sets them, and its model, revision and context.
+    A vLLM point expects them wherever its flags say nothing else."""
+    profile = load_profile(name, profiles)
     model, engine = profile["model"], profile["engine"]
     return (
         "--scheduling-policy", "priority",  # engine.yaml's for every profile (deploy/templates)

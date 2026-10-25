@@ -39,6 +39,9 @@ The rules (docs/HARDWARE.md):
   toolkit of the runtime's CUDA version where it has one, else with the venv's CUDA 13.0 compiler (cu130) or with CUDA
   12.9's toolkit, which bootstrap.sh installs into ~/leaseholder/cuda-12.9 (cu129: CUDA 12's wheels carry no nvcc).
 
+A profile whose [profile] table names a base takes the base's values under its own, table by table: the A100's
+second model (a100-40gb-qwen3-14b) is the core's profile with its own model, pool and directory.
+
 Standard library only (Python 3.11 or newer), so that a bare host runs it before any venv exists.
 """
 
@@ -518,14 +521,22 @@ def core_plan(
 
 
 def load(profile: str) -> dict:
-    """A profile by name (deploy/profiles/NAME.toml) or path."""
+    """A profile by name (deploy/profiles/NAME.toml) or path. One whose [profile] table names a base is that
+    profile with its own values over the base's, table by table: another model on the same card, say."""
     path = Path(profile)
     if not path.suffix:
         path = PROFILES / f"{profile}.toml"
     try:
-        return tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text())
     except OSError as e:
         raise ProfileError(f"no profile {profile}: {e}") from None
+    base = data.get("profile", {}).pop("base", None)
+    if base is None:
+        return data
+    merged = load(base)
+    for section, table in data.items():
+        merged[section] = merged.get(section, {}) | table if isinstance(table, dict) else table
+    return merged
 
 
 def flatten(profile: dict) -> dict[str, str]:
