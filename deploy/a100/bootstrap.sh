@@ -12,9 +12,11 @@
 #          vLLM's own parse of the node's configs, and the preflight with the GPU's checks
 #   warm   one engine start for each compile configuration (cache/warm.json), so that the campaign starts warm
 # LH_PROFILE names another profile; LH_MODELS adds MODEL@REVISION words to download (the 14B, for C'); LH_WARM is a
-# file of the configurations to warm (host.py warm --configs). LH_SUPERVISOR=lh-svc runs the units under
-# deploy/bin/lh-svc even where systemd's user manager could (docs/HARDWARE.md, single-host mode): env.sh keeps the
-# choice for the later stages and every script that sources it, and LH_SUPERVISOR=auto gives it back to the facts.
+# file of the configurations to warm (host.py warm --configs). The first stage chooses what runs the units, the user
+# manager where it outlives the session (lingering, which it enables where a user may) or else deploy/bin/lh-svc, and
+# env.sh keeps the choice for the later stages and every script that sources it. LH_SUPERVISOR=lh-svc runs them under
+# lh-svc even where systemd's user manager could (docs/HARDWARE.md, single-host mode), and LH_SUPERVISOR=auto
+# chooses again from the facts; either moves the units, stopping them under the supervisor they leave first.
 # Sourced (as a test does), it defines its functions and runs nothing.
 set -euo pipefail
 src=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -24,14 +26,15 @@ profile=${LH_PROFILE:-a100-40gb}
 stage=""
 log() { echo "[$(date -u +%FT%TZ)] bootstrap $stage: $*"; }
 
-choose_supervisor() { # LH_SUPERVISOR, checked before anything is written: unset, an earlier stage's choice
-  if [[ -z ${LH_SUPERVISOR:-} && -f $node/env.sh ]]; then
-    LH_SUPERVISOR=$(sed -n 's/^export LH_SUPERVISOR=//p' "$node/env.sh")
-  fi
-  case ${LH_SUPERVISOR:=auto} in
-    auto | lh-svc) export LH_SUPERVISOR ;;
+choose_supervisor() { # LH_SUPERVISOR, checked before anything is written; previous: what ran an earlier stage's units
+  previous=""
+  [[ ! -f $node/env.sh ]] || previous=$(sed -n 's/^export LH_SUPERVISOR=//p' "$node/env.sh")
+  case ${LH_SUPERVISOR:-} in
+    "") LH_SUPERVISOR=${previous:-auto} ;; # an earlier stage's choice (lh-svc or systemd), kept
+    auto | lh-svc) ;;
     *) echo "bootstrap: LH_SUPERVISOR is auto or lh-svc, not '$LH_SUPERVISOR'" >&2; exit 2 ;;
   esac
+  export LH_SUPERVISOR
 }
 
 # uv at the version the locks were resolved with or newer (uv 0.10.8 could not resolve the engine lock's torchcodec
@@ -77,11 +80,18 @@ detect() { # the host's facts, as the host's own systemctl answers (not the shim
 }
 
 render() {
-  # Lingering keeps the user manager, and so the units, past the last SSH session; without it, lh-svc runs them.
-  if [[ -f $node/host.json && $(field "$node/host.json" systemd_user) == True && $(field "$node/host.json" linger) != True ]]; then
-    loginctl enable-linger "$(id -un)" 2>/dev/null || true
-  fi
   detect
+  # Lingering keeps the user manager, and so the units, past the last SSH session; without it, lh-svc runs them. A
+  # user may enable its own (polkit's set-self-linger): the facts are read again at once, so that this stage
+  # chooses the supervisor the later ones keep.
+  if [[ $LH_SUPERVISOR != lh-svc && $(field "$node/host.json" systemd_user) == True &&
+    $(field "$node/host.json" linger) != True ]]; then
+    if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+      detect
+    else
+      log "lingering stays off (loginctl enable-linger was refused): lh-svc runs the units"
+    fi
+  fi
   "$py" "$src/deploy/profile.py" render "$profile" --host "$node/host.json" --out "$node"
   # R535 or R570 on a data-center card runs the box's lock once cuda-compat-13-0 is installed.
   if [[ $(field "$node/node.json" install path) == cu129 && $(field "$node/node.json" install compat_eligible) == True ]]; then
@@ -96,17 +106,35 @@ render() {
   log "install path: $(field "$node/node.json" install path): $(field "$node/node.json" install reason)"
 }
 
-shell_env() { # env.sh, which every command on this host sources: lh-svc's shims where it runs the units
-  if [[ $LH_SUPERVISOR == lh-svc && $(field "$node/host.json" systemd_user) == True ]]; then
-    # The user manager may run the units of an earlier stage: they stop, so that lh-svc's take their sockets.
+units=(leaseholder.target lh-engine lh-stt lh-tts lh-voice-worker lh-gateway.service lh-gateway.socket lh-livekit
+  lh-voicenet)
+stop_units() { # stop_units lh-svc|systemd: stop this host's units under that supervisor
+  if [[ $1 == lh-svc ]]; then
+    # With the env.sh that started them: lh-svc's shims and runtime directory.
+    # shellcheck source=/dev/null
+    (source "$node/env.sh" && systemctl --user stop "${units[@]}") 2>/dev/null || true
+  else
     local manager
     manager=$(PATH=${PATH//"$src"\/deploy\/bin\/shims:/} command -v systemctl || true)
-    [[ -z $manager ]] || "$manager" --user stop leaseholder.target lh-engine lh-stt lh-tts lh-voice-worker \
-      lh-gateway.service lh-gateway.socket lh-livekit lh-voicenet 2>/dev/null || true
+    [[ -z $manager ]] || "$manager" --user stop "${units[@]}" 2>/dev/null || true
+  fi
+}
+
+shell_env() { # env.sh, which every command on this host sources: lh-svc's shims where it runs the units
+  local chosen
+  chosen=$(host_py supervisor "$node")
+  if [[ -n $previous && $previous != "$chosen" ]]; then
+    # LH_SUPERVISOR moves the units: they stop where they ran, so that no unit runs under both.
+    log "the units move from $previous to $chosen (LH_SUPERVISOR=$LH_SUPERVISOR): stopping them under $previous"
+    stop_units "$previous"
+  elif [[ $chosen == lh-svc && $(field "$node/host.json" systemd_user) == True ]]; then
+    # The user manager may run units that no env.sh recorded: they stop, so that lh-svc's take their sockets.
+    stop_units systemd
   fi
   host_py env "$node"
   # shellcheck source=/dev/null
   source "$node/env.sh"
+  previous=$chosen
 }
 
 venvs() {

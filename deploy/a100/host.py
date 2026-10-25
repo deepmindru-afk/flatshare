@@ -96,8 +96,11 @@ CONTROL = (
 since the control plane reaches this host's GPU servers on their own sockets."""
 WORKER_VARIANTS = ("vad-turns",)
 """cyan's worker variants linked for good: every E2 point runs with fixed endpointing (ops/RUNBOOK.md)."""
-SUPERVISORS = ("auto", "lh-svc")
-"""LH_SUPERVISOR's values: the host's facts decide, or deploy/bin/lh-svc runs the units where systemd could."""
+SUPERVISORS = ("auto", "lh-svc", "systemd")
+"""LH_SUPERVISOR's values: auto, the host's facts decide; lh-svc, deploy/bin/lh-svc runs the units where systemd
+could. env.sh records the supervisor a stage chose, lh-svc or systemd, which the later stages keep (bootstrap.sh)."""
+UNITS = ("leaseholder.target", "lh-engine.service", "lh-stt.service", "lh-tts.service", *CONTROL)
+"""Every unit of this host's: the GPU node's and the control plane's."""
 GATEWAY_URL = "http://127.0.0.1:18080"
 """The gateway's TCP listener, AIPerf's way in (gateway.toml's first [[listen]])."""
 WARM = (
@@ -190,20 +193,34 @@ def engine_address(host: dict) -> str:
     return f"unix:{runtime_dir(host) / 'lh' / 'engine.sock'}"
 
 
+def chosen() -> str:
+    """LH_SUPERVISOR: auto (or unset), lh-svc, or the systemd that env.sh records once a stage chose it."""
+    value = os.environ.get("LH_SUPERVISOR") or "auto"
+    if value not in SUPERVISORS:
+        raise HostError(f"LH_SUPERVISOR is auto or lh-svc, not {value!r}")
+    return value
+
+
 def overridden() -> bool:
-    """Whether the operator chose lh-svc (LH_SUPERVISOR=lh-svc); auto or unset lets the facts decide."""
-    chosen = os.environ.get("LH_SUPERVISOR") or "auto"
-    if chosen not in SUPERVISORS:
-        raise HostError(f"LH_SUPERVISOR is auto or lh-svc, not {chosen!r}")
-    return chosen == "lh-svc"
+    """Whether lh-svc is chosen whatever the facts say (LH_SUPERVISOR=lh-svc: the operator's choice, or an earlier
+    stage's that env.sh keeps); auto or unset lets the facts decide."""
+    return chosen() == "lh-svc"
+
+
+def manager_usable(host: dict) -> bool:
+    """Whether the host has a user manager that outlives the session: systemd --user, with lingering."""
+    return bool(host.get("systemd_user") and host.get("linger"))
 
 
 def supervisor(host: dict) -> str:
-    """What runs the units: systemd's user manager where the host has one that outlives the session (systemd
-    --user and lingering), unless LH_SUPERVISOR=lh-svc; else deploy/bin/lh-svc."""
-    if overridden() or not (host.get("systemd_user") and host.get("linger")):
-        return "lh-svc"
-    return "systemd"
+    """What runs the units: deploy/bin/lh-svc with LH_SUPERVISOR=lh-svc; the user manager with
+    LH_SUPERVISOR=systemd (env.sh's record of an earlier stage's choice, kept even should the facts change: the
+    preflight then refuses); with auto, the user manager where the host has one that outlives the session, else
+    lh-svc."""
+    value = chosen()
+    if value == "auto":
+        return "systemd" if manager_usable(host) else "lh-svc"
+    return value
 
 
 def lh_svc_runtime() -> Path:
@@ -226,9 +243,11 @@ def write_env(node: Node, home: Path | None = None) -> Path:
     home = home or _home()
     path = node.dir / "env.sh"
     if supervisor(node.host) == "systemd":
+        # The choice is kept: the later stages run the units where this one did (bootstrap.sh).
         _write(
             path,
-            "# Sourced before any command on this host (deploy/a100/host.py env writes it): systemd runs the units.\n",
+            "# Sourced before any command on this host (deploy/a100/host.py env writes it): systemd runs the units.\n"
+            "export LH_SUPERVISOR=systemd\n",
         )
         return path
     state = os.environ.get("XDG_STATE_HOME") or str(home / ".local" / "state")
@@ -236,8 +255,9 @@ def write_env(node: Node, home: Path | None = None) -> Path:
     run.mkdir(mode=0o700, parents=True, exist_ok=True)
     run.chmod(0o700)
     why = (
-        "LH_SUPERVISOR=lh-svc chose deploy/bin/lh-svc over the user manager"
-        if overridden() and node.host.get("systemd_user") and node.host.get("linger")
+        "LH_SUPERVISOR=lh-svc (the operator's, or an earlier stage's choice, kept) runs the units under "
+        "deploy/bin/lh-svc over the user manager"
+        if overridden() and manager_usable(node.host)
         else "no systemd user manager that outlives the session here, so deploy/bin/lh-svc runs the units"
     )
     lines = [
@@ -247,11 +267,32 @@ def write_env(node: Node, home: Path | None = None) -> Path:
         "# through the systemctl and journalctl shims.",
         f"export XDG_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-{run}}}",
         f"export PATH={DEPLOY / 'bin' / 'shims'}:$PATH",
+        # The choice is kept: the later stages run the units where this one did (bootstrap.sh).
+        "export LH_SUPERVISOR=lh-svc",
     ]
-    if overridden():
-        lines.append("export LH_SUPERVISOR=lh-svc")
     _write(path, "\n".join(lines) + "\n")
     return path
+
+
+def active_elsewhere(host: dict) -> tuple[str, list[str]]:
+    """The supervisor that does not run this host's units, and those of its units that run under it: an earlier
+    stage's, which a split control plane leaves (the gateway's port held by one, the journal read from the other)."""
+    if supervisor(host) == "systemd":
+        other = "lh-svc"
+        command = [sys.executable, str(DEPLOY / "bin" / "lh-svc"), "systemctl"]
+    else:
+        other = "systemd"
+        shims = str(DEPLOY / "bin" / "shims")
+        path = os.pathsep.join(
+            p for p in os.environ.get("PATH", "").split(os.pathsep) if p != shims
+        )
+        manager = shutil.which("systemctl", path=path) if host.get("systemd_user") else None
+        if manager is None:
+            return other, []
+        command = [manager]
+    done = _run([*command, "--user", "is-active", *UNITS])
+    states = done.stdout.split()
+    return other, [unit for unit, state in zip(UNITS, states, strict=False) if state == "active"]
 
 
 # units
@@ -1143,7 +1184,15 @@ def preflight(
         )
 
     # The host's services.
-    if supervisor(host) == "systemd":
+    if supervisor(host) == "systemd" and not manager_usable(host):
+        add(
+            "systemd --user and linger",
+            "refused",
+            f"env.sh keeps systemd; systemd --user {bool(host.get('systemd_user'))}, linger {host.get('linger')}",
+            "the user manager stops the units with the last session: enable lingering (loginctl enable-linger), or "
+            "move the units to deploy/bin/lh-svc: LH_SUPERVISOR=auto bootstrap.sh stage",
+        )
+    elif supervisor(host) == "systemd":
         add("systemd --user and linger", "ok", "systemd --user, lingering")
     else:
         add(
@@ -1154,6 +1203,17 @@ def preflight(
             "supervisor instead of systemd (deploy/bin/lh-svc with the systemctl and journalctl shims)",
             "none on the measurements",
         )
+    other, split = active_elsewhere(host)
+    if split:
+        add(
+            "One supervisor",
+            "refused",
+            f"{supervisor(host)} runs the units, and {other} runs {', '.join(split)}",
+            f"a split control plane, an earlier stage's: stop them under {other}, then bootstrap.sh stage again "
+            "(bootstrap.sh moves the units itself on LH_SUPERVISOR=auto or lh-svc)",
+        )
+    else:
+        add("One supervisor", "ok", f"{supervisor(host)}, none of the units under {other}")
     if host.get("userns") is True:
         add("User namespaces", "ok", "the voice plane in its own network namespace")
     else:
@@ -1291,6 +1351,10 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (
         ("env", "write NODE/env.sh, with the supervisor's shims where lh-svc runs the units"),
+        (
+            "supervisor",
+            "print what runs the units: lh-svc or systemd (LH_SUPERVISOR and the facts)",
+        ),
         ("units", "link the units and this host's drop-ins"),
         ("config", "write the control plane's configuration"),
     ):
@@ -1327,6 +1391,8 @@ def main(argv: list[str] | None = None) -> int:
         node = Node.load(args.node)
         if args.command == "env":
             print(f"host: wrote {write_env(node)} ({supervisor(node.host)} runs the units)")
+        elif args.command == "supervisor":
+            print(supervisor(node.host))
         elif args.command == "units":
             for link in install_units(node):
                 print(f"host: linked {link}")

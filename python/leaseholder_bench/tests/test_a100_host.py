@@ -586,9 +586,67 @@ def test_the_override_runs_the_units_under_lh_svc_where_systemd_could(
     run = tmp_path / "state" / "lh-svc" / "run"
     assert host_py.runtime_dir(node.host) == run
     assert host_py.engine_address(node.host) == f"unix:{run}/lh/engine.sock"
-    monkeypatch.setenv("LH_SUPERVISOR", "systemd")
+    monkeypatch.setenv("LH_SUPERVISOR", "launchd")
     with pytest.raises(host_py.HostError, match="auto or lh-svc"):
         host_py.supervisor(node.host)
+
+
+def test_the_preflight_refuses_a_split_control_plane(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # The user manager runs the units, and an earlier stage's lh-svc still runs the gateway (a stand-in): the port
+    # and the journal would be split between them. Then the other way: lh-svc runs them, the user manager the gateway.
+    monkeypatch.delenv("LH_SUPERVISOR", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts())
+    monkeypatch.setenv("HOME", str(venv))
+    units = venv / ".config" / "systemd" / "user"
+    units.mkdir(parents=True, exist_ok=True)
+    (units / "lh-gateway.service").write_text(
+        f"[Service]\nExecStart={sys.executable} -c 'import time; time.sleep(60)'\n"
+    )
+    lh_svc = lambda *args: subprocess.run(  # noqa: E731
+        [sys.executable, str(DEPLOY / "bin" / "lh-svc"), "systemctl", "--user", *args],
+        capture_output=True,
+        text=True,
+    )
+
+    def check() -> host_py.Check:
+        checks = host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)
+        return next(c for c in checks if c.check == "One supervisor")
+
+    assert check().status == "ok"
+    assert lh_svc("start", "lh-gateway.service").returncode == 0
+    try:
+        split = check()
+        assert split.status == "refused", split
+        assert split.value == "systemd runs the units, and lh-svc runs lh-gateway.service"
+    finally:
+        lh_svc("stop", "lh-gateway.service")
+    assert check().status == "ok"
+    monkeypatch.setenv("LH_SUPERVISOR", "lh-svc")
+    script(
+        tmp_path / "bin" / "systemctl",
+        "for u; do case $u in --user | is-active) ;; lh-gateway.service) echo active ;; *) echo inactive ;; esac; done",
+    )
+    split = check()
+    assert split.status == "refused" and split.value == (
+        "lh-svc runs the units, and systemd runs lh-gateway.service"
+    )
+
+
+def test_a_recorded_systemd_without_lingering_is_refused(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # env.sh keeps systemd from an earlier stage, but lingering is off now: the units would stop with the session.
+    monkeypatch.setenv("LH_SUPERVISOR", "systemd")
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts(linger=False))
+    checks = {c.check: c for c in host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)}
+    row = checks["systemd --user and linger"]
+    assert row.status == "refused" and "LH_SUPERVISOR=auto bootstrap.sh stage" in row.reason
+    assert host_py.supervisor(node.host) == "systemd"
+    monkeypatch.setenv("LH_SUPERVISOR", "auto")
+    assert host_py.supervisor(node.host) == "lh-svc"
 
 
 def test_env_sh_is_written_for_lh_svc_with_the_override(tmp_path: Path, monkeypatch) -> None:
@@ -596,7 +654,9 @@ def test_env_sh_is_written_for_lh_svc_with_the_override(tmp_path: Path, monkeypa
     node = host_py.Node.load(out)
     home = tmp_path / "home"
     monkeypatch.delenv("LH_SUPERVISOR", raising=False)
-    assert "shims" not in host_py.write_env(node, home).read_text()  # systemd runs the units
+    text = host_py.write_env(node, home).read_text()
+    assert "shims" not in text  # systemd runs the units
+    assert "export LH_SUPERVISOR=systemd\n" in text  # the choice, kept for the later stages
     monkeypatch.setenv("LH_SUPERVISOR", "lh-svc")
     env_sh = host_py.write_env(node, home)
     text = env_sh.read_text()
@@ -620,11 +680,12 @@ def test_env_sh_is_written_for_lh_svc_with_the_override(tmp_path: Path, monkeypa
     assert path.split(":")[0] == str(REPO / "deploy" / "bin" / "shims")
     assert (runtime, chosen) == (str(run), "lh-svc")
     assert stat.S_IMODE(run.stat().st_mode) == 0o700
-    # A host without a user manager runs lh-svc without the override, which env.sh then does not name.
+    # A host without a user manager runs lh-svc without the override, and env.sh keeps that choice too.
     out, _ = render(tmp_path / "container", facts(systemd_user=False, linger=None))
     monkeypatch.delenv("LH_SUPERVISOR")
     text = host_py.write_env(host_py.Node.load(out), home).read_text()
-    assert "deploy/bin/shims" in text and "LH_SUPERVISOR" not in text
+    assert "deploy/bin/shims" in text and "no systemd user manager" in text
+    assert "export LH_SUPERVISOR=lh-svc\n" in text
 
 
 def test_bootstrap_refuses_an_unknown_supervisor_before_it_writes_anything(tmp_path: Path) -> None:

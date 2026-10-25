@@ -12,6 +12,7 @@ import http.server
 import importlib.util
 import json
 import os
+import pwd
 import shutil
 import socket
 import socketserver
@@ -384,3 +385,159 @@ def test_push_copies_the_corpora_as_files_that_outlive_the_workstations_paths(
     check = host_py.data_check(root)
     assert check.status == "ok", check
     assert check.value == "weka-x32-long 2 traces, weka-x32 4 traces, callers 1 clips"
+
+
+BOOTSTRAP = REPO / "deploy" / "a100" / "bootstrap.sh"
+HOST_TOOLS = {
+    "loginctl": """\
+#!/bin/sh
+# loginctl: show-user reads the user's linger state; enable-linger sets it, as polkit's set-self-linger lets a user
+# without sudo, unless FAKE_NO_LINGER refuses it.
+state="$FAKE_HOST/linger"
+case "$1" in
+  show-user) cat "$state" 2>/dev/null || echo no ;;
+  enable-linger)
+    echo "loginctl $*" >>"$FAKE_HOST/calls"
+    [ -z "$FAKE_NO_LINGER" ] || exit 1
+    echo yes >"$state" ;;
+esac
+""",
+    "systemctl": """\
+#!/bin/sh
+# The host's own systemctl: a user manager runs (the SSH session's); each call but is-system-running is logged.
+case "$*" in
+  *is-system-running*) echo running ;;
+  *) echo "systemctl $*" >>"$FAKE_HOST/calls" ;;
+esac
+""",
+    "nvidia-smi": "#!/bin/sh\nexit 1\n",  # staging: no card yet
+    "sudo": "#!/bin/sh\nexit 1\n",
+    "systemd-detect-virt": "#!/bin/sh\nexit 1\n",
+    "unshare": "#!/bin/sh\nexit 1\n",
+}
+"""A stock Ubuntu host's tools as bootstrap.sh's flow meets them: a user manager without lingering, no sudo."""
+
+
+@pytest.fixture
+def ubuntu(tmp_path: Path) -> dict:
+    """A host for bootstrap.sh's own steps: its home, the host's tools (HOST_TOOLS), and /proc, /sys and /dev/shm
+    that its facts read (32 CPUs, 200 GiB of RAM; /dev/shm is the scratch file system)."""
+    if shutil.disk_usage(tmp_path).free < 8 * GIB:
+        pytest.skip("the node's render needs 8 GiB free where /dev/shm is faked (R3)")
+    tools, state = tmp_path / "tools", tmp_path / "host"
+    tools.mkdir()
+    state.mkdir()
+    for name, body in HOST_TOOLS.items():
+        (tools / name).write_text(body)
+        (tools / name).chmod(0o755)
+    sysfs, procfs, rootfs = (tmp_path / d for d in ("sys", "proc", "root"))
+    cpus = sysfs / "devices" / "system" / "node" / "node0"
+    cpus.mkdir(parents=True)
+    (cpus / "cpulist").write_text("0-31\n")
+    (procfs / "1").mkdir(parents=True)
+    (procfs / "1" / "cgroup").write_text("0::/init.scope\n")
+    (procfs / "meminfo").write_text("MemTotal: 209715200 kB\nMemAvailable: 199229440 kB\n")
+    rootfs.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LH_", "XDG_"))} | {
+        "HOME": str(home),
+        "USER": "ops",
+        "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+        "FAKE_HOST": str(state),
+        "LH_SYSFS": str(sysfs),
+        "LH_PROCFS": str(procfs),
+        "LH_ROOTFS": str(rootfs),
+        "LH_SHM": str(tmp_path),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+    return {"home": home, "env": env, "state": state, "node": home / "leaseholder" / "node"}
+
+
+def bootstrap(host: dict, *steps: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """One invocation of bootstrap.sh's own steps, sourced: its supervisor's choice, then STEPS, each a command
+    under its set -e, as main runs a stage's (its tools aside: py is this Python)."""
+    script = "\n".join(
+        [
+            f"source {BOOTSTRAP}",
+            f"py={sys.executable}",
+            "choose_supervisor",
+            'mkdir -p "$node"',
+            *steps,
+        ]
+    )
+    return subprocess.run(
+        ["bash", "-c", script],
+        env=host["env"] | env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def calls(host: dict) -> list[str]:
+    return lines(host["state"] / "calls")
+
+
+def test_bootstrap_lingers_and_chooses_the_supervisor_once_in_the_first_stage(ubuntu: dict) -> None:
+    # A stock Ubuntu host: the SSH user's manager runs, lingering is off, and a user may enable its own. The first
+    # stage enables it and reads the facts again at once, so systemd runs the units from the start; the gpu stage
+    # finds the same, with nothing to enable or to move.
+    node = ubuntu["node"]
+    for invocation in ("stage", "gpu"):
+        done = bootstrap(ubuntu, "render", "shell_env")
+        assert done.returncode == 0, (invocation, done.stdout + done.stderr)
+        facts = json.loads((node / "host.json").read_text())
+        assert facts["systemd_user"] and facts["linger"], invocation
+        env_sh = (node / "env.sh").read_text()
+        assert "systemd runs the units" in env_sh and "shims" not in env_sh, (invocation, env_sh)
+        assert "export LH_SUPERVISOR=systemd\n" in env_sh, invocation  # kept for the next stages
+    user = pwd.getpwuid(os.getuid()).pw_name  # id -un
+    assert [c for c in calls(ubuntu) if c.startswith("loginctl")] == [
+        f"loginctl enable-linger {user}"
+    ]
+    assert not [c for c in calls(ubuntu) if c.startswith("systemctl")]  # nothing stopped
+
+
+def test_bootstrap_keeps_lh_svc_once_chosen_until_auto_moves_the_units(ubuntu: dict) -> None:
+    # Lingering refused at the first stage: lh-svc runs the units. Enabled later (an administrator), the facts would
+    # choose systemd, but the next stages keep lh-svc, whose units run the control plane; LH_SUPERVISOR=auto moves
+    # them, stopping lh-svc's first, so that no unit runs under both.
+    node, home = ubuntu["node"], ubuntu["home"]
+    done = bootstrap(ubuntu, "render", "shell_env", FAKE_NO_LINGER="1")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "deploy/bin/shims" in (node / "env.sh").read_text()
+    assert "export LH_SUPERVISOR=lh-svc\n" in (node / "env.sh").read_text()
+    # The units, as host.py units links them (stand-ins), and the control plane started under lh-svc.
+    units = home / ".config" / "systemd" / "user"
+    units.mkdir(parents=True)
+    for unit in host_py.UNITS:
+        (units / unit).write_text(
+            f"[Service]\nExecStart={sys.executable} -c 'import time; time.sleep(60)'\n"
+            if unit.endswith(".service")
+            else ""
+        )
+    shim = REPO / "deploy" / "bin" / "shims" / "systemctl"
+    lh_svc = lambda *args: subprocess.run(  # noqa: E731
+        ["bash", "-c", f"source {node / 'env.sh'} && {shim} --user {' '.join(args)}"],
+        env=ubuntu["env"],
+        capture_output=True,
+        text=True,
+    )
+    assert lh_svc("start", "lh-gateway.service").returncode == 0
+    try:
+        (ubuntu["state"] / "linger").write_text("yes\n")
+        done = bootstrap(ubuntu, "render", "shell_env")
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert json.loads((node / "host.json").read_text())["linger"] is True
+        env_sh = (node / "env.sh").read_text()
+        assert "deploy/bin/shims" in env_sh and "export LH_SUPERVISOR=lh-svc\n" in env_sh
+        assert lh_svc("is-active", "lh-gateway.service").stdout.strip() == "active"
+        moved = bootstrap(ubuntu, "render", "shell_env", LH_SUPERVISOR="auto")
+        assert moved.returncode == 0, moved.stdout + moved.stderr
+        assert "from lh-svc to systemd" in moved.stdout
+        assert lh_svc("is-active", "lh-gateway.service").stdout.strip() == "inactive"
+        env_sh = (node / "env.sh").read_text()
+        assert "systemd runs the units" in env_sh and "export LH_SUPERVISOR=systemd\n" in env_sh
+    finally:
+        lh_svc("stop", "lh-gateway.service")
