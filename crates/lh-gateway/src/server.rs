@@ -13,15 +13,15 @@ use axum::extract::{Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, get, post};
 use axum::serve::ListenerExt;
-use http::header::{CONTENT_TYPE, HeaderValue};
+use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use http::{Method, StatusCode, Uri};
 use lh_proto::LifecycleEvent;
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-use crate::auth::Tenants;
-use crate::config::{Config, ListenAddr, PrioritySignals};
+use crate::auth::{self, Tenants};
+use crate::config::{Config, ListenAddr, MetricsKey, PrioritySignals};
 use crate::events::{self, EventSink, Events};
 use crate::exchange::Exchange;
 use crate::metrics::{Metrics, Route};
@@ -30,6 +30,9 @@ use crate::proxy::{self, Upstream};
 
 /// `GET /ready` succeeds while the upstream's `/health` has answered within this window.
 const READY_WINDOW: Duration = Duration::from_secs(1);
+
+/// How long `GET /metrics/engine` waits for the engine's `/metrics`: Prometheus' default scrape timeout.
+const ENGINE_METRICS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// State shared by every listener.
 #[derive(Debug)]
@@ -46,6 +49,8 @@ pub(crate) struct Shared {
     pub stream_buffer_frames: usize,
     pub stall_timeout: Duration,
     pub first_byte_timeout: Duration,
+    /// What `GET /metrics` asks of a request on a TCP listener.
+    metrics_key: Option<MetricsKey>,
     /// When the one upstream's `/health` last succeeded.
     healthy_at: Mutex<Option<Instant>>,
 }
@@ -71,6 +76,8 @@ pub(crate) struct App {
     pub shared: Arc<Shared>,
     /// The tenant of requests on this listener that carry no known API key.
     pub listener_tenant: Option<usize>,
+    /// Whether the listener is a Unix socket, which its file mode keeps from other users of the host.
+    pub private: bool,
 }
 
 /// A gateway with every listener bound.
@@ -156,6 +163,7 @@ impl Server {
             stream_buffer_frames: config.stream_buffer_frames,
             stall_timeout: config.stall_timeout,
             first_byte_timeout: config.first_byte_timeout,
+            metrics_key: config.metrics_key,
             healthy_at: Mutex::new(None),
         };
         Ok(Self {
@@ -224,6 +232,7 @@ impl Server {
             let router = router(App {
                 shared: Arc::clone(&self.shared),
                 listener_tenant,
+                private: matches!(listener, Listener::Unix(..)),
             });
             let mut stopped = stopped.clone();
             let signal = async move {
@@ -290,6 +299,7 @@ fn router(app: App) -> Router {
         )
         .route("/v1/events", post(events::post))
         .route("/metrics", get(metrics))
+        .route("/metrics/engine", get(engine_metrics))
         .route("/health", get(|| async { "ok\n" }))
         .route("/ready", get(ready))
         .fallback(
@@ -333,10 +343,71 @@ fn inference(route: Route) -> MethodRouter<App> {
     post(move |State(app): State<App>, request: Request| proxy::inference(app, route, request))
 }
 
-async fn metrics(State(app): State<App>) -> Response {
+/// The 401 of a request that may not read the metrics: one on a TCP listener without the metrics key. On a Unix
+/// socket, private to its owner, no key is asked for, as for the requests of its tenant.
+fn metrics_refused(app: &App, headers: &HeaderMap) -> Option<Response> {
+    let key = app.shared.metrics_key.as_ref();
+    let allowed = app.private || key.is_some_and(|key| auth::is_metrics_key(headers, key));
+    (!allowed).then(|| {
+        Exchange::new(&app.shared.metrics, Route::Other).error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_api_key",
+            "missing or unknown metrics key",
+        )
+    })
+}
+
+async fn metrics(State(app): State<App>, headers: HeaderMap) -> Response {
+    if let Some(refused) = metrics_refused(&app, &headers) {
+        return refused;
+    }
     let content_type =
         HeaderValue::from_static("application/openmetrics-text; version=1.0.0; charset=utf-8");
     ([(CONTENT_TYPE, content_type)], app.shared.metrics.encode()).into_response()
+}
+
+/// `GET /metrics/engine`: the engine's own `/metrics`, under the rule of the gateway's, so that a scraper reaches
+/// the engine without a TCP route to it. With `[nodes]`, `?node=NAME` names the engine.
+async fn engine_metrics(State(app): State<App>, headers: HeaderMap, uri: Uri) -> Response {
+    if let Some(refused) = metrics_refused(&app, &headers) {
+        return refused;
+    }
+    let shared = &app.shared;
+    let fail = |status, code, message: String| {
+        Exchange::new(&shared.metrics, Route::Other).error(status, code, message)
+    };
+    let named = uri
+        .query()
+        .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("node=")));
+    let node = match (&shared.placement, named) {
+        (None, None) => &shared.nodes[0],
+        (Some(_), Some(name)) => match shared
+            .nodes
+            .iter()
+            .find(|n| n.name.as_deref() == Some(name))
+        {
+            Some(node) => node,
+            None => {
+                return fail(
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    format!("no node {name:?}"),
+                );
+            }
+        },
+        (Some(_), None) => {
+            let message = "the gateway fronts several nodes: name one, /metrics/engine?node=NAME";
+            return fail(StatusCode::BAD_REQUEST, "invalid_request", message.into());
+        }
+        (None, Some(_)) => {
+            let message = "the gateway fronts one engine, which has no node name";
+            return fail(StatusCode::BAD_REQUEST, "invalid_request", message.into());
+        }
+    };
+    match node.upstream.metrics(ENGINE_METRICS_TIMEOUT).await {
+        Ok(response) => response,
+        Err(message) => fail(StatusCode::BAD_GATEWAY, "upstream_unavailable", message),
+    }
 }
 
 /// 200 while the upstream's `/health` has answered within [`READY_WINDOW`]; otherwise it asks once more. With

@@ -100,7 +100,7 @@ def test_the_tunnel_key_may_forward_to_the_services_and_listen_nowhere(tmp_path:
     assert authorized == f"{LOGIN}\n"
 
 
-def test_cyans_install_makes_the_gateways_cache_salt_secret_once(tmp_path: Path) -> None:
+def test_cyans_install_makes_the_gateways_secret_and_metrics_key_once(tmp_path: Path) -> None:
     home, bin_dir = tmp_path / "home", tmp_path / "bin"
     home.mkdir()
     bin_dir.mkdir()
@@ -110,13 +110,15 @@ def test_cyans_install_makes_the_gateways_cache_salt_secret_once(tmp_path: Path)
     env = os.environ | {"HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
     install = ["bash", str(DEPLOY / "cyan" / "install.sh")]
     subprocess.run(install, env=env, check=True, capture_output=True)
-    secret = home / ".config" / "leaseholder" / "cache-salt-secret"
-    made = secret.read_text()
-    assert re.fullmatch(r"[0-9a-f]{64}\n", made)
-    assert (
-        stat.S_IMODE(secret.stat().st_mode) == 0o600
-    )  # the gateway refuses any other user's access
-    # A new secret would change every tenant's cache salt: the next install keeps it.
+    config = home / ".config" / "leaseholder"
+    files = [config / "cache-salt-secret", config / "metrics-key"]
+    made = [path.read_text() for path in files]
+    for path, text in zip(files, made, strict=True):
+        assert re.fullmatch(r"[0-9a-f]{64}\n", text), path
+        # The gateway refuses a file that another user may open.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert made[0] != made[1]
+    # A new secret would change every tenant's cache salt, a new key every scraper's: the next install keeps them.
     subprocess.run(install, env=env, check=True, capture_output=True)
-    assert secret.read_text() == made
-    assert [p.name for p in secret.parent.iterdir()] == ["cache-salt-secret"]
+    assert [path.read_text() for path in files] == made
+    assert sorted(p.name for p in config.iterdir()) == ["cache-salt-secret", "metrics-key"]

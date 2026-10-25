@@ -4,6 +4,7 @@ mod admission;
 mod common;
 mod events;
 mod leaseholder;
+mod metrics;
 mod placement;
 mod proxy;
 mod streams;

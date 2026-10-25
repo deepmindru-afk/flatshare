@@ -132,6 +132,40 @@ impl Upstream {
         Uri::from_parts(parts).expect("a scheme, an authority and a path form a valid URI")
     }
 
+    /// The engine's own `GET /metrics`, read in full within `timeout`, with its status and content type.
+    pub async fn metrics(&self, timeout: Duration) -> Result<Response, String> {
+        // vLLM's exposition with its KV cache histograms is a few hundred kilobytes.
+        const LIMIT: usize = 16 << 20;
+        let uri = self.uri(PathAndQuery::from_static("/metrics"));
+        let request = http::Request::get(uri)
+            .body(UpstreamBody::empty())
+            .expect("a GET with a valid URI is a valid request");
+        let read = async {
+            let response = self
+                .pool
+                .request(request)
+                .await
+                .map_err(|err| format!("the engine's /metrics failed: {}", causes(&err)))?;
+            let (parts, body) = response.into_parts();
+            let body = Limited::new(body, LIMIT)
+                .collect()
+                .await
+                .map_err(|err| format!("cannot read the engine's /metrics: {err}"))?;
+            Ok::<_, String>((parts, body.to_bytes()))
+        };
+        let (parts, body) = tokio::time::timeout(timeout, read)
+            .await
+            .map_err(|_| format!("the engine's /metrics did not answer within {timeout:?}"))??;
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = parts.status;
+        if let Some(content_type) = parts.headers.get(CONTENT_TYPE) {
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, content_type.clone());
+        }
+        Ok(response)
+    }
+
     /// Whether the engine's `/health` answers with success within `timeout`.
     pub async fn healthy(&self, timeout: Duration) -> bool {
         let uri = self.uri(PathAndQuery::from_static("/health"));

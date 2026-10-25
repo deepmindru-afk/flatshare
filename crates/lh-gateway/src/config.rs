@@ -14,6 +14,7 @@ use lh_core::admission::{Ceilings, Leaseholder, Policy, Trigger};
 use lh_core::placement;
 use lh_proto::SloClass;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// A validated configuration.
 #[derive(Clone, Debug)]
@@ -34,6 +35,9 @@ pub struct Config {
     pub tenants: Vec<Tenant>,
     /// The key of every tenant's `cache_salt`, from `cache_salt_secret_file`.
     pub cache_salt_secret: CacheSaltSecret,
+    /// What `GET /metrics` asks of a request on a TCP listener, from `metrics_key_file`; `None` without one,
+    /// which only a gateway without TCP listeners may be.
+    pub metrics_key: Option<MetricsKey>,
     /// Largest accepted request body; larger requests get 413.
     pub max_body_bytes: usize,
     /// Frames buffered between the upstream and a client before backpressure reaches the upstream.
@@ -104,6 +108,16 @@ pub struct CacheSaltSecret(pub(crate) [u8; 32]);
 impl fmt::Debug for CacheSaltSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("CacheSaltSecret(..)")
+    }
+}
+
+/// The SHA-256 of the metrics key, which its `Debug` does not show.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MetricsKey(pub(crate) [u8; 32]);
+
+impl fmt::Debug for MetricsKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MetricsKey(..)")
     }
 }
 
@@ -232,6 +246,7 @@ struct RawConfig {
     listen: Vec<RawListen>,
     tenants: BTreeMap<String, RawTenant>,
     cache_salt_secret_file: Option<PathBuf>,
+    metrics_key_file: Option<PathBuf>,
     max_body_bytes: usize,
     stream_buffer_frames: usize,
     stall_timeout_s: f64,
@@ -256,6 +271,7 @@ impl Default for RawConfig {
             listen: Vec::new(),
             tenants: BTreeMap::new(),
             cache_salt_secret_file: None,
+            metrics_key_file: None,
             max_body_bytes: 32 << 20,
             stream_buffer_frames: 64,
             stall_timeout_s: 30.0,
@@ -491,6 +507,10 @@ impl RawConfig {
             }
         }
         let cache_salt_secret = cache_salt_secret(self.cache_salt_secret_file)?;
+        let tcp = listeners
+            .iter()
+            .any(|l| matches!(l.addr, ListenAddr::Tcp(_)));
+        let metrics_key = metrics_key(self.metrics_key_file, tcp)?;
 
         if self.max_body_bytes == 0 {
             return Err("max_body_bytes must be positive".into());
@@ -513,6 +533,7 @@ impl RawConfig {
             listeners,
             tenants,
             cache_salt_secret,
+            metrics_key,
             max_body_bytes: self.max_body_bytes,
             stream_buffer_frames: self.stream_buffer_frames,
             stall_timeout: seconds("stall_timeout_s", self.stall_timeout_s)?,
@@ -972,11 +993,51 @@ fn cache_salt_secret(path: Option<PathBuf>) -> Result<CacheSaltSecret, String> {
         "no cache_salt_secret_file: name a file of 32 random bytes in hex, mode 600, from which the tenants' \
          cache salts are derived",
     )?;
-    let fail = |cause: String| format!("cache_salt_secret_file {}: {cause}", path.display());
+    let key = "cache_salt_secret_file";
+    parse_digest(private_file(key, &path)?.trim())
+        .map(CacheSaltSecret)
+        .ok_or_else(|| {
+            format!(
+                "{key} {}: expected 64 hex characters, 32 random bytes",
+                path.display()
+            )
+        })
+}
+
+/// Reads `metrics_key_file`: one key on one line, in a file only its owner may open, whose SHA-256 `GET /metrics`
+/// compares with a request's bearer key on a TCP listener. Every user of the host reaches loopback, and the
+/// metrics name the tenants and their traffic, so a gateway with a TCP listener needs one.
+fn metrics_key(path: Option<PathBuf>, tcp: bool) -> Result<Option<MetricsKey>, String> {
+    let Some(path) = path else {
+        return if tcp {
+            Err(
+                "no metrics_key_file: a TCP listener serves /metrics to every user of the host; name a file of \
+                 one key, mode 600, that GET /metrics asks for there"
+                    .into(),
+            )
+        } else {
+            Ok(None)
+        };
+    };
+    let key = "metrics_key_file";
+    let text = private_file(key, &path)?;
+    let token = text.trim();
+    if token.is_empty() || token.contains(char::is_whitespace) {
+        return Err(format!(
+            "{key} {}: expected one key on one line",
+            path.display()
+        ));
+    }
+    Ok(Some(MetricsKey(Sha256::digest(token).into())))
+}
+
+/// The text of a file that only its owner may open, named by the configuration's `key` by an absolute path.
+fn private_file(key: &str, path: &Path) -> Result<String, String> {
+    let fail = |cause: String| format!("{key} {}: {cause}", path.display());
     if !path.is_absolute() {
         return Err(fail("not an absolute path".into()));
     }
-    let mode = std::fs::metadata(&path)
+    let mode = std::fs::metadata(path)
         .map_err(|e| fail(e.to_string()))?
         .permissions()
         .mode();
@@ -986,10 +1047,7 @@ fn cache_salt_secret(path: Option<PathBuf>) -> Result<CacheSaltSecret, String> {
             mode & 0o777
         )));
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| fail(e.to_string()))?;
-    parse_digest(text.trim())
-        .map(CacheSaltSecret)
-        .ok_or_else(|| fail("expected 64 hex characters, 32 random bytes".into()))
+    std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))
 }
 
 fn parse_digest(hex: &str) -> Option<[u8; 32]> {
@@ -1033,9 +1091,23 @@ mod tests {
         path
     });
 
-    /// The configuration line that names a cache-salt secret file.
+    /// The metrics key of the configurations below, `metrics-key` in a file of mode 600.
+    static METRICS_FILE: LazyLock<PathBuf> = LazyLock::new(|| {
+        let path = std::env::temp_dir().join("lh-gw-config-test-metrics-key");
+        let staged = path.with_extension(std::process::id().to_string());
+        std::fs::write(&staged, "metrics-key\n").unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+        path
+    });
+
+    /// The configuration lines that name a cache-salt secret file and the metrics key's file.
     fn secret_file(path: &Path) -> String {
-        format!("cache_salt_secret_file = \"{}\"", path.display())
+        format!(
+            "cache_salt_secret_file = \"{}\"\nmetrics_key_file = \"{}\"",
+            path.display(),
+            METRICS_FILE.display()
+        )
     }
 
     /// A configuration with one TCP listener, plus top-level keys and tables.
@@ -1256,6 +1328,67 @@ mod tests {
         }
         let err = with("").unwrap_err();
         assert!(err.starts_with("no cache_salt_secret_file"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_tcp_listener_needs_a_metrics_key_in_a_private_file() {
+        let salt = format!("cache_salt_secret_file = \"{}\"", SECRET_FILE.display());
+        let with = |listen: &str, key: &str| {
+            Config::from_toml(&format!(
+                "upstream = \"http://127.0.0.1:18000\"\n{salt}\n{key}\n[[listen]]\n{listen}\n\
+                 [tenants.a]\nkeys_sha256 = [\"{KEY}\"]\ntrusted = true"
+            ))
+            .map_err(|e| e.to_string())
+        };
+        let tcp = "tcp = \"127.0.0.1:0\"";
+        let unix = "unix = \"/run/user/1007/lh/gateway.sock\"\ntenant = \"a\"";
+        let named = |path: &Path| format!("metrics_key_file = \"{}\"", path.display());
+
+        let config = with(tcp, &named(&METRICS_FILE)).unwrap();
+        // SHA-256 of "metrics-key": the key itself is never kept, and never printed.
+        let digest = Sha256::digest("metrics-key").into();
+        assert_eq!(config.metrics_key, Some(MetricsKey(digest)));
+        assert_eq!(
+            format!("{:?}", config.metrics_key.unwrap()),
+            "MetricsKey(..)"
+        );
+        // Only a TCP listener needs it: a Unix socket's file mode keeps other users out.
+        assert_eq!(with(unix, "").unwrap().metrics_key, None);
+        let err = with(tcp, "").unwrap_err();
+        assert!(
+            err.starts_with("no metrics_key_file: a TCP listener serves /metrics"),
+            "{err}"
+        );
+
+        let dir = std::env::temp_dir().join(format!("lh-gw-metrics-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, text: &str, mode: u32| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path
+        };
+        for (path, cause) in [
+            (
+                file("readable", "k\n", 0o644),
+                "mode 644 lets other users open it",
+            ),
+            (file("empty", "\n", 0o600), "expected one key on one line"),
+            (
+                file("two", "k1 k2\n", 0o600),
+                "expected one key on one line",
+            ),
+            (dir.join("missing"), "No such file or directory"),
+            (PathBuf::from("relative/key"), "not an absolute path"),
+        ] {
+            let err = with(tcp, &named(&path)).unwrap_err();
+            assert!(
+                err.starts_with(&format!("metrics_key_file {}: ", path.display()))
+                    && err.contains(cause),
+                "{err}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1769,6 +1902,10 @@ mod tests {
             .replace(
                 "<home>/.config/leaseholder/cache-salt-secret",
                 &SECRET_FILE.display().to_string(),
+            )
+            .replace(
+                "<home>/.config/leaseholder/metrics-key",
+                &METRICS_FILE.display().to_string(),
             )
     }
 

@@ -37,6 +37,16 @@ pub const TAG: &str = "x-mock-tag";
 /// headers, or an event stream's first chunk, as an engine holds them through a prefill.
 pub const GATE: &str = "x-mock-gate";
 
+/// The mock engine's `/metrics`, as vLLM's exposition starts, with vLLM's content type.
+pub const ENGINE_METRICS: &str = "# HELP vllm:num_requests_running Number of requests in model execution batches.\n\
+    # TYPE vllm:num_requests_running gauge\n\
+    vllm:num_requests_running{engine=\"0\",model_name=\"qwen\"} 0.0\n";
+pub const ENGINE_METRICS_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+/// The metrics key of every test gateway, which `GET /metrics` asks for on its TCP listener.
+pub const METRICS_KEY: &str = "metrics-key";
+pub const METRICS_AUTH: (&str, &str) = ("authorization", "Bearer metrics-key");
+
 /// How the mock engine answers inference requests.
 #[derive(Clone, Debug)]
 pub enum Script {
@@ -160,6 +170,10 @@ impl Mock {
             .route("/v1/completions", post(answer))
             .route("/v1/responses", post(answer))
             .route("/v1/models", get(models))
+            .route(
+                "/metrics",
+                get(|| async { ([(CONTENT_TYPE, ENGINE_METRICS_TYPE)], ENGINE_METRICS) }),
+            )
             .route(
                 "/health",
                 get(|State(state): State<Arc<MockState>>| async move {
@@ -365,6 +379,19 @@ pub fn socket_path() -> PathBuf {
     std::env::temp_dir().join(format!("lh-gw-{}-{n}.sock", std::process::id()))
 }
 
+/// The metrics key's file of every test gateway: [`METRICS_KEY`], mode 600, written anew by each test process.
+pub fn metrics_key_file() -> &'static Path {
+    static FILE: LazyLock<PathBuf> = LazyLock::new(|| {
+        let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join("metrics-key");
+        let staged = path.with_extension(std::process::id().to_string());
+        std::fs::write(&staged, format!("{METRICS_KEY}\n")).unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&staged, &path).unwrap();
+        path
+    });
+    &FILE
+}
+
 /// The cache-salt secret of every test gateway: the bytes 0 to 31, in hex, in a file of mode 600 that each test
 /// process writes anew.
 pub fn cache_salt_secret_file() -> &'static Path {
@@ -409,6 +436,7 @@ fn harness_toml(socket: &std::path::Path, top: &str) -> String {
     format!(
         r#"log_level = "debug"
 cache_salt_secret_file = "{secret}"
+metrics_key_file = "{metrics_key}"
 {top}
 
 [[listen]]
@@ -434,6 +462,7 @@ default_class = "interactive"
 "#,
         socket = socket.display(),
         secret = cache_salt_secret_file().display(),
+        metrics_key = metrics_key_file().display(),
         agents = key_digest(AGENTS_KEY),
         bench = key_digest(BENCH_KEY),
     )
@@ -498,9 +527,10 @@ impl Gateway {
         }
     }
 
-    /// The Prometheus exposition.
+    /// The Prometheus exposition, from the private socket, which asks for no key.
     pub async fn metrics(&self) -> String {
-        let reply = call(&self.tcp, "GET", "/metrics", &[], "").await;
+        let reply = call(&self.unix, "GET", "/metrics", &[], "").await;
+        assert_eq!(reply.status, 200);
         String::from_utf8(reply.body.to_vec()).unwrap()
     }
 
