@@ -24,8 +24,8 @@ from typing import Any
 
 import orjson
 
-from leaseholder_bench.kv_metrics import Labels, metric_samples, samples
-from leaseholder_bench.load import summarize
+from leaseholder_bench.kv_metrics import Labels, samples
+from leaseholder_stats import metric_samples, summarize, v2v_samples
 
 OUTCOMES = "lh_gateway_request_outcomes_total"
 """By class and outcome; ``shed`` is a request the admission point gave up for a stricter class."""
@@ -171,13 +171,7 @@ def turn_samples(turns: Iterable[Mapping[str, Any]]) -> tuple[list[float], int]:
     """The voice-to-voice samples of the callers' measured turns (bots/turns.jsonl) and how many are
     censored: each turn's reply and, after a barge-in, the reply to the interruption, as ``lh-voice
     bots`` pools them; a reply that never came (a failed turn) stands at REPLY_TIMEOUT_MS."""
-    samples, censored = [], 0
-    for turn in measured_turns(turns):
-        wanted = ["v2v_ms", *(["v2v_after_barge_in_ms"] if turn.get("barge_in") else [])]
-        for key in wanted:
-            censored += key not in turn
-            samples.append(turn.get(key, REPLY_TIMEOUT_MS))
-    return samples, censored
+    return v2v_samples(measured_turns(turns), REPLY_TIMEOUT_MS)
 
 
 def _json_lines(text: str) -> Iterator[dict[str, Any]]:

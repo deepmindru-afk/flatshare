@@ -64,9 +64,10 @@ from leaseholder_bench.e2.record import (
     summarize_point,
     worker_lines,
 )
-from leaseholder_bench.kv_metrics import fetch, metric_samples
+from leaseholder_bench.kv_metrics import fetch
 from leaseholder_bench.tiers import pool_tokens
 from leaseholder_bench.transport import client, runtime_socket
+from leaseholder_stats import metric_samples
 
 CONFIGS = Path(__file__).resolve().parents[3] / "configs"
 """The AIPerf configuration, from the source tree (``uv sync`` installs the package editable)."""
