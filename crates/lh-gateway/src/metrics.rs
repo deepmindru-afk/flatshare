@@ -952,3 +952,119 @@ impl Drop for GaugeGuard {
         self.0.dec();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    /// An exposition with each family's series in the order of their labels, so that it reads the same in every
+    /// process: a family keeps its series in a hash map. A series' own lines, such as a histogram's sum, count and
+    /// buckets, keep their order.
+    fn by_labels(exposition: &str) -> String {
+        fn flush(out: &mut String, series: &mut Vec<(String, Vec<&str>)>) {
+            series.sort_by(|a, b| a.0.cmp(&b.0));
+            for (_, lines) in series.drain(..) {
+                for line in lines {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+        // A sample's labels without its bucket's `le`: the same for every line of one series.
+        fn labels(sample: &str) -> String {
+            let Some((_, rest)) = sample.split_once('{') else {
+                return String::new();
+            };
+            let set = rest.split_once('}').map_or(rest, |(set, _)| set);
+            set.split(',')
+                .filter(|label| !label.starts_with("le="))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+        let mut out = String::new();
+        let mut series: Vec<(String, Vec<&str>)> = Vec::new();
+        for line in exposition.lines() {
+            if line.starts_with('#') {
+                flush(&mut out, &mut series);
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            let key = labels(line);
+            match series.last_mut() {
+                Some((last, lines)) if *last == key => lines.push(line),
+                _ => series.push((key, vec![line])),
+            }
+        }
+        flush(&mut out, &mut series);
+        out
+    }
+
+    /// `metrics.txt` is the exposition of a gateway with one upstream before any traffic, its series in the order
+    /// of their labels: every metric's name, type, help and labels, which the dashboards' and alerts' checks
+    /// (`ops/`) read. `LH_GATEWAY_WRITE_METRICS=1` writes it anew (`make metrics`).
+    #[test]
+    fn the_checked_in_exposition_is_current() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("metrics.txt");
+        let metrics = Metrics::new();
+        // Requests by status and lifecycle events by type have no series before traffic, and a family without
+        // one is left out of the exposition: one of each at zero, so that the file names them and their labels.
+        create(
+            &metrics.requests,
+            RequestLabels {
+                tenant: None,
+                route: Route::Other.as_str(),
+                class: None,
+                status: 404,
+            },
+        );
+        create(
+            &metrics.events,
+            EventLabels {
+                r#type: "turn_started",
+                source: "client",
+                duplicate: false,
+            },
+        );
+        let exposition = by_labels(&metrics.encode());
+        if std::env::var_os("LH_GATEWAY_WRITE_METRICS").is_some() {
+            std::fs::write(&path, &exposition).unwrap();
+        }
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            on_disk == exposition,
+            "{} is stale; write it anew with `make metrics`",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn series_sort_by_their_labels_and_keep_their_own_lines_in_order() {
+        let exposition = "# HELP h A histogram.\n# TYPE h histogram\n\
+            h_sum{class=\"b\"} 0\nh_count{class=\"b\"} 0\nh_bucket{le=\"1.0\",class=\"b\"} 0\n\
+            h_bucket{le=\"+Inf\",class=\"b\"} 0\n\
+            h_sum{class=\"a\"} 0\nh_count{class=\"a\"} 0\nh_bucket{le=\"1.0\",class=\"a\"} 0\n\
+            h_bucket{le=\"+Inf\",class=\"a\"} 0\n\
+            # HELP c A counter.\n# TYPE c counter\nc_total 0\n# EOF\n";
+        let sorted = by_labels(exposition);
+        let lines: Vec<&str> = sorted.lines().collect();
+        assert_eq!(
+            lines[2..6].iter().map(|l| &l[..5]).collect::<Vec<_>>(),
+            ["h_sum", "h_cou", "h_buc", "h_buc"]
+        );
+        assert!(lines[2].ends_with("{class=\"a\"} 0") && lines[6].ends_with("{class=\"b\"} 0"));
+        assert_eq!(lines[4], "h_bucket{le=\"1.0\",class=\"a\"} 0");
+        assert_eq!(
+            &lines[10..],
+            [
+                "# HELP c A counter.",
+                "# TYPE c counter",
+                "c_total 0",
+                "# EOF"
+            ]
+        );
+        assert_eq!(by_labels(&sorted), sorted);
+    }
+}

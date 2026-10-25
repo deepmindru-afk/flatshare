@@ -14,7 +14,7 @@ PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py deploy/
 E2_RESULTS := benchmarks/results/2026-10-23-e2
 E2_REPORT ?= build/reproduce-e2
 
-.PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-python schema \
+.PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-python schema metrics \
   reproduce-e1 reproduce-calibration reproduce-e2 e2-figures
 
 check: lint test
@@ -71,6 +71,10 @@ test-python:
 
 schema:
 	cargo run -q -p lh-proto --bin lh-proto-schema
+
+# crates/lh-gateway/metrics.txt, the gateway's exposition before any traffic, after a change to its metrics.
+metrics:
+	LH_GATEWAY_WRITE_METRICS=1 cargo test -q -p lh-gateway --lib metrics::tests::the_checked_in_exposition_is_current
 
 # E1's tables in crates/lh-sim/README.md from the 32x corpus, which stays outside the repository (`lh-bench
 # scale-traces` writes it; python/leaseholder_bench/README.md): the regime map, the realistic regime over 20 seeds,
