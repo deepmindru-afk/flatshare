@@ -20,6 +20,7 @@ Environment=VIRTUAL_ENV=%h/leaseholder/venvs/engine
 Environment=FLASHINFER_EXTRA_CUDAFLAGS=-I%h/leaseholder/cache/curand_include
 Environment=FLASHINFER_EXTRA_CFLAGS=-I%h/leaseholder/cache/curand_include
 Environment=FLASHINFER_WORKSPACE_BASE=%h/leaseholder/cache/flashinfer
+{{text.engine_caches}}
 Environment=HF_HUB_OFFLINE=1
 # Keep idle HTTP connections for 60 s (vLLM's default is 5 s), so the gateway's pooled connections survive the
 # seconds between voice turns instead of being reopened for most of them.

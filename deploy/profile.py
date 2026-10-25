@@ -485,11 +485,12 @@ def resolve(profile: dict, host: dict | None) -> tuple[dict[str, str], dict | No
         "units.stt_path": f"%h/leaseholder/venvs/engine/bin:{cuda}/bin:/usr/local/bin:/usr/bin:/bin",
         "units.stt_cuda_home": "" if system else f"Environment=CUDA_HOME={cuda}",
     }
+    # The middle of a comment sentence: text.cuda ends it.
     derived["cuda_note"] = (
-        f"The host's CUDA {toolkit['version']} toolkit at {toolkit['path']} compiles."
+        f"the host's CUDA {toolkit['version']} toolkit at {toolkit['path']} compiles"
         if system
-        else "The host has no CUDA 13 toolkit:\n# the engine JIT-compiles with the CUDA 13 compiler its venv carries "
-        "(nvidia-cuda-nvcc, pinned by the engine lock), as on Gray."
+        else "the host has no CUDA 13 toolkit, so the engine JIT-compiles with the CUDA 13 compiler its\n# venv "
+        "carries (nvidia-cuda-nvcc, pinned by the engine lock), as on Gray"
     )
     plan, warnings = core_plan({k: v for k, v in host["cpus"].items()}, gpu.get("numa_node"))
     unit_values |= {

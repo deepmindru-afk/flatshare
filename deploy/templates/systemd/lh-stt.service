@@ -11,6 +11,7 @@ WorkingDirectory=%h/leaseholder
 Environment=PATH={{units.stt_path}}
 {{units.stt_cuda_home}}
 Environment=HF_HUB_OFFLINE=1
+{{text.stt_caches}}
 # The FlashInfer sampler would JIT-compile at warm-up; Whisper does not need it.
 Environment=VLLM_USE_FLASHINFER_SAMPLER=0
 # Keep idle HTTP connections for 60 s (vLLM's default is 5 s), as the engine does: through the tunnel each new

@@ -16,6 +16,13 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 DEPLOY = REPO / "deploy"
 GIB = 1 << 30
+CACHES = {
+    "VLLM_CACHE_ROOT": "vllm",
+    "FLASHINFER_WORKSPACE_BASE": "flashinfer",
+    "TORCHINDUCTOR_CACHE_DIR": "inductor",
+    "TRITON_CACHE_DIR": "triton",
+}
+"""The caches a vLLM start reads (the W8 cold-start drill empties these four), as a non-box node's units name them."""
 
 spec = importlib.util.spec_from_file_location("lh_profile", DEPLOY / "profile.py")
 profile = importlib.util.module_from_spec(spec)
@@ -110,6 +117,12 @@ def test_the_a100_profile_derives_its_values_from_the_host(tmp_path: Path) -> No
     unit = (out / "systemd" / "lh-engine.service").read_text()
     assert f"Environment=CUDA_HOME={profile.VENV_CUDA}\n" in unit
     assert (
+        "# cache/curand_include; the host has no CUDA 13 toolkit, so the engine JIT-compiles with the CUDA 13 "
+        "compiler its\n# venv carries (nvidia-cuda-nvcc, pinned by the engine lock), as on Gray.\n"
+        in unit
+    )
+    assert all(len(line) <= 120 for line in unit.splitlines() if line.startswith("#")), unit
+    assert (
         "--config %h/leaseholder/node/engine.yaml --uds ${LH_ENGINE_SOCKET} $LH_ENGINE_FLAGS"
         in unit
     )
@@ -117,6 +130,11 @@ def test_the_a100_profile_derives_its_values_from_the_host(tmp_path: Path) -> No
         f"Environment=CUDA_HOME={profile.VENV_CUDA}\n"
         in (out / "systemd" / "lh-stt.service").read_text()
     )
+    # Every compile and JIT cache of a start under cache/, so that the engine switches keep them warm.
+    stt = (out / "systemd" / "lh-stt.service").read_text()
+    for variable, directory in CACHES.items():
+        line = f"Environment={variable}=%h/leaseholder/cache/{directory}\n"
+        assert unit.count(line) == 1 and stt.count(line) == 1, variable
     make_room = (out / "variants" / "make-room" / "lh-engine.conf").read_text()
     assert "--config %h/leaseholder/node/engine.yaml --scheduler-cls" in make_room
     # R7 on 32 CPUs, under the 34 that give each component its want.
@@ -141,6 +159,10 @@ def test_a_host_with_its_own_cuda_13_toolkit_compiles_with_it(tmp_path: Path) ->
     unit = (out / "systemd" / "lh-engine.service").read_text()
     assert "Environment=CUDA_HOME=/usr/local/cuda-13.0\n" in unit
     assert "Environment=PATH=%h/leaseholder/venvs/engine/bin:/usr/local/cuda-13.0/bin:" in unit
+    assert (
+        "# cache/curand_include; the host's CUDA 13.0 toolkit at /usr/local/cuda-13.0 compiles.\n"
+        in unit
+    )
     # The STT unit then needs no CUDA_HOME of its own, as on the box; a 12.x toolkit is not used.
     assert "CUDA_HOME" not in (out / "systemd" / "lh-stt.service").read_text()
     out, _ = render(

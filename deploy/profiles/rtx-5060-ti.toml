@@ -60,3 +60,7 @@ engine_numa = '''
 # CPU tier is under 1% of pinned bandwidth.'''
 audio_numa = '''
 # NUMA node 0 (cores 0-7) for the audio servers; node 1, local to the GPU, is the engine's.'''
+# The compile and JIT caches stay at their defaults here (~/.cache/vllm, /tmp/torchinductor_$USER, ~/.triton/cache),
+# warm since the box was set up; another node names them (deploy/profiles/a100-40gb.toml).
+engine_caches = ""
+stt_caches = ""

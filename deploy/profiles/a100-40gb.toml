@@ -70,3 +70,16 @@ engine_numa = '''
 # {{derived.engine_numa_note}}'''
 audio_numa = '''
 # {{derived.audio_numa_note}}'''
+engine_caches = '''
+# Every compile and JIT cache the engine's start reads, under cache/ beside FlashInfer's and kept across the
+# campaign's engine switches, so that only a compile configuration's first start compiles (on the box 531.8 s with
+# all of them empty against 88.8 s warm, W8's start drills); bootstrap.sh warm fills them.
+Environment=VLLM_CACHE_ROOT=%h/leaseholder/cache/vllm
+Environment=TORCHINDUCTOR_CACHE_DIR=%h/leaseholder/cache/inductor
+Environment=TRITON_CACHE_DIR=%h/leaseholder/cache/triton'''
+stt_caches = '''
+# The STT's compile and JIT caches beside the engine's, kept across starts.
+Environment=VLLM_CACHE_ROOT=%h/leaseholder/cache/vllm
+Environment=FLASHINFER_WORKSPACE_BASE=%h/leaseholder/cache/flashinfer
+Environment=TORCHINDUCTOR_CACHE_DIR=%h/leaseholder/cache/inductor
+Environment=TRITON_CACHE_DIR=%h/leaseholder/cache/triton'''
