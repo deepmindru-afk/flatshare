@@ -102,6 +102,24 @@ def test_the_gpu_nodes_publish_no_kv_events_and_cyan_reaches_them_only_through_t
         assert "ssh " not in text and "lh-tunnel-" not in text, unit.name
 
 
+def test_cyans_servers_and_tunnels_run_on_their_planes_cores() -> None:
+    # The control plane has cores 0-7 and the voice plane 32-47, the load generators the rest
+    # (e2-host.toml): a unit on every core competes with what a point measures. The tunnel's SSH
+    # sessions carry every byte to and from the GPU nodes, and ran on no core set (RA's W6 review).
+    cores = {
+        "lh-gateway.service": "0-7",
+        "lh-smg.service": "0-7",
+        "lh-tunnel@.service": "0-7",
+        "lh-livekit.service": "32-47",
+        "lh-voice-worker.service": "32-47",
+    }
+    cyan = DEPLOY / "cyan" / "systemd"
+    for name, wanted in cores.items():
+        assert exec_lines((cyan / name).read_text(), "CPUAffinity") == [wanted], name
+    # Every service of cyan's is one of them, or the voice plane's namespace holder, which only waits.
+    assert {p.name for p in cyan.glob("*.service")} == {*cores, "lh-voicenet.service"}
+
+
 def test_each_tunnel_key_may_only_bridge_its_session_to_its_socket(tmp_path: Path) -> None:
     lh = f"/run/user/{os.getuid()}/lh"
     earlier = (
