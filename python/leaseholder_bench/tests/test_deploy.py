@@ -484,6 +484,9 @@ class Listeners:
             "0::/user.slice/user-1007.slice/user@1007.service/init.scope\n"
         )
         (self.proc / pid / "cmdline").write_bytes(b"/lib/systemd/systemd\0--user")
+        # The host's namespace, which the audit takes as such.
+        (self.proc / pid / "ns").mkdir()
+        (self.proc / pid / "ns" / "net").symlink_to(HOST_NS)
         return f'users:(("systemd",pid={pid},fd=40))'
 
     def tcp(self, address: str, unit: str | None, command: str = "vllm serve", **how) -> None:
@@ -742,7 +745,7 @@ def test_the_audit_accepts_the_gpu_servers_in_the_hosts_namespace_where_the_host
 ) -> None:
     # Where the kernel refuses unprivileged user namespaces the host's drop-ins mark the GPU servers
     # LH_PRIVATE_NET=host and in-private-net runs them in the host's network namespace: there their engine cores'
-    # loopback TCP listeners and CUDA's abstract sockets are accepted, and counted apart.
+    # loopback TCP listeners on ephemeral ports (gloo's) and CUDA's abstract sockets are accepted, and counted apart.
     host = Listeners(tmp_path)
     lh = host.runtime / "lh"
     marked = {"LH_PRIVATE_NET": "host"}
@@ -757,21 +760,67 @@ def test_the_audit_accepts_the_gpu_servers_in_the_hosts_namespace_where_the_host
         "and 0 TCP or UDP listeners, all allowed; the GPU servers run in the host's network namespace "
         "(LH_PRIVATE_NET=host) with 2 loopback TCP listeners and 1 abstract sockets\n"
     )
-    # Unmarked, the same listeners are refused; marked, one off loopback is, and the gateway is no GPU server.
+    # Unmarked, the same listeners are refused. Marked, one off loopback is, and so are a loopback port outside the
+    # ephemeral range (a KV-event publisher's 5557) and an abstract socket that is not CUDA's (a ZMQ endpoint's),
+    # which the namespace would hide and the host's does not; the gateway is no GPU server.
     host = Listeners(tmp_path / "unmarked")
     host.tcp("127.0.1.1:36087", "lh-engine.service")
     host.socket("@cuda-uvmfd-1", "lh-stt.service")
     host.tcp("0.0.0.0:29500", "lh-engine.service", env=marked)
     host.tcp("127.0.0.1:9000", "lh-gateway.service", "lh-gateway", env=marked)
+    host.tcp("127.0.0.1:5557", "lh-engine.service", env=marked)
+    host.socket("@lh-zmq", "lh-engine.service", env=marked)
     done = host.audit()
     assert done.returncode == 1
     assert done.stderr.splitlines() == [
         "audit-listeners: lh-engine.service listens on tcp 127.0.1.1:36087",
         "audit-listeners: lh-engine.service listens on tcp 0.0.0.0:29500",
         "audit-listeners: lh-gateway.service listens on tcp 127.0.0.1:9000",
+        "audit-listeners: lh-engine.service listens on tcp 127.0.0.1:5557",
         f"audit-listeners: lh-stt.service listens on an abstract socket outside {host.runtime}: "
         "@cuda-uvmfd-1",
+        f"audit-listeners: lh-engine.service listens on an abstract socket outside {host.runtime}: "
+        "@lh-zmq",
     ]
+
+
+def test_the_audit_judges_nothing_from_another_network_namespace_than_the_user_managers(
+    tmp_path: Path,
+) -> None:
+    # ss lists the audit's own namespace: run inside a server's (the RUNBOOK's nsenter line, adapted), it would take
+    # that namespace's listeners for the host's and meet --expect through the namespaces' tables, passing while it
+    # checked nothing. The host's namespace is the user manager's, and anywhere else the audit exits 2.
+    host = Listeners(tmp_path)
+    host.socket(f"{host.runtime}/lh/gateway.sock", "lh-gateway.service")
+    host.manager()
+    (host.proc / "self" / "ns" / "net").unlink()
+    (host.proc / "self" / "ns" / "net").symlink_to("net:[4026532864]")
+    done = host.audit()
+    assert done.returncode == 2 and done.stdout == ""
+    assert done.stderr == (
+        f"audit-listeners: run it in the host's network namespace ({HOST_NS}, the user manager's): this one is "
+        "net:[4026532864]\n"
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every namespace")
+def test_the_audit_fails_on_a_process_of_ours_whose_network_namespace_it_cannot_read(
+    tmp_path: Path,
+) -> None:
+    # A process of ours whose namespace the audit may not read listens where the audit cannot say: a failure, not a
+    # process skipped without a word.
+    host = Listeners(tmp_path)
+    engine = [f"{host.runtime}/lh/engine.sock"]
+    pid = host.namespaced("lh-engine.service", "net:[4026532864]", engine)
+    (host.proc / pid / "ns").chmod(0)
+    try:
+        done = host.audit()
+    finally:
+        (host.proc / pid / "ns").chmod(0o755)
+    assert done.returncode == 1
+    assert done.stderr == (
+        f"audit-listeners: cannot read the network namespace of lh-engine.service ({pid}: Permission denied)\n"
+    )
 
 
 def _private_net_works() -> bool:

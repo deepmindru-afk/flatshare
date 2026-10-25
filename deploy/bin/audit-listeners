@@ -20,8 +20,11 @@ The GPU node's servers run in network namespaces of their own (deploy/bin/in-pri
 list either: their listeners there, the engine cores' loopback ones and CUDA's abstract sockets, are read from the
 namespaces' own tables (/proc/PID/net) and accepted, since no other user reaches a namespace of ours, but their file
 sockets are reached through the file system from any namespace and are judged as here. Where the kernel refuses
-unprivileged user namespaces they run in the host's namespace (LH_PRIVATE_NET=host, which in-private-net marks
-them with): there their loopback TCP listeners and abstract sockets are accepted, and counted apart.
+unprivileged user namespaces they run in the host's namespace (LH_PRIVATE_NET=host, which the host's drop-ins set
+and in-private-net honours): there their engine cores' loopback TCP listeners on ephemeral ports (torch's gloo groups)
+and CUDA's @cuda-uvmfd- sockets are accepted, and counted apart, and anything else of theirs is judged as everywhere.
+The host's namespace is this user's manager's (systemd --user), or the audit's own where none runs (lh-svc): run in
+another, the audit judges nothing and exits 2, and a process of ours whose namespace it cannot read fails it.
 deploy/phastform/smoke.sh runs it on a GPU node, and deploy/deploy.sh after each install.
 """
 
@@ -50,6 +53,8 @@ MANAGER = re.compile(r"/user@\d+\.service/init\.scope$")
 ALLOWED = {"lh-gateway.service": {"127.0.0.1:18080"}}
 """The TCP and UDP listeners each unit may have: the gateway's, for AIPerf and the agents, with their keys."""
 LOOPBACK = re.compile(r"^(127\.\d+\.\d+\.\d+|\[::1\]|localhost)(%\w+)?:\d+$")
+CUDA_ABSTRACT = "@cuda-uvmfd-"
+"""CUDA's abstract sockets, which the GPU servers keep wherever they run."""
 
 
 def environ(pid: str) -> list[bytes]:
@@ -92,12 +97,47 @@ def marked_private(unit: str, pids: list[str]) -> bool:
     )
 
 
+class Unreadable(Exception):
+    """A process of ours whose network namespace the audit may not read."""
+
+
 def netns(pid: str) -> str | None:
-    """Process ``pid``'s network namespace (``net:[INODE]``), or None (gone, or not ours to read)."""
+    """Process ``pid``'s network namespace (``net:[INODE]``), or None when it is gone. A process whose namespace
+    cannot be read raises Unreadable: the audit cannot say where it listens."""
     try:
         return os.readlink(PROC / pid / "ns" / "net")
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError as err:
+        raise Unreadable(f"{pid}: {err.strerror}") from err
+
+
+def ephemeral(address: str) -> bool:
+    """Whether ``address``'s port is in the kernel's ephemeral range (ip_local_port_range), where torch's gloo groups
+    bind theirs."""
+    try:
+        low, high = map(int, (PROC / "sys/net/ipv4/ip_local_port_range").read_text().split())
+    except (OSError, ValueError):
+        low, high = 32768, 60999  # Linux's default
+    return low <= int(address.rsplit(":", 1)[1]) <= high
+
+
+def owned(pid: str) -> bool:
+    """Whether process ``pid`` is this user's (another user's are not ours to judge, nor to read)."""
+    try:
+        return (PROC / pid).stat().st_uid == os.getuid()
+    except OSError:
+        return False
+
+
+def host_netns() -> str | None:
+    """The host's network namespace: this user's manager's (systemd --user), where one runs, else the audit's own
+    (lh-svc's hosts)."""
+    for entry in PROC.iterdir():
+        pid = entry.name
+        if pid.isdigit() and is_manager(pid) and owned(pid) and (space := netns(pid)):
+            return space
+    return netns("self")
 
 
 def socket_inodes(pid: str) -> set[str]:
@@ -142,10 +182,10 @@ def namespace_listeners(pid: str) -> list[tuple[str, str, str]]:
 
 
 def our_processes() -> dict[str, str]:
-    """Every process of an lh-*.service unit, with its unit."""
+    """Every process of this user's in an lh-*.service unit, with its unit."""
     found = {}
     for entry in PROC.iterdir():
-        if entry.name.isdigit() and (unit := unit_of(entry.name)):
+        if entry.name.isdigit() and owned(entry.name) and (unit := unit_of(entry.name)):
             found[entry.name] = unit
     return found
 
@@ -197,6 +237,19 @@ def main(argv: list[str]) -> int:
     )
     expected = parser.parse_args(argv).expect
     runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    # ss lists the audit's own namespace: anywhere but the host's it would judge another namespace's listeners.
+    try:
+        host, here = host_netns(), netns("self")
+    except Unreadable as err:
+        print(f"audit-listeners: cannot read the network namespaces: {err}", file=sys.stderr)
+        return 2
+    if not host or host != here:
+        print(
+            f"audit-listeners: run it in the host's network namespace ({host}, the user manager's): this one is "
+            f"{here}",
+            file=sys.stderr,
+        )
+        return 2
     problems = []
     lh = Path(runtime, "lh")
     if lh.exists():
@@ -228,6 +281,7 @@ def main(argv: list[str]) -> int:
                 marked_private(unit, by_unit.get(unit, []))
                 and kind == "tcp"
                 and LOOPBACK.match(address)
+                and ephemeral(address)
             ):
                 degraded["tcp"] += 1
                 continue
@@ -252,20 +306,26 @@ def main(argv: list[str]) -> int:
                 # would be any user's here.
                 voice["unix"] += 1
                 continue
-            if marked_private(unit, its) and path.startswith("@"):
+            if marked_private(unit, its) and path.startswith(CUDA_ABSTRACT):
                 degraded["abstract"] += 1
                 continue
             ours["unix"] += 1
             if not path.startswith(f"{runtime}/"):
                 where = "an abstract socket" if path.startswith("@") else "a socket"
                 problems.append(f"{unit} listens on {where} outside {runtime}: {path}")
-    # Our units' processes in a network namespace other than this one's (the voice plane's aside, as above).
-    host = netns("self")
+    # Our units' processes in a network namespace other than the host's (the voice plane's aside, as above).
     spaces: dict[str, list[tuple[str, str]]] = {}
+    unreadable = []
     for pid, unit in our_processes().items():
-        space = netns(pid)
-        if host and space and space != host and unit not in VOICE:
+        try:
+            space = netns(pid)
+        except Unreadable as err:
+            unreadable.append(f"{unit} ({err})")
+            continue
+        if space and space != host and unit not in VOICE:
             spaces.setdefault(space, []).append((pid, unit))
+    if unreadable:
+        problems.append(f"cannot read the network namespace of {', '.join(unreadable)}")
     isolated = {"inet": 0, "abstract": 0}
     for _space, members in sorted(spaces.items()):
         holders: dict[str, set[str]] = {}

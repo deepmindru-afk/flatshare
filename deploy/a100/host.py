@@ -1430,8 +1430,8 @@ def preflight(
             + "; smoke.sh's listener audit accepts its UDP sockets, loopback TCP listeners and file sockets there "
             "(LH_VOICENET=host) and nothing else of ours; the GPU servers run there too, by their drop-ins' "
             "LH_PRIVATE_NET=host (deploy/bin/in-private-net), where the audit accepts their engine cores' loopback "
-            "TCP listeners and CUDA's abstract sockets, which any user of the host reaches; allowing unprivileged "
-            "user namespaces gives "
+            "TCP listeners on ephemeral ports and CUDA's abstract sockets, which any user of the host reaches, and "
+            "nothing else of theirs; allowing unprivileged user namespaces gives "
             "each its own (Ubuntu 24.04: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0, then "
             "bootstrap.sh stage)",
             "none on latency; isolation differs",
