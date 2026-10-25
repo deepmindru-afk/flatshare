@@ -4,12 +4,11 @@
 p95 on y, one frontier per arm and workload (the agents' corpus and the number of callers, the GPU
 and the model where they are not the frozen box's, and the warm-up turns that open each call where
 the points differ in them, since points of different workloads are never compared). A point is on
-its arm's frontier when no other
-point of the arm and workload harvests at least as much background goodput at a V2V p95 at least as
-low, and one of the two strictly better. A point on several GPU nodes is placed by its totals.
-Points measured from the same arm file in several campaigns are repeats of one configuration, which
-the frontier places at their medians; the tables keep every run. The stage waterfall splits each
-configuration's voice turn into the stages that add up to its mean V2V.
+its arm's frontier when no other point of the arm and workload harvests at least as much background
+goodput at a V2V p95 at least as low, and one of the two strictly better. Points measured from the
+same arm file in several campaigns are repeats of one configuration, which the frontier places at
+their medians; the tables keep every run. The stage waterfall splits each configuration's voice turn
+into the stages that add up to its mean V2V.
 
 It reads each point as its compact record keeps it (:func:`.record.compact`): a record, or a run
 directory, whose raw files only :mod:`.record` reads.
@@ -36,7 +35,7 @@ from leaseholder_bench.e2.record import (
     engine_model,
     kv_token_bytes,
     measured_sum,
-    point_engines,
+    point_engine,
     turn_samples,
 )
 from leaseholder_stats import percentiles, summarize
@@ -112,7 +111,6 @@ BOX_MODEL = "Qwen/Qwen3-4B-Instruct-2507-FP8"
 """The frozen box's GPU, as nvidia-smi names it in campaign.sh's samples, and its model: a point's
 workload names its GPU and its model only where they are not these. A record that names no GPU ran
 on the box, as every point did before the samples named it."""
-NODE_COLUMNS = ("nodes",)
 WORKER_COLUMNS = (
     *(f"{stage.removesuffix('_ms')}_{q}_ms" for stage in WATERFALL for q in ("p50", "p95")),
     "events_sent",
@@ -146,10 +144,9 @@ CPU_TIER_COLUMNS = (
     "cpu_tier_stored_tokens",
     "kv_bytes_per_token",
 )
-"""Columns that only some points have, each group shown when one of them has it: the GPU nodes of a
-point on several, which every other column then totals; the voice worker's stage times and lifecycle
-events; the GPU's median SM clock and highest temperature during the calls (over every node's GPU on
-several); under the gateway's lifecycle policy, the background requests it deferred by what held
+"""Columns that only some points have, each group shown when one of them has it: the voice worker's
+stage times and lifecycle events; the GPU's median SM clock and highest temperature during the calls;
+under the gateway's lifecycle policy, the background requests it deferred by what held
 them back and the realtime replies it capped, with their share of its realtime requests; and on vLLM
 its prompt tokens by source at their first scheduling and the CPU tier's loads and stores of every
 scheduling, in tokens at the bytes of KV a token takes in the engine's pool."""
@@ -230,8 +227,7 @@ def hardware(gpu_name: str | None, model: str | None) -> str:
 
 
 def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> dict[str, Any]:
-    """A point's row of frontier.csv but for its workload, which load_points names; a point on
-    several GPU nodes also carries each node's numbers (``by_node``) for frontier.md."""
+    """A point's row of frontier.csv but for its workload, which load_points names."""
     arm, voice = run["arm"], summary["voice"]
     background = summary["background"] or {}
     gateway, engine = summary["gateway"], summary["engine"]
@@ -241,10 +237,8 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
     # V2V from the callers' turns, where a failed turn counts at the reply timeout.
     samples = v2v_samples(run_dir / "bots" / "turns.jsonl")
     v2v = percentiles(samples)
-    nodes = summary.get("nodes") or {}
-    engines = point_engines(run_dir, list(nodes))
-    model = next((m for e in engines.values() if (m := engine_model(e))), None)
-    on = hardware((summary.get("gpu") or {}).get("name"), model)
+    settings = point_engine(run_dir)
+    on = hardware((summary.get("gpu") or {}).get("name"), engine_model(settings))
     row = {
         "arm": CONFIGURATION_ARMS.get(run["name"], str(arm["arm"])),
         "point": run["name"],
@@ -295,9 +289,7 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
     row["warmup_turns"] = arm["voice"].get("warmup_turns", 0)
     row["stage_means"] = {s: (c["n"], c["mean"]) for s, c in waterfall.items() if "mean" in c}
     row["v2v_samples"] = samples
-    row["nodes"] = " ".join(nodes) or None
-    row["by_node"] = [_node_row(node, share) for node, share in nodes.items()]
-    row |= cpu_tier(engine, nodes, engines)
+    row |= cpu_tier(engine, settings)
     window = background.get("fixed_window") or {}
     row |= {
         "fixed_window_tokens_per_s": window.get("tokens_per_s"),
@@ -307,36 +299,25 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
 
 
 def cpu_tier(
-    engine: Mapping[str, Any],
-    nodes: Mapping[str, Mapping[str, Any]],
-    engines: Mapping[str | None, Mapping[str, Any] | None],
+    engine: Mapping[str, Any], settings: Mapping[str, Any] | None
 ) -> dict[str, int | float | None]:
     """A point's prompt tokens by source at their first scheduling, and the tokens its CPU tier loaded
-    and stored (``engine``'s counts in bytes, at each engine's bytes of KV a token: every node's own on
-    several, from ``nodes``' shares), with those bytes (None where the engines differ)."""
+    and stored (``engine``'s counts in bytes, at the bytes of KV a token takes in the pool of the
+    engine ``settings`` describe), with those bytes."""
     sources = engine.get("prompt_tokens_by_source")
     row: dict[str, int | float | None] = {
         column: None if sources is None else sources.get(source)
         for source, column in FIRST_SCHEDULE.items()
     }
-    per_token = {node: kv_token_bytes(settings) for node, settings in engines.items()}
+    per_token = kv_token_bytes(settings)
 
     def tokens(key: str) -> int | None:
-        counted = (
-            [(share["engine"].get(key), per_token.get(node)) for node, share in nodes.items()]
-            if nodes
-            else [(engine.get(key), per_token.get(None))]
-        )
-        if any(count is None or each is None for count, each in counted):
-            return None
-        return round(sum(count / each for count, each in counted))
+        count = engine.get(key)
+        return None if count is None or per_token is None else round(count / per_token)
 
     row["cpu_tier_loaded_tokens"] = tokens("kv_offload_load_bytes")
     row["cpu_tier_stored_tokens"] = tokens("kv_offload_store_bytes")
-    factors = set(per_token.values())
-    row["kv_bytes_per_token"] = (
-        round(next(iter(factors)), 1) if len(factors) == 1 and None not in factors else None
-    )
+    row["kv_bytes_per_token"] = None if per_token is None else round(per_token, 1)
     return row
 
 
@@ -366,30 +347,9 @@ def v2v_samples(turns: Path) -> list[float]:
     return turn_samples(map(orjson.loads, filter(str.strip, turns.read_text().splitlines())))[0]
 
 
-def _node_row(node: str, share: Mapping[str, Any]) -> dict[str, Any]:
-    """One node's share of a point, for frontier.md's table of GPU nodes."""
-    voice, background = share["voice"] or {}, share["background"] or {}
-    v2v, first_byte = voice.get("v2v_ms", {}), background.get("first_byte_ms", {})
-    return {
-        "node": node,
-        "calls": voice.get("calls"),
-        "v2v_p50_ms": v2v.get("p50"),
-        "v2v_p95_ms": v2v.get("p95"),
-        "v2v_p99_ms": v2v.get("p99"),
-        "voice_turns": voice.get("turns"),
-        "voice_errors": voice.get("errors"),
-        "background_tokens_per_s": background.get("tokens_per_s"),
-        "background_requests_per_s": background.get("requests_per_s"),
-        "agent_first_byte_p50_ms": first_byte.get("p50"),
-        "agent_first_byte_p99_ms": first_byte.get("p99"),
-        "realtime_first_byte_p95_ms": (share["realtime_first_byte_ms"] or {}).get("p95"),
-        "engine_preemptions": share["engine"]["preemptions"],
-    } | _gpu(share)
-
-
 def _gpu(kept: Mapping[str, Any]) -> dict[str, int | None]:
-    """The GPU columns from what the summary (or a node's share in it) keeps of the GPU's samples,
-    ``gpu``; None without them."""
+    """The GPU columns from what the summary keeps of the GPU's samples, ``gpu``; None without
+    them."""
     clocks = kept.get("gpu") or {}
     return {column: clocks.get(column.removeprefix("gpu_")) for column in GPU_COLUMNS}
 
@@ -650,7 +610,6 @@ def figure_name(data: str, callers: int, on: str = "", warmup_turns: int = 0) ->
 def _measured(rows: Sequence[Mapping[str, Any]]) -> list[tuple[str, ...]]:
     """The optional column groups that some point has."""
     groups = (
-        NODE_COLUMNS,
         WORKER_COLUMNS,
         GPU_COLUMNS,
         ADMISSION_COLUMNS,
@@ -693,12 +652,6 @@ def markdown(rows: Sequence[Mapping[str, Any]]) -> str:
         )
     if gpu_columns:
         intro += " SM clock (MHz) and temperature (°C) are the GPU's during the calls."
-    if NODE_COLUMNS in measured:
-        intro += (
-            " A point on several GPU nodes (its label says how many) is placed by its totals: all its "
-            "calls, all its agent requests and its engines' counters added up; GPU nodes below gives "
-            "each node's share."
-        )
     lines = ["# E2 frontier", "", intro]
     window = f" First {GOODPUT_WINDOW_S:.0f} s |" if window_columns else ""
     header = (
@@ -718,8 +671,6 @@ def markdown(rows: Sequence[Mapping[str, Any]]) -> str:
             lines += _arm_rows(
                 [r for r in members if r["arm"] == arm], groups, gpu_columns, window_columns
             )
-    if NODE_COLUMNS in measured:
-        lines += _nodes(rows, gpu_columns)
     if WORKER_COLUMNS in measured:
         lines += _stages(rows)
     if ADMISSION_COLUMNS in measured:
@@ -771,7 +722,7 @@ def _arm_rows(
         ttft = f"{_cell(r['agent_ttft_p50_ms'])} / {_cell(r['agent_ttft_p99_ms'])}"
         first_byte = _cell(r["realtime_first_byte_p95_ms"])
         # A repeated configuration's frontier mark goes on its medians' line.
-        name, mark = f"{r['point']}: {_label(r)}", "•" if r["frontier"] and several else ""
+        name, mark = f"{r['point']}: {r['label']}", "•" if r["frontier"] and several else ""
         if len(group["runs"]) > 1:
             name, mark = f"{r['point']} ({r['campaign']})", ""
         window = f" {_window(r, _cell(r['fixed_window_tokens_per_s']))} |" if window_columns else ""
@@ -817,63 +768,13 @@ def _spread(
         short = [r for r in short if r["fixed_window_s"] < GOODPUT_WINDOW_S]
         window = f" {spread('fixed_window_tokens_per_s')}{' †' if short else ''} |"
     line = (
-        f"| {first['point']}: {_label(first)}; median (range) of {len(runs)} runs "
+        f"| {first['point']}: {first['label']}; median (range) of {len(runs)} runs "
         f"| {'•' if group['frontier'] and several else ''} | {first['sessions']} "
         f"| {spread('background_tokens_per_s')} |{window} | {spread('v2v_p50_ms')} "
         f"| {spread('v2v_p95_ms')} | {spread('v2v_p99_ms')} | {spread('voice_errors')} "
         f"| {spread('agent_ttft_p50_ms')} / {spread('agent_ttft_p99_ms')} | {first_byte} | | |"
     )
     return line + (" | |" if gpu_columns else "")
-
-
-def _label(row: Mapping[str, Any]) -> str:
-    """A point's label in frontier.md, which gives the number of GPU nodes of a point on several."""
-    nodes = len(row["by_node"])
-    return row["label"] + (f" ({nodes} GPU nodes)" if nodes else "")
-
-
-def _nodes(rows: Sequence[Mapping[str, Any]], gpu_columns: bool) -> list[str]:
-    """Each GPU node's share of the points on several, a line per run and node."""
-    lines = [
-        "",
-        "## GPU nodes",
-        "",
-        "Each node's share of the points on several GPU nodes: the calls the voice worker placed on it, "
-        "with their voice-to-voice latency in ms; the agent requests the gateway sent it, with their "
-        "goodput by the gateway's request log and their first byte at the gateway; the first byte of "
-        "its realtime requests; its engine's preemptions.",
-        "",
-    ]
-    header = (
-        "| Point | Node | Calls | V2V p50 | V2V p95 | V2V p99 | Failed turns | Background tokens/s "
-        "| Requests/s | Agent first byte p50 / p99 | Realtime first byte p95 | Preemptions |"
-    )
-    align = "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
-    if gpu_columns:
-        header += " SM clock p50 | Max temp |"
-        align += "---:|---:|"
-    lines += [header, align]
-    runs = Counter(map(_configuration, rows))
-    for r in rows:
-        name = f"{r['point']} ({r['campaign']})" if runs[_configuration(r)] > 1 else r["point"]
-        for n in r["by_node"]:
-            failed = "—"
-            if n["voice_turns"] is not None:
-                failed = f"{n['voice_errors']} of {n['voice_turns']}"
-            first_byte = " / ".join(_cell(n[f"agent_first_byte_{q}_ms"]) for q in ("p50", "p99"))
-            line = (
-                f"| {name} | {n['node']} | {_cell(n['calls'])} | {_v2v(n['v2v_p50_ms'])} "
-                f"| {_v2v(n['v2v_p95_ms'])} | {_v2v(n['v2v_p99_ms'])} | {failed} "
-                f"| {_cell(n['background_tokens_per_s'])} | {_cell(n['background_requests_per_s'], 2)} "
-                f"| {first_byte} | {_cell(n['realtime_first_byte_p95_ms'])} "
-                f"| {_cell(n['engine_preemptions'])} |"
-            )
-            if gpu_columns:
-                line += (
-                    f" {_cell(n['gpu_sm_clock_p50_mhz'])} | {_cell(n['gpu_temperature_max_c'])} |"
-                )
-            lines.append(line)
-    return lines
 
 
 def _stages(rows: Sequence[Mapping[str, Any]]) -> list[str]:

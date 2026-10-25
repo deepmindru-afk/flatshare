@@ -21,7 +21,6 @@ from leaseholder_bench.e2.figures import load_sweep
 from leaseholder_bench.e2.record import (
     DISCARDED,
     OUTCOMES,
-    PLACEMENT_LOGGER,
     RECORD,
     REFUSED,
     RESUBMITS,
@@ -31,7 +30,6 @@ from leaseholder_bench.e2.record import (
     USAGE,
     WATERFALL,
     background,
-    call_turns,
     compact,
     engine_counts,
     engine_settings,
@@ -50,7 +48,6 @@ from leaseholder_bench.e2.report import (
     CONFIGURATION_ARMS,
     CPU_TIER_COLUMNS,
     GPU_COLUMNS,
-    NODE_COLUMNS,
     STACKED,
     STANDARD_WORKLOAD,
     WINDOW_COLUMNS,
@@ -937,9 +934,6 @@ def test_the_warm_up_turns_are_in_no_voice_to_voice_sample(tmp_path: Path) -> No
     assert row["v2v_samples"] == [1700, 1800, 1900, 2000] and row["v2v_p95_ms"] == 1985.0
     [cell] = stage_waterfall([row])
     assert (cell["replies"], cell["v2v_mean_ms"]) == (4, 1850)
-    # A node's share counts only its calls' measured turns too.
-    share = call_turns([*warm, *answered(1700, 1800)], 2)
-    assert (share["turns"], share["v2v_ms"]["n"], share["v2v_ms"]["p50"]) == (2, 2, 1750.0)
 
 
 def test_the_stage_waterfall_stacks_each_configurations_stages_to_its_mean_v2v(
@@ -1346,209 +1340,6 @@ def test_the_record_and_the_report_read_series_the_gateway_exports() -> None:
     assert counts["realtime_replies"] == moved(admitted, {"class": "realtime"}) > 0
 
 
-def placement(run_id: str, caller: int, node: str) -> str:
-    """The voice worker's line for a call it placed, as LiveKit's formatter writes it."""
-    room = f"lh-bot-{run_id}-{caller}"
-    line = {"message": "session placed", "level": "INFO", "name": PLACEMENT_LOGGER}
-    return json.dumps(line | {"session_id": f"voice-{caller}", "room": room, "node": node})
-
-
-def test_a_point_on_two_gpu_nodes_reports_its_totals_and_each_nodes_share(tmp_path: Path) -> None:
-    run_dir = tmp_path / "a4-pool"
-    (run_dir / "bots").mkdir(parents=True)
-    (run_dir / "metrics").mkdir()
-    bots = {
-        "turns": 5,
-        "errors": 1,
-        "v2v_ms": {"n": 5, "p50": 1700.0, "p95": 1980.0, "p99": 1996.0},
-        "barge_in_to_silence_ms": {"n": 1, "p50": 600.0},
-        "barge_ins": 1,
-    }
-    (run_dir / "bots" / "summary.json").write_text(json.dumps(bots))
-    (run_dir / "bots" / "run.json").write_text(json.dumps({"run_id": "1f2e3d4c"}))
-    barged = {"barge_in": True, "barge_in_to_silence_ms": 600.0, "v2v_after_barge_in_ms": 1600.0}
-    turns = [
-        {"caller": 0, "turn": 0, "v2v_ms": 1500.0, "barge_in": False},
-        {"caller": 0, "turn": 1, "v2v_ms": 1700.0} | barged,
-        {"caller": 1, "turn": 0, "v2v_ms": 2000.0, "barge_in": False},
-        {"caller": 1, "turn": 1, "error": "the agent never replied"},
-        {"caller": 2, "turn": 0, "v2v_ms": 1900.0, "barge_in": False},  # its placement failed
-    ]
-    (run_dir / "bots" / "turns.jsonl").write_text("".join(json.dumps(t) + "\n" for t in turns))
-    journal = [
-        placement("1f2e3d4c", 0, "a"),
-        placement("1f2e3d4c", 1, "b"),
-        placement("00c0ffee", 2, "a"),  # a call of another run
-        '{"message": "the call has no node (HTTP 503)", "name": "leaseholder_voice.placement"}',
-    ]
-    (run_dir / "voice-worker.log").write_text("\n".join(journal) + "\n")
-    for when, text in (("start", GATEWAY_BEFORE), ("end", GATEWAY_AFTER)):
-        (run_dir / "metrics" / f"gateway-{when}.prom").write_text(text)
-    for node, counts in {"a": (2, 5), "b": (0, 1)}.items():
-        for when, n in zip(("start", "end"), counts, strict=True):
-            loaded = 147_456 * 10 * n  # ten tokens a preemption
-            engine = ENGINE.format(
-                preemptions=n, computed=100 * n, gpu=0, refused=n, loaded=loaded, stored=0
-            )
-            (run_dir / "metrics" / f"engine-{node}-{when}.prom").write_text(engine)
-    served = {"prompt_tokens": 5000, "completion_tokens": 100}
-    requests = [
-        logged(T0 + 1, "realtime", 100.0, node="a"),
-        logged(T0 + 2, "realtime", 300.0, node="b"),
-        logged(T0 + 3, "background", 2000.0, node="b", **served),
-        logged(T0 + 4, "background", 2500.0, node="b", **served),
-        logged(T0 + 5, "background", 40.0, node="b", status=503),  # an engine's refusal, relayed
-        logged(T0 + 5, "background", None, node="b", route="/v1/sessions", outcome=None),  # placed
-        logged(T0 + 5, "background", None, node="a", status=429, outcome=None),  # refused
-        logged(T0 + 6, "background", None, status=503, outcome=None),  # no node was ready
-    ]
-    (run_dir / "gateway.jsonl").write_text("\n".join(requests) + "\n")
-    summary = summarize_point(run_dir, T0, T0 + 100, agents=False, nodes=("a", "b"))
-    # The totals: every call, every request, the engines' counters added up.
-    assert summary["voice"] == {k: bots[k] for k in summary["voice"]}
-    assert summary["gateway"]["realtime_first_byte_ms"]["n"] == 2
-    assert summary["engine"] == {
-        "preemptions": 4,
-        "prompt_tokens_by_source": {"local_compute": 400, "local_cache_hit": 0},
-        "refused": {"max_num_queued_tokens": 4},
-        "kv_offload_load_bytes": 147_456 * 40,  # node a's 30 tokens and node b's 10
-        "kv_offload_store_bytes": 0,
-    }
-    a, b = summary["nodes"]["a"], summary["nodes"]["b"]
-    # Node a has caller 0's call; caller 2's room is another run's, so its call is in the totals only.
-    assert {k: a["voice"][k] for k in ("calls", "turns", "errors", "barge_ins")} == {
-        "calls": 1,
-        "turns": 2,
-        "errors": 0,
-        "barge_ins": 1,
-    }
-    assert (a["voice"]["v2v_ms"]["n"], a["voice"]["v2v_ms"]["p50"]) == (3, 1600.0)  # with the reply
-    assert a["voice"]["barge_in_to_silence_ms"]["p50"] == 600.0
-    # Node b's failed turn counts at the reply timeout, censored.
-    assert (b["voice"]["turns"], b["voice"]["errors"], b["voice"]["v2v_ms"]["n"]) == (2, 1, 2)
-    assert b["voice"]["v2v_ms"]["p99"] == pytest.approx(30_000, abs=300)
-    assert b["background"] == {
-        "requests": 2,
-        "errors": 1,
-        "requests_per_s": 0.02,
-        "tokens_per_s": 102.0,
-        "first_byte_ms": {
-            "n": 2, "mean": 2250.0, "p50": 2250.0, "p95": 2475.0, "p99": 2495.0, "source": "log",
-        },
-    }  # fmt: skip
-    assert (a["background"]["requests"], a["background"]["errors"]) == (0, 1)
-    assert (a["realtime_first_byte_ms"]["p50"], b["realtime_first_byte_ms"]["p50"]) == (
-        100.0,
-        300.0,
-    )
-    assert (a["engine"]["preemptions"], b["engine"]["refused"]) == (3, {"max_num_queued_tokens": 1})
-    assert (a["engine"]["kv_offload_load_bytes"], b["engine"]["kv_offload_load_bytes"]) == (
-        147_456 * 30,
-        147_456 * 10,
-    )
-    # Without the worker's placements, the nodes' shares of the calls are unknown.
-    (run_dir / "voice-worker.log").unlink()
-    a = summarize_point(run_dir, T0, T0 + 100, agents=False, nodes=("a", "b"))["nodes"]["a"]
-    assert (a["voice"], a["background"]["requests"]) == (None, 0)
-
-
-def on_two_nodes(run_dir: Path, **share: Any) -> Path:
-    """A point's run directory as a point on two GPU nodes, phastform and gray, each with ``share``
-    as its share of the point."""
-    summary = json.loads((run_dir / "summary.json").read_text())
-    summary["nodes"] = {node: share for node in ("phastform", "gray")}
-    (run_dir / "summary.json").write_text(json.dumps(summary))
-    return run_dir
-
-
-def test_the_report_places_a_point_on_two_gpu_nodes_by_its_totals(tmp_path: Path) -> None:
-    dirs = [point(tmp_path, "a4-s16", "4", 3000, 2000), point(tmp_path, "a4-pool", "4", 5800, 2100)]
-    on_two_nodes(
-        dirs[1],
-        voice={"calls": 2, "turns": 50, "errors": 1, "v2v_ms": {"p50": 1650.0, "p95": 2050.0}},
-        background={"tokens_per_s": 2900.0, "requests_per_s": 2.9, "first_byte_ms": {"p50": 150.0}},
-        realtime_first_byte_ms={"p95": 130.0},
-        engine={"preemptions": 2, "refused": None},
-    )
-    for node, clock in (("phastform", "2805 MHz"), ("gray", "2745 MHz")):
-        (dirs[1] / f"gpu-{node}.csv").write_text(smi(T0 + 10, clock, "60") + "\n")
-    rows, _ = load_points(dirs)
-    out = tmp_path / "report"
-    write_report(rows, out)
-    with (out / "frontier.csv").open() as f:
-        written = {r["point"]: r for r in csv.DictReader(f)}
-    assert list(written["a4-pool"]) == [*COLUMNS, *NODE_COLUMNS, *GPU_COLUMNS]
-    pool = written["a4-pool"]
-    assert (pool["nodes"], pool["background_tokens_per_s"], pool["frontier"]) == (
-        "phastform gray",
-        "5800",
-        "True",
-    )
-    assert pool["gpu_sm_clock_p50_mhz"] == "2775" and written["a4-s16"]["nodes"] == ""
-    table = (out / "frontier.md").read_text()
-    assert "is placed by its totals" in table
-    assert "| a4-pool: a4-pool label (2 GPU nodes) | • | 16 | 5,800 |" in table
-    assert "| a4-s16: a4-s16 label | • | 16 | 3,000 |" in table
-    assert "## GPU nodes" in table
-    assert (
-        "| a4-pool | gray | 2 | 1,650 | 2,050 | — | 1 of 50 | 2,900 | 2.90 | 150 / — | 130 | 2 "
-        "| 2,745 | 60 |"
-    ) in table
-
-
-def test_a_repeated_point_on_two_gpu_nodes_names_each_run_by_its_campaign(tmp_path: Path) -> None:
-    unknown = {"voice": None, "background": None, "realtime_first_byte_ms": None}
-    dirs = [
-        on_two_nodes(
-            point(tmp_path / campaign, "a4-pool", "4", tokens, 2100),
-            **unknown,
-            engine={"preemptions": None},
-        )
-        for campaign, tokens in (("w4", 5800), ("r2", 5600))
-    ]
-    rows, _ = load_points(dirs)
-    write_report(rows, tmp_path / "report")
-    table = (tmp_path / "report" / "frontier.md").read_text()
-    assert "| a4-pool: a4-pool label (2 GPU nodes); median (range) of 2 runs |  |" in table
-    assert "| a4-pool (r2) | phastform | — | — | — | — | — |" in table
-    assert "| a4-pool (w4) | gray | — |" in table
-
-
-def test_a_compact_record_of_a_point_on_two_gpu_nodes_keeps_each_nodes_share(
-    tmp_path: Path,
-) -> None:
-    run_dir = whole(point(tmp_path / "runs" / "g2", "a4-pool", "4", 5800, 2100))
-    on_two_nodes(
-        run_dir,
-        voice={"calls": 1, "turns": 25, "errors": 0, "v2v_ms": {"p95": 2000.0}},
-        background={"tokens_per_s": 2900.0, "requests_per_s": 2.9, "first_byte_ms": {}},
-        realtime_first_byte_ms={"p95": 130.0},
-        engine={"preemptions": 2, "refused": None},
-    )
-    # Each node's engine and GPU in files of its own, as on several nodes.
-    (run_dir / "gpu.csv").unlink()
-    (run_dir / "engine.json").unlink()
-    for node, clock, temperature in (("phastform", "2805 MHz", "61"), ("gray", "2745 MHz", "71")):
-        (run_dir / f"gpu-{node}.csv").write_text(smi(T0 + 10, clock, temperature) + "\n")
-        (run_dir / f"engine-{node}.json").write_text(json.dumps(VLLM_CONFIG))
-    out = tmp_path / "records"
-    assert main(["e2", "export", str(run_dir), "--out", str(out)]) == 0
-    record = out / "g2" / "a4-pool"
-    kept = sorted(str(p.relative_to(record)) for p in record.rglob("*") if p.is_file())
-    assert kept == sorted([*RECORD, "summary.json", "engine-phastform.json", "engine-gray.json"])
-    assert json.loads((record / "engine-gray.json").read_text()) == engine_settings(VLLM_CONFIG)
-    saved = json.loads((record / "summary.json").read_text())
-    assert saved["gpu"] == {"sm_clock_p50_mhz": 2775, "temperature_max_c": 71}  # both GPUs
-    assert saved["nodes"]["gray"]["gpu"] == {"sm_clock_p50_mhz": 2745, "temperature_max_c": 71}
-    full, _ = load_points([run_dir])
-    compact, _ = load_points([record])
-    assert compact == full
-    assert [n["gpu_sm_clock_p50_mhz"] for n in full[0]["by_node"]] == [2805, 2745]
-    reports = [write_report(rows, tmp_path / name) for name, rows in (("a", full), ("b", compact))]
-    for a, b in zip(*reports, strict=True):
-        assert a.read_bytes() == b.read_bytes(), a.name
-
-
 def test_the_figure_needs_matplotlib(tmp_path: Path) -> None:
     pytest.importorskip("matplotlib")
     dirs = [
@@ -1690,24 +1481,24 @@ def test_the_gpu_columns_read_the_lent_gpu_of_several_alone(tmp_path: Path) -> N
             )
     named = tmp_path / "named.csv"
     named.write_text("# gpu GPU-0\n" + "\n".join(rows) + "\n")
-    assert gpu_samples([named], window) == {
+    assert gpu_samples(named, window) == {
         "gpu_sm_clock_p50_mhz": 1410,
         "gpu_temperature_max_c": 61,
         "gpu_name": "NVIDIA A100-SXM4-40GB",
     }
     unnamed = tmp_path / "unnamed.csv"
     unnamed.write_text("\n".join(rows) + "\n")
-    assert gpu_samples([unnamed], window) == {
+    assert gpu_samples(unnamed, window) == {
         "gpu_sm_clock_p50_mhz": None,
         "gpu_temperature_max_c": None,
     }
     one = tmp_path / "one.csv"
     one.write_text("\n".join(row.rsplit(", GPU-", 1)[0] for row in rows[::4]) + "\n")
-    assert gpu_samples([one], window)["gpu_sm_clock_p50_mhz"] == 1410
+    assert gpu_samples(one, window)["gpu_sm_clock_p50_mhz"] == 1410
     # The sampler before it named the GPU in each row: several rows a second are several GPUs, none of them named.
     old = tmp_path / "old.csv"
     old.write_text("\n".join(row.rsplit(", GPU-", 1)[0] for row in rows) + "\n")
-    assert gpu_samples([old], window) == {
+    assert gpu_samples(old, window) == {
         "gpu_sm_clock_p50_mhz": None,
         "gpu_temperature_max_c": None,
     }
