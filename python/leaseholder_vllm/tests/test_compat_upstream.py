@@ -16,6 +16,9 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/compat_upstream.py"
 GIT = os.environ.get("GIT", "git")
+# git as the tests run it, the fake upstream's and the script's alike: without the developer's own config (commit
+# signing, hooks), which the tests do not test.
+ISOLATED = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 VLLM_SRC = os.environ.get("VLLM_SRC")
 SCHED = "vllm/v1/core/sched"
 
@@ -46,7 +49,11 @@ def compat():
 
 def git(cwd: Path, *args: str) -> str:
     return subprocess.run(
-        [GIT, "-C", str(cwd), *args], check=True, capture_output=True, text=True
+        [GIT, "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ | ISOLATED,
     ).stdout.strip()
 
 
@@ -148,7 +155,7 @@ def run(tmp_path, remote: str, *args: str, env: dict | None = None) -> subproces
         ],
         capture_output=True,
         text=True,
-        env=os.environ | (env or {}),
+        env=os.environ | ISOLATED | (env or {}),
     )
 
 
@@ -332,6 +339,18 @@ def test_an_older_git_is_refused(tmp_path):
     assert proc.returncode == 2
     assert "git merge-tree --write-tree needs git 2.38 or newer" in proc.stderr
     assert "is 2.34" in proc.stderr
+
+
+def test_the_upstream_builds_whatever_the_developers_git_config_says(tmp_path, monkeypatch):
+    """The fake upstream's commits, and the script the tests run, ignore the developer's own git config: signing that
+    cannot sign, hooks that are not there."""
+    hostile = tmp_path / "gitconfig"
+    hostile.write_text(
+        "[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n[core]\n\thooksPath = /nowhere\n"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile))
+    upstream = Upstream(tmp_path / "upstream")
+    assert len(upstream.commit(None, {"vllm/__init__.py": ""})) == 40
 
 
 def test_the_newest_release_and_a_newer_candidate(compat):
