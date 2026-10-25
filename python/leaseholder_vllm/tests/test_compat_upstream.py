@@ -213,6 +213,16 @@ def test_a_failing_test_fails_and_one_main_fails_too_is_mains(tmp_path, upstream
     assert failed == ["FAILED tests/test_cap.py::test_cap"], proc.stdout
 
 
+def test_a_pr_whose_tests_all_skip_has_not_been_checked(tmp_path, upstream, python):
+    """A test file that skips as a whole (a CUDA-only mark, an importorskip of what main's environment lacks) passes
+    no test: that is no evidence, so the check exits 2, not 0."""
+    skipped = "import pytest\n\npytestmark = pytest.mark.skip(reason='CUDA only')\n\n\ndef test_pr():\n    pass\n"
+    proc = run(tmp_path, standard(upstream, pr_tests=skipped), "--python", python)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "#63350: tests/test_pr.py: 1 skipped" in proc.stdout
+    assert "no test ran" in proc.stdout
+
+
 def test_an_interpreter_that_cannot_import_mains_scheduler_runs_nothing(tmp_path, upstream, python):
     error = "ModuleNotFoundError: No module named 'torch'"
     proc = run(tmp_path, standard(upstream), "--python", python, env={"FAKE_IMPORT_ERROR": error})

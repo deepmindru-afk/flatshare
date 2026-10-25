@@ -16,9 +16,10 @@ release tags into it, and reports:
 - make-room's patches on a sparse checkout of the newest release, and of a newer release candidate if there is one
   (``build.py make-room OUT --source-tree``): they apply, or the first hunk that does not.
 
-Exit status 1 for a conflict or a failed test; 2 when it could not check (no network, an older git, an interpreter
-that cannot import main's scheduler); 0 otherwise, also when a release does not take the patches: the variant is
-written against 0.32.0, the pinned and deployed version, and says so.
+Exit status 1 for a conflict, a failed test or patches that do not apply to v0.32.0, the pinned version; 2 when it
+could not check (no network, an older git, an interpreter that cannot import main's scheduler or collect its tests, a
+PR none of whose tests ran); 0 otherwise, also when a newer release does not take the patches: the variant is written
+against 0.32.0, the pinned and deployed version, and says so.
 """
 
 from __future__ import annotations
@@ -171,9 +172,9 @@ def harness_error(python: str, tree: Path, dirs: list[str]) -> str | None:
     return errors[-1] if errors else last_line(output)
 
 
-def run_tests(python: str, tree: Path, files: list[str]) -> tuple[set[str], str]:
-    """``files`` run with pytest from ``tree``, on CPU: the node IDs of the tests that failed or erred, and pytest's
-    summary line."""
+def run_tests(python: str, tree: Path, files: list[str]) -> tuple[int, set[str], str]:
+    """``files`` run with pytest from ``tree``, on CPU: how many tests passed (not failed, erred or skipped), the node
+    IDs of those that failed or erred, and pytest's summary line."""
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "junit.xml"
         cmd = [python, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={report}"]
@@ -186,21 +187,28 @@ def run_tests(python: str, tree: Path, files: list[str]) -> tuple[set[str], str]
             text=True,
         )
         if not report.exists():
-            return {f"{' '.join(files)}: pytest did not run"}, last_line(proc.stdout + proc.stderr)
+            return (
+                0,
+                {f"{' '.join(files)}: pytest did not run"},
+                last_line(proc.stdout + proc.stderr),
+            )
+        cases = list(ET.parse(report).iter("testcase"))
         failed = {
             node_id(case)
-            for case in ET.parse(report).iter("testcase")
+            for case in cases
             if case.find("failure") is not None or case.find("error") is not None
         }
+        skipped = sum(case.find("skipped") is not None for case in cases)
+    passed = len(cases) - len(failed) - skipped
     summary = next(
         (
             line
             for line in reversed(proc.stdout.splitlines())
-            if re.search(r"\d+ (passed|failed|error)", line)
+            if re.search(r"\d+ (passed|failed|errors?|skipped)", line)
         ),
         last_line(proc.stdout),
     )
-    return failed, summary.strip("= ")
+    return passed, failed, summary.strip("= ")
 
 
 def node_id(case: ET.Element) -> str:
@@ -305,14 +313,18 @@ def check(clone: Path, python: str | None, git_cmd: str, remote: str) -> int:
                 "-m", f"#{pr} merged into main",
             ).strip()  # fmt: skip
             tree = worktree(git, f"merge-{pr}", commit, ["vllm", "tests"])
-            failures, summary = run_tests(python, tree, files)
+            passed, failures, summary = run_tests(python, tree, files)
             mains = set()
             on_main = [f for f in files if (main_tree / f).exists()]
             if failures and on_main:
-                mains = run_tests(python, main_tree, on_main)[0] & failures
+                mains = run_tests(python, main_tree, on_main)[1] & failures
             line = f"  #{pr}: {', '.join(files)}: {summary}"
             if mains:
                 line += f" ({len(mains)} of them fail on main too)"
+            if not passed and not failures:
+                # Every test skipped, a CUDA-only mark or an importorskip, say: that is no evidence.
+                line += ": no test ran, so this checked nothing"
+                cannot = cannot or f"no test of #{pr} ran"
             print(line)
             for name in sorted(failures - mains):
                 failed = True
