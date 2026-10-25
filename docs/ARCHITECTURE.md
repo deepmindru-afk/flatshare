@@ -6,7 +6,7 @@ This document describes what is built, as of v0.3 (2026-10-24). [PRODUCTION.md](
 
 ## 1. The problem in the engine
 
-A voice turn on a GPU shared with coding agents loses its time in the LLM's first sentence. On stock vLLM 0.32, tuned (priority scheduling, a 512-token step cap and a write-through CPU KV tier), with 24 agent sessions of long contexts beside two calls, the reply's first sentence takes 3.8 s of a 5.2 s mean turn, against 0.3 s with voice alone ([BENCHMARKS.md](BENCHMARKS.md#voice-under-agent-load-e2)). Two mechanisms in the scheduler cause it:
+A voice turn on a GPU shared with coding agents loses its time in the LLM's first sentence. On stock vLLM 0.32, tuned (priority scheduling, a 512-token step cap and a write-through CPU KV tier), with 24 agent sessions of long contexts beside two calls, the reply's first sentence takes 3.9 s of a 5.3 s mean turn in W5, against 0.3 s with voice alone ([W5's stage means](../benchmarks/results/2026-10-24-e2-w5/report/frontier.md#stage-waterfall)). Two mechanisms in the scheduler cause it:
 - **A waiting request cannot take KV.** vLLM's running loop preempts only so that a running request can grow, and its waiting loop stops at the first request it cannot allocate, so nothing preempts for a waiting request ([#40004](https://github.com/vllm-project/vllm/issues/40004)). When running agents hold the KV pool, a voice turn waits for one of them to finish: 4.9 s to the first token of a 746-token turn behind two 18k-token agent requests ([the KV case](BENCHMARKS.md#the-kv-case-make-room)).
 - **Prefill shares the reply's steps.** Once the turn runs, every step of its reply also carries the agents' prefill chunks, up to about 270 ms each after a 30k-token context, so the first sentence decodes slowly.
 

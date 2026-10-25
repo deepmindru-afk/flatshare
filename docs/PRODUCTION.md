@@ -48,7 +48,7 @@ A longer window holds background prefill for longer each turn: the agents' throu
 
 ### The audio models
 
-- Whisper and Kokoro share the GPU by time-slicing; MPS does not help ([Voice on the shared GPU](BENCHMARKS.md#voice-on-the-shared-gpu)): the interference that matters is inside the LLM engine. Sharing still costs them a little: endpointing takes about 825 ms instead of 757, and TTS's first audio 222–249 ms instead of 199.
+- Whisper and Kokoro share the GPU by time-slicing; MPS does not help ([Voice on the shared GPU](BENCHMARKS.md#voice-on-the-shared-gpu)): the interference that matters is inside the LLM engine. Sharing still costs them a little: in the shared configurations of [What it buys](#what-it-buys), endpointing takes 822–825 ms instead of 756, and TTS's first audio 232–250 ms instead of 211 (means over W5's replies, from [W5's report](../benchmarks/results/2026-10-24-e2-w5/report/frontier.md#stage-waterfall)).
 - Pin each server to its own CPU cores on the GPU's NUMA node ([`deploy/phastform/systemd`](../deploy/phastform/systemd)).
 
 ## What not to deploy
@@ -58,8 +58,8 @@ Measured in the same scenario:
 - **vLLM's development mode** (`VLLM_SERVER_DEV_MODE=1`), which only a measured box runs, from the measurement drop-in (`variant.sh measure on`), for the harness's `/server_info` and cache resets: it serves routes such as `/collective_rpc`, `/sleep` and `/update_weights`, which `--api-key` does not guard ([the routes](../deploy/phastform/variants/README.md#the-measurement-drop-in)).
 - **KV cache events on TCP**: they carry every cached block's token ids and session id, and vLLM sends them to whoever binds the endpoint. The frozen box publishes none.
 - **Engine knobs**: `--watermark` (no change), `--max-num-queued-tokens` (it refuses voice turns too: 48 of 50 failed), concurrency caps (two agent contexts fill the pool), [#54530](https://github.com/vllm-project/vllm/pull/54530) (it preempts at the request-count cap, which does not bind here).
-- **Another engine**: SGLang 0.5.22's priority preemption, with or without its host tier (11,948 ms with HiCache, five runs).
-- **A static KV reservation** halves the tail (5,671 ms) but stays seconds over the SLO.
+- **Another engine**: SGLang 0.5.22's priority preemption, with or without its host tier (11,948 ms with HiCache, five runs in W4).
+- **A static KV reservation** halves the tail (5,671 ms in W4) but stays seconds over the SLO.
 - **#63350 alone**: 5,085 ms (W5). The KV preemption without the budget cap gets the turn into the batch, and its reply then decodes beside agent prefill.
 
 Without any engine change, aborting background requests that have no first byte yet and resubmitting them (`lh-gateway`'s `preempt-resubmit` policy) holds 2,522 ms (2,516–2,868) at tuned vLLM's throughput (3,332 against 3,305 agents' tokens/s over the calls' first 240 s), at the cost of the agents' tail (TTFT p99 193 s against 106 s): the best option on stock vLLM. It cannot reach a request that is already decoding, which the change can.
