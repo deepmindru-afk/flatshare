@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import os
 import re
+import socketserver
 import stat
 import subprocess
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -190,3 +194,43 @@ def test_the_engine_serves_its_development_routes_only_with_the_measurement_drop
         "reset-failed lh-engine",
         "restart lh-engine",
     ]
+
+
+class _Health(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200 if self.path == "/health" else 404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
+def test_wait_healthy_reaches_a_server_on_its_unix_socket() -> None:
+    wait = ["bash", str(DEPLOY / "bin" / "wait-healthy")]
+    # A short path: a socket's must fit sun_path, which pytest's tmp_path may not.
+    socket = Path(tempfile.mkdtemp(prefix="lh-wait-")) / "engine.sock"
+    server = _UnixServer(str(socket), _Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        done = subprocess.run(
+            [*wait, "--unix-socket", str(socket), "http://localhost/health", "5"],
+            capture_output=True,
+            text=True,
+        )
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.startswith(f"wait-healthy: http://localhost/health on {socket} healthy")
+    finally:
+        server.shutdown()
+    # Nobody serves the socket now: it gives up after its timeout.
+    done = subprocess.run(
+        [*wait, "--unix-socket", str(socket), "http://localhost/health", "0"],
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 1
+    assert f"on {socket} not healthy after 0s" in done.stderr

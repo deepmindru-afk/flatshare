@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# wait-healthy URL [TIMEOUT_S]: block until URL answers 2xx. Units run it as ExecStartPost, so a unit counts as
+# wait-healthy [--unix-socket SOCKET] URL [TIMEOUT_S]: block until URL answers 2xx, through the server's Unix socket
+# SOCKET when given (URL's host is then only a name, as for curl). Units run it as ExecStartPost, so a unit counts as
 # started only once its server is ready, and units ordered after it start only then.
 set -euo pipefail
-url=$1
+via=()
+if [[ ${1:-} == --unix-socket ]]; then
+  via=(--unix-socket "${2:?usage: wait-healthy [--unix-socket SOCKET] URL [TIMEOUT_S]}")
+  shift 2
+fi
+url=${1:?usage: wait-healthy [--unix-socket SOCKET] URL [TIMEOUT_S]}
 timeout=${2:-600}
 deadline=$((SECONDS + timeout))
-until curl -fs -m 2 -o /dev/null "$url"; do
+until curl -fs -m 2 -o /dev/null "${via[@]}" "$url"; do
   if ((SECONDS >= deadline)); then
-    echo "wait-healthy: $url not healthy after ${timeout}s" >&2
+    echo "wait-healthy: $url${via[1]:+ on ${via[1]}} not healthy after ${timeout}s" >&2
     exit 1
   fi
   sleep 2
 done
-echo "wait-healthy: $url healthy after ${SECONDS}s"
+echo "wait-healthy: $url${via[1]:+ on ${via[1]}} healthy after ${SECONDS}s"
