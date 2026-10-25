@@ -20,6 +20,9 @@ is a point on several nodes, each running the arm's ``[engine]``: the run starts
 nodes (``LH_NODES``, so that each call's STT and TTS follow its node), and reports each node and the
 total.
 
+The run reaches every engine by its address (:mod:`leaseholder_bench.transport`): on cyan, the tunnel's
+socket.
+
 The GPU nodes' engines are switched by ``benchmarks/e2/campaign.sh`` (``variant.sh use``), never here.
 A failure ends the point: ``run.json`` keeps ``"status": "failed"`` and the error, and every process
 the run started is stopped by its process group. ``lh-bench e2 report`` (:mod:`.report`) builds the
@@ -64,6 +67,7 @@ from leaseholder_bench.e2.arm import (
 from leaseholder_bench.e2.record import gateway_request_lines, render, summarize_point, worker_lines
 from leaseholder_bench.kv_metrics import fetch
 from leaseholder_bench.tiers import pool_tokens
+from leaseholder_bench.transport import client, runtime_socket
 
 CONFIGS = Path(__file__).resolve().parents[3] / "configs"
 """The AIPerf configuration, from the source tree (``uv sync`` installs the package editable)."""
@@ -110,13 +114,16 @@ SGLANG = "sglang"
 
 @dataclass(frozen=True)
 class Host:
-    """cyan (ops/RUNBOOK.md): its service ports, its paths and how to run the tools. The tests swap
-    the tools for fakes."""
+    """cyan (ops/RUNBOOK.md): its servers' addresses (``http://host:port``, or ``unix:`` and a socket's
+    path), its paths and how to run the tools. The tests swap the tools for fakes."""
 
     home: Path = field(default_factory=Path.home)
     gateway_url: str = "http://127.0.0.1:18080"
-    engine_url: str = "http://127.0.0.1:18000"
-    """The engine through the tunnel."""
+    """The gateway's TCP listener, AIPerf's way in, with the agents tenant's key."""
+    gateway_socket: str = field(default_factory=lambda: runtime_socket("gateway.sock"))
+    """The gateway's socket, private to this user, from which a point reads its metrics with no key."""
+    engine_url: str = field(default_factory=lambda: runtime_socket("phastform-engine.sock"))
+    """The engine through the tunnel: its socket on cyan."""
     aiperf_cores: str = "16-23"
     caller_cores: str = "24-31"
 
@@ -442,20 +449,21 @@ equal). A vLLM point expects them wherever its flags say nothing else, so it can
 earlier point left on the box."""
 
 
-def describe_engine(url: str) -> EngineInfo:
-    """vLLM (``/server_info`` needs VLLM_SERVER_DEV_MODE=1, which lh-engine.service sets) or SGLang."""
-    info = _get_json(f"{url}/server_info", params={"config_format": "json"})
+def describe_engine(engine: str) -> EngineInfo:
+    """The engine at the address ``engine``: vLLM (``/server_info`` needs VLLM_SERVER_DEV_MODE=1, which
+    lh-engine.service sets) or SGLang."""
+    info = _get_json(engine, "/server_info", params={"config_format": "json"})
     if "vllm_config" in info:
         config = info["vllm_config"]
         settings = {**config.get("cache_config", {}), **config.get("scheduler_config", {})}
-        version = _get_json(f"{url}/version").get("version")
-        return EngineInfo("vllm", version, pool_tokens(fetch(f"{url}/metrics")), settings, config)
+        version = _get_json(engine, "/version").get("version")
+        return EngineInfo("vllm", version, pool_tokens(fetch(engine)), settings, config)
     if "internal_states" in info:
         config = {k: v for k, v in info.items() if k != "internal_states"}
         return EngineInfo(
             SGLANG, info.get("version"), info.get("max_total_num_tokens"), config, config
         )
-    raise E2Error(f"{url}/server_info is neither vLLM's nor SGLang's")
+    raise E2Error(f"{engine}: /server_info is neither vLLM's nor SGLang's")
 
 
 SCHEDULER = "--scheduler-cls"
@@ -599,13 +607,14 @@ def _same(reported: Any, text: str) -> bool:
     return str(reported) == text
 
 
-def reset_prefix_cache(url: str, server: str, timeout: float = 120.0) -> None:
-    """Empty the engine's prefix cache (and vLLM's CPU tier). Both engines refuse while requests run
-    or KV transfers are in flight, so this retries."""
+def reset_prefix_cache(engine: str, server: str, timeout: float = 120.0) -> None:
+    """Empty the prefix cache (and vLLM's CPU tier) of the engine at ``engine``. Both engines refuse
+    while requests run or KV transfers are in flight, so this retries."""
     path = "/reset_prefix_cache?reset_external=true" if server == "vllm" else "/flush_cache"
 
     def done() -> bool:
-        response = httpx.post(f"{url}{path}", timeout=30)
+        with client(engine, timeout=30) as http:
+            response = http.post(path)
         if server == "vllm":
             return response.status_code == 200 and response.json().get("success") is True
         return response.status_code == 200
@@ -613,13 +622,15 @@ def reset_prefix_cache(url: str, server: str, timeout: float = 120.0) -> None:
     _until(done, timeout, f"the engine did not reset its prefix cache within {timeout:.0f} s")
 
 
-def _get_json(url: str, **kwargs: Any) -> dict[str, Any]:
+def _get_json(address: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    """The JSON of ``GET path`` from the server at ``address``."""
     try:
-        response = httpx.get(url, timeout=30, **kwargs)
+        with client(address, timeout=30) as http:
+            response = http.get(path, **kwargs)
         response.raise_for_status()
         return response.json()
     except (httpx.HTTPError, json.JSONDecodeError) as exc:
-        raise E2Error(f"GET {url}: {exc}") from None
+        raise E2Error(f"GET {path} from {address}: {exc}") from None
 
 
 # Processes
@@ -928,9 +939,9 @@ def _worker_journal(systemd: Systemd, out: Path, since: float, calls: int) -> No
     (out / "voice-worker.log").write_text(journal)
 
 
-def _ready(url: str, path: str = "/ready") -> bool:
-    with contextlib.suppress(httpx.HTTPError):
-        return httpx.get(f"{url}{path}", timeout=5).status_code == 200
+def _ready(address: str, path: str = "/ready") -> bool:
+    with contextlib.suppress(httpx.HTTPError), client(address, timeout=5) as http:
+        return http.get(path).status_code == 200
     return False
 
 
@@ -938,12 +949,12 @@ def _start_tunnels(nodes: Mapping[str, str], systemd: Systemd, record: _Record) 
     """Start each GPU node's tunnel (one that runs is left alone; none is stopped after the point) and
     wait until the node's engine answers through it."""
     record.say(f"GPU nodes: {', '.join(nodes)}")
-    for node, url in nodes.items():
+    for node, address in nodes.items():
         systemd("start", TUNNEL.format(node))
         _until(
-            lambda url=url: _ready(url, "/health"),
+            lambda address=address: _ready(address, "/health"),
             ENGINE_UP_S,
-            f"the engine of GPU node {node} did not answer at {url} within {ENGINE_UP_S:.0f} s: "
+            f"the engine of GPU node {node} did not answer at {address} within {ENGINE_UP_S:.0f} s: "
             f"is the node running, and {TUNNEL.format(node)} up?",
         )
 
@@ -954,16 +965,17 @@ def _engine_file(node: str | None, suffix: str, when: str | None = None) -> str:
 
 
 def _snapshot(host: Host, out: Path, when: str, engines: Mapping[str | None, str]) -> float:
-    """Save the gateway's and each engine's ``/metrics``; returns the time it finished."""
+    """Save the gateway's ``/metrics`` (from its socket, which asks for no key) and each engine's;
+    returns the time it finished."""
     metrics = out / "metrics"
     metrics.mkdir(exist_ok=True)
-    files = {f"gateway-{when}.prom": host.gateway_url}
-    files |= {_engine_file(node, "prom", when): url for node, url in engines.items()}
-    for name, url in files.items():
+    files = {f"gateway-{when}.prom": host.gateway_socket}
+    files |= {_engine_file(node, "prom", when): address for node, address in engines.items()}
+    for name, address in files.items():
         try:
-            (metrics / name).write_text(fetch(f"{url}/metrics"))
+            (metrics / name).write_text(fetch(address))
         except httpx.HTTPError as exc:
-            raise E2Error(f"GET {url}/metrics: {exc}") from None
+            raise E2Error(f"GET /metrics from {address}: {exc}") from None
     return time.time()
 
 

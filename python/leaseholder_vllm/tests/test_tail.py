@@ -6,11 +6,13 @@ has; without it, as in CI, these tests skip."""
 import asyncio
 import importlib.util
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
 
 aiohttp = pytest.importorskip("aiohttp")
+web = pytest.importorskip("aiohttp.web")
 
 TAIL = Path(__file__).resolve().parents[1] / "src/leaseholder_vllm/make-room/tail.py"
 
@@ -76,6 +78,37 @@ def test_a_call_turn_fails_on_an_error_status_an_exception_or_the_timeout(tail):
     assert turn(Response(200, error=aiohttp.ClientConnectionError())) == (None, "")
     assert turn(Response(200, error=TimeoutError())) == (None, "")
     assert turn(Response(200, [b"data: [DONE]\n"])) == (None, "")  # no token at all
+
+
+def test_the_calls_reach_an_engine_on_its_unix_socket(tail):
+    seen = []
+
+    async def chat(request):
+        seen.append(request.path)
+        response = web.StreamResponse()
+        await response.prepare(request)
+        for line in streamed("Sure", ", done."):
+            await response.write(line)
+        return response
+
+    async def main():
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", chat)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        # A short path: a socket's must fit sun_path, which pytest's tmp_path may not.
+        path = f"{tempfile.mkdtemp(prefix='lh-tail-')}/engine.sock"
+        await web.UnixSite(runner, path).start()
+        try:
+            session, url = tail.connect(f"unix:{path}")
+            async with session:
+                return await tail.turn(session, url, [{"role": "user", "content": "hello"}])
+        finally:
+            await runner.cleanup()
+
+    ttft, reply = asyncio.run(main())
+    assert ttft is not None and reply == "Sure, done."
+    assert seen == ["/v1/chat/completions"]
 
 
 def test_an_agent_stops_at_its_first_failed_request(tail):

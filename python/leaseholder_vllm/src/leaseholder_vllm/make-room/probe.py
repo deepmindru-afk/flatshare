@@ -1,4 +1,4 @@
-"""probe.py [URL] [kv|prefill]: the make-room variant's two checks, a voice turn behind agent requests.
+"""probe.py [ENGINE] [kv|prefill]: the make-room variant's two checks, a voice turn behind agent requests.
 
 kv (the default): two priority-2 requests of 18,000 tokens fill the engine's KV pool, leaving 24 blocks free,
 and keep decoding; then a priority-0 chat turn of about 750 tokens (47 blocks) arrives. Without make-room it
@@ -14,7 +14,8 @@ The probe prints the voice turn's time to its first token and to its 16th (a rep
 engine's state before and after it. The reserve (make_room.reserve_tokens) keeps the second priority-2 request
 out of a full pool, so the KV case is run with it off. On the GPU node, with the engine's environment, which
 has aiohttp: ``~/leaseholder/venvs/engine/bin/python probe.py http://127.0.0.1:8000 CASE`` on the frozen box,
-then after ``deploy/phastform/variant.sh use make-room --additional-config.make_room.reserve_tokens 0``.
+then after ``deploy/phastform/variant.sh use make-room --additional-config.make_room.reserve_tokens 0``. ENGINE is
+the engine's address: ``http://host:port`` (the default, the GPU node's), or ``unix:`` and its socket.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ import time
 
 import aiohttp
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+ENGINE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+SOCKET = ENGINE.removeprefix("unix:") if ENGINE.startswith("unix:") else None
+URL = "http://localhost" if SOCKET else ENGINE
 CASE = sys.argv[2] if len(sys.argv) > 2 else "kv"
 MODEL = "Qwen/Qwen3-4B-Instruct-2507-FP8"
 BACKGROUND = {"kv": 2, "prefill": 3}[CASE]
@@ -103,7 +106,9 @@ async def stream(
 
 async def main() -> None:
     rng = random.Random()
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+    connector = aiohttp.UnixConnector(path=SOCKET) if SOCKET else None
+    timeout = aiohttp.ClientTimeout(total=None)
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         info = re.search(r"^vllm:cache_config_info\{([^}]*)\}", await metrics(session), re.M)
         labels = dict(re.findall(r'(\w+)="([^"]*)"', info.group(1)))
         block_size = int(labels["block_size"])

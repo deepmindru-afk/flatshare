@@ -1,10 +1,11 @@
-"""probe.py [URL]: the pr54530 variant's check. Fill the engine's 12 running slots (``--max-num-seqs 12``) with
+"""probe.py [ENGINE]: the pr54530 variant's check. Fill the engine's 12 running slots (``--max-num-seqs 12``) with
 priority-2 decodes, then time a priority-0 request. With the PR it preempts one of them; without it, it waits for a
 slot. Measured on the frozen box on 2026-10-22, with the port's synchronous Scheduler before the variant loaded the
 stock AsyncScheduler over it: 81 ms with the PR, 8,900 ms without; not measured since.
 
 Run it on the GPU node with the engine's environment, which has aiohttp:
-``~/leaseholder/venvs/engine/bin/python probe.py http://127.0.0.1:8000``
+``~/leaseholder/venvs/engine/bin/python probe.py http://127.0.0.1:8000``. ENGINE is the engine's address:
+``http://host:port`` (the default, the GPU node's), or ``unix:`` and its socket.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ import time
 
 import aiohttp
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+ENGINE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+SOCKET = ENGINE.removeprefix("unix:") if ENGINE.startswith("unix:") else None
+URL = "http://localhost" if SOCKET else ENGINE
 MODEL = "Qwen/Qwen3-4B-Instruct-2507-FP8"
 SLOTS = 12
 
@@ -42,7 +45,8 @@ async def chat(session: aiohttp.ClientSession, priority: int, max_tokens: int, t
 
 
 async def main() -> None:
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.UnixConnector(path=SOCKET) if SOCKET else None
+    async with aiohttp.ClientSession(connector=connector) as session:
         background = [asyncio.create_task(chat(session, 2, 800, f"bg{i}")) for i in range(SLOTS)]
         await asyncio.sleep(3)  # every slot is decoding
         ttft = await chat(session, 0, 4, "voice")

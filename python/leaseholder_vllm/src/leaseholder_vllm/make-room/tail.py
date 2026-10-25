@@ -1,4 +1,4 @@
-"""tail.py URL SECONDS [AGENTS] [fresh|grow]: the make-room variant's load check, the calls' first-token tail.
+"""tail.py ENGINE SECONDS [AGENTS] [fresh|grow]: the make-room variant's load check, the calls' first-token tail.
 
 AGENTS (12) closed-loop agent sessions at priority 2 beside two calls at priority 0, against one engine for SECONDS:
 - agents: 48 output tokens and 0-3 s of thought a turn; with ``fresh``, a new prompt of 6-30k tokens each turn, as
@@ -10,7 +10,7 @@ It prints each call turn's time to first token, then their distribution, with ea
 token within TIMEOUT_MS) counted at TIMEOUT_MS, as E2's report censors a reply that never came: a percentile it sets
 is marked ≥. It also prints how many turns failed and how many agents stopped early. On the GPU node, with the
 engine's environment, which has aiohttp: ``~/leaseholder/venvs/engine/bin/python tail.py http://127.0.0.1:8000 240 12
-fresh``.
+fresh``. ENGINE is the engine's address: ``http://host:port``, or ``unix:`` and its socket.
 """
 
 import asyncio
@@ -137,10 +137,20 @@ def summary(ttfts: list[float | None], agents_ran: list[bool]) -> str:
     )
 
 
-async def main(url: str, seconds: float, num_agents: int, fresh: bool) -> None:
+def connect(engine: str) -> tuple[aiohttp.ClientSession, str]:
+    """A session to the engine at ``engine``, and the base of its requests' URLs: on the engine's socket, they reach
+    it whatever their host."""
+    socket = engine.removeprefix("unix:") if engine.startswith("unix:") else None
+    connector = aiohttp.UnixConnector(path=socket) if socket else None
+    session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
+    return session, "http://localhost" if socket else engine
+
+
+async def main(engine: str, seconds: float, num_agents: int, fresh: bool) -> None:
     stop = time.time() + seconds
     ttfts: list[float | None] = []
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
+    session, url = connect(engine)
+    async with session:
         agents_ran = await asyncio.gather(
             *(agent(session, url, 100 + i, stop, fresh) for i in range(num_agents)),
             *(call(session, url, i, stop, ttfts) for i in (1, 2)),

@@ -158,11 +158,12 @@ vLLM's `prefix_cache_hits` and `external_prefix_cache_hits` counters, read aroun
 
 Both take `--background prefill:8192x1` or `decode:1024x8` to measure under agent load. They write `run.json`, the samples and `summary.json` to `--out`; each summary cell has the count, the mean and p10, p50, p90, p95 (where the SLOs are set) and p99. `tiers` exits 3 if any sample was invalid.
 
+Every command that reaches a server takes its address as the gateway's `upstream` is written: `http://host:port`, or `unix:` and the absolute path of its socket (`transport.py`). On cyan the defaults are the GPU node's servers through its tunnel's sockets, `unix:$XDG_RUNTIME_DIR/lh/phastform-engine.sock`, `-stt.sock` and `-tts.sock`; a request's path starts at the server's root (`/v1/...`, `/metrics`).
+
 ```bash
-lh-bench tiers --url http://127.0.0.1:18000 --reps 5 --out runs/e0-idle
-lh-bench tiers --url http://127.0.0.1:18000 --lengths 1024,4096,16384 --background decode:1024x8 --out runs/e0-decode
-lh-bench voice-turn --stt-url http://127.0.0.1:18100/v1 --llm-url http://127.0.0.1:18000/v1 \
-  --tts-url http://127.0.0.1:18880/v1 --audio turn.wav --reps 30 --background prefill:8192x1 --out runs/voice-x1
+lh-bench tiers --reps 5 --out runs/e0-idle
+lh-bench tiers --lengths 1024,4096,16384 --background decode:1024x8 --out runs/e0-decode
+lh-bench voice-turn --audio turn.wav --reps 30 --background prefill:8192x1 --out runs/voice-x1
 ```
 
 ## KV block lifecycle (`lh-bench kv-metrics`)
@@ -170,9 +171,10 @@ lh-bench voice-turn --stt-url http://127.0.0.1:18100/v1 --llm-url http://127.0.0
 Snapshot an engine's `/metrics` around a run, then compare vLLM's sampled KV block histograms over it. The engine needs `--kv-cache-metrics`. The histograms are `vllm:kv_block_reuse_gap_seconds`, `vllm:kv_block_idle_before_evict_seconds` and `vllm:kv_block_lifetime_seconds`.
 
 ```bash
-lh-bench kv-metrics snapshot http://127.0.0.1:18000/metrics before.prom
+engine=unix:$XDG_RUNTIME_DIR/lh/phastform-engine.sock  # on cyan: the engine through its tunnel
+lh-bench kv-metrics snapshot $engine before.prom
 # ... run the load ...
-lh-bench kv-metrics snapshot http://127.0.0.1:18000/metrics after.prom
+lh-bench kv-metrics snapshot $engine after.prom
 lh-bench kv-metrics compare before.prom after.prom
 ```
 

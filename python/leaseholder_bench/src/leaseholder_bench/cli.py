@@ -10,6 +10,9 @@ from pathlib import Path
 
 from leaseholder_bench.load import LoadSpec, parse_lengths
 from leaseholder_bench.protocol import DEFAULT_MODEL, SloClass
+from leaseholder_bench.transport import runtime_socket
+
+ADDRESS = "http://host:port, or unix: and a socket's path"
 
 Commands = argparse._SubParsersAction  # what add_subparsers returns
 
@@ -105,7 +108,7 @@ def _kv_metrics(args: argparse.Namespace) -> int:
 
     if args.action == "snapshot":
         args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(fetch(args.url))
+        args.out.write_text(fetch(args.address))
         return 0
     print(compare(args.before.read_text(), args.after.read_text()))
     return 0
@@ -120,8 +123,11 @@ def _add_kv_metrics(commands: Commands) -> None:
         "(the engine needs --kv-cache-metrics).",
     )
     actions = kv.add_subparsers(dest="action", required=True)
-    snap = actions.add_parser("snapshot", help="save the exposition at URL to a file")
-    snap.add_argument("url", help="metrics URL, e.g. http://127.0.0.1:8000/metrics")
+    snap = actions.add_parser("snapshot", help="save a server's /metrics to a file")
+    snap.add_argument(
+        "address",
+        help=f"the server ({ADDRESS}), e.g. {runtime_socket('phastform-engine.sock')}, the engine's tunnel",
+    )
     snap.add_argument("out", type=Path)
     cmp_ = actions.add_parser("compare", help="report the histograms between two snapshots")
     cmp_.add_argument("before", type=Path)
@@ -158,8 +164,9 @@ def _add_tiers(commands: Commands) -> None:
     )
     tiers.add_argument(
         "--url",
-        default="http://127.0.0.1:8000",
-        help="engine base URL (default %(default)s); the engine needs /metrics and an offload tier",
+        default=runtime_socket("phastform-engine.sock"),
+        help=f"the engine ({ADDRESS}; default %(default)s, its tunnel on cyan); it needs /metrics and "
+        "an offload tier",
     )
     tiers.add_argument("--model", default=DEFAULT_MODEL, help="model name (default %(default)s)")
     tiers.add_argument(
@@ -192,9 +199,9 @@ def _voice_turn(args: argparse.Namespace) -> int:
     from leaseholder_bench.voice_turn import VoiceTurnConfig, render, run_voice_turns
 
     config = VoiceTurnConfig(
-        stt_url=args.stt_url,
-        llm_url=args.llm_url,
-        tts_url=args.tts_url,
+        stt=args.stt,
+        llm=args.llm,
+        tts=args.tts,
         stt_model=args.stt_model,
         llm_model=args.llm_model,
         tts_model=args.tts_model,
@@ -221,15 +228,17 @@ def _add_voice_turn(commands: Commands) -> None:
         "each stage; with --background, while agent load keeps the LLM busy. Writes run.json, "
         "turns.jsonl and summary.json.",
     )
-    turn.add_argument(
-        "--stt-url", default="http://127.0.0.1:8100/v1", help="STT base URL (default %(default)s)"
-    )
-    turn.add_argument(
-        "--llm-url", default="http://127.0.0.1:8000/v1", help="LLM base URL (default %(default)s)"
-    )
-    turn.add_argument(
-        "--tts-url", default="http://127.0.0.1:8880/v1", help="TTS base URL (default %(default)s)"
-    )
+    for server, socket in (
+        ("stt", "phastform-stt.sock"),
+        ("llm", "phastform-engine.sock"),
+        ("tts", "phastform-tts.sock"),
+    ):
+        turn.add_argument(
+            f"--{server}",
+            default=runtime_socket(socket),
+            help=f"the {server.upper()} server ({ADDRESS}), its OpenAI API at /v1 (default %(default)s, "
+            "its tunnel on cyan)",
+        )
     turn.add_argument(
         "--stt-model",
         default="openai/whisper-large-v3-turbo",
@@ -273,7 +282,6 @@ def _add_voice_turn(commands: Commands) -> None:
 
 
 def _drill(args: argparse.Namespace) -> int:
-    import httpx
     import orjson
 
     from leaseholder_bench.drills import (
@@ -288,6 +296,7 @@ def _drill(args: argparse.Namespace) -> int:
     )
     from leaseholder_bench.e2.arm import E2Error
     from leaseholder_bench.e2.run import Host, exclusive
+    from leaseholder_bench.transport import async_client
 
     if args.action == "streams":
         config = DrillConfig(
@@ -309,7 +318,7 @@ def _drill(args: argparse.Namespace) -> int:
     if args.action == "cpu-tier":
         try:
             with exclusive(Host()):  # nothing else may use the engine meanwhile
-                engine = httpx.AsyncClient(base_url=args.engine, timeout=300.0)
+                engine = async_client(args.engine, timeout=300.0)
                 record = asyncio.run(fill_cpu_tier(engine, args.out, factor=args.factor))
         except E2Error as exc:
             print(f"lh-bench drill: {exc}", file=sys.stderr)
@@ -379,7 +388,11 @@ def _add_drill(commands: Commands) -> None:
     tier = actions.add_parser(
         "cpu-tier", help="fill the engine's CPU tier past its capacity and check what it then holds"
     )
-    tier.add_argument("--engine", default="http://127.0.0.1:18000", help="(default %(default)s)")
+    tier.add_argument(
+        "--engine",
+        default=runtime_socket("phastform-engine.sock"),
+        help=f"the engine ({ADDRESS}; default %(default)s, its tunnel on cyan)",
+    )
     tier.add_argument(
         "--factor", type=float, default=2.0, help="the tier's capacity stored (default %(default)s)"
     )

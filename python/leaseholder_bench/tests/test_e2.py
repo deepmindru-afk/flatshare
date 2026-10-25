@@ -8,9 +8,11 @@ import itertools
 import json
 import os
 import re
+import socketserver
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -168,7 +170,11 @@ def test_an_arm_file_says_everything_about_its_point(tmp_path: Path) -> None:
         ("arm = \n", "a2.toml"),
         ('arm = 2\nlabel = "x"\n' + NODES.split("[gateway.nodes.b]")[0], "two GPU nodes or more"),
         ('arm = 2\nlabel = "x"\n' + NODES.replace("nodes.b", 'nodes."b c"'), "'b c' needs a name"),
-        ('arm = 2\nlabel = "x"\n' + NODES.replace("http://", "unix:"), "an http:// upstream"),
+        ('arm = 2\nlabel = "x"\n' + NODES.replace("http://", "unix:"), "and an upstream: http://"),
+        (
+            'arm = 2\nlabel = "x"\n' + NODES.replace("http://", "https://"),
+            "and an upstream: http://",
+        ),
         ('arm = 2\nlabel = "x"\nrouter = "smg"\n' + NODES, "a router fronts one engine"),
     ],
 )
@@ -710,10 +716,13 @@ def gone(pid: int, timeout: float = 5.0) -> bool:
 # A point, against fakes
 
 
+Routes = dict[str, Callable[[int], tuple[int, Any]]]
+
+
 class Service(ThreadingHTTPServer):
     """An HTTP service on loopback; each route answers from the number of requests it has had."""
 
-    def __init__(self, routes: dict[str, Callable[[int], tuple[int, Any]]]) -> None:
+    def __init__(self, routes: Routes) -> None:
         self.routes = routes
         self.hits: Counter[str] = Counter()
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -724,8 +733,27 @@ class Service(ThreadingHTTPServer):
         return f"http://127.0.0.1:{self.server_address[1]}"
 
 
+class UnixService(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """The same service on a Unix socket of its own, as the engine through the tunnel, or the gateway's
+    socket; its address is ``unix:`` and the socket's path."""
+
+    daemon_threads = True
+
+    def __init__(self, routes: Routes) -> None:
+        self.routes = routes
+        self.hits: Counter[str] = Counter()
+        # A short path: a socket's must fit sun_path, which a test's tmp_path may not.
+        self.path = Path(tempfile.mkdtemp(prefix="lh-e2-")) / "s.sock"
+        super().__init__(str(self.path), _Handler)
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"unix:{self.path}"
+
+
 class _Handler(BaseHTTPRequestHandler):
-    server: Service
+    server: Service | UnixService
 
     def answer(self) -> None:
         path = self.path.split("?")[0]
@@ -763,15 +791,15 @@ def engine_metrics(n: int) -> tuple[int, str]:
     )
 
 
-def fake_engine(scheduler: dict[str, Any]) -> Service:
-    """vLLM on a GPU node: ``scheduler`` is what its /server_info reports, as variant.sh use would
-    leave it."""
+def fake_engine(scheduler: dict[str, Any]) -> UnixService:
+    """vLLM on a GPU node, through its tunnel's socket: ``scheduler`` is what its /server_info reports,
+    as variant.sh use would leave it."""
     vllm_config = {
         "scheduler_config": scheduler,
         "model_config": {"hf_token": "hf_secret"},
         "additional_config": {},
     }
-    return Service(
+    return UnixService(
         {
             "/health": lambda n: (200, ""),
             "/metrics": engine_metrics,
@@ -842,7 +870,8 @@ class Cyan:
     host: FakeHost
     systemd: FakeSystemd
     gateway: Service
-    engine: Service
+    gateway_socket: UnixService
+    engine: UnixService
     scheduler: dict[str, Any]
     """What the engine's /server_info reports, as variant.sh use would leave it: the frozen box."""
     arms: Path
@@ -860,14 +889,18 @@ def cyan(tmp_path: Path) -> Iterator[Cyan]:
     (config / "livekit.env").write_text("LIVEKIT_API_KEY=k\nLIVEKIT_API_SECRET=s\n")
     (home / "leaseholder" / "data" / "corpus").mkdir(parents=True)
     scheduler = dict(FROZEN_SCHEDULER)
-    gateway = Service({"/metrics": gateway_metrics, "/ready": lambda n: (200, "")})
+    # AIPerf's TCP listener, and the socket from which a point reads the gateway's metrics.
+    gateway = Service({"/ready": lambda n: (200, "")})
+    socket = UnixService({"/metrics": gateway_metrics})
     engine = fake_engine(scheduler)
-    host = FakeHost(home=home, gateway_url=gateway.url, engine_url=engine.url)
+    host = FakeHost(
+        home=home, gateway_url=gateway.url, gateway_socket=socket.url, engine_url=engine.url
+    )
     arms = tmp_path / "arms"
     arms.mkdir()
-    yield Cyan(host, FakeSystemd(), gateway, engine, scheduler, arms)
-    gateway.shutdown()
-    engine.shutdown()
+    yield Cyan(host, FakeSystemd(), gateway, socket, engine, scheduler, arms)
+    for service in (gateway, socket, engine):
+        service.shutdown()
 
 
 def run(cyan: Cyan, name: str, text: str, out: str | None = None) -> dict[str, Any]:
@@ -1305,7 +1338,7 @@ def test_a_gpu_node_that_does_not_answer_fails_the_point(
     cyan: Cyan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(e2, "ENGINE_UP_S", 0.2)
-    arm = TWO_NODES.format(phastform=cyan.engine.url, gray="http://127.0.0.1:9")
+    arm = TWO_NODES.format(phastform=cyan.engine.url, gray="unix:/nonexistent/gray-engine.sock")
     with pytest.raises(E2Error, match=r"GPU node gray did not answer .* lh-tunnel-gray up"):
         run(cyan, "a4-pool", arm)
     assert record(cyan, "a4-pool")["status"] == "failed"
@@ -1441,7 +1474,7 @@ def test_the_engine_command_prints_what_variant_sh_use_takes(tmp_path: Path, cap
 
 
 def test_the_record_keeps_a_failed_step_even_when_the_engine_is_down(cyan: Cyan) -> None:
-    host = replace(cyan.host, engine_url="http://127.0.0.1:9")  # nothing listens there
+    host = replace(cyan.host, engine_url="unix:/nonexistent/engine.sock")  # nothing listens there
     with pytest.raises(E2Error, match="/server_info"):
         run_point(
             write(cyan.arms, "a1.toml", VOICE_ALONE), host.root / "runs" / "a1", host, cyan.systemd

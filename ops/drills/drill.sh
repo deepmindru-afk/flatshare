@@ -25,12 +25,14 @@ bench=leaseholder/venvs/bench/bin/lh-bench
 mkdir -p "$out"
 log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$out/drill.log"; }
 die() { log "drill: $*"; exit 1; }
-requests() { $ssh "$cyan" 'curl -fs -m 5 127.0.0.1:18000/metrics' | grep -E '^vllm:num_requests_(running|waiting)\{' || true; }
+# engine PATH: GET PATH from the node's engine on cyan, through its tunnel's socket (lh-tunnel@NODE).
+engine() { $ssh "$cyan" "curl -fs -m 5 --unix-socket /run/user/\$(id -u)/lh/${gpu%%.*}-engine.sock 'http://localhost$1'"; }
+requests() { engine /metrics | grep -E '^vllm:num_requests_(running|waiting)\{' || true; }
 shm() { $ssh "$gpu" 'df -B1 --output=used,size /dev/shm | tail -n 1; ls -l /dev/shm'; }
 
-$ssh "$cyan" 'curl -fs -m 5 -o /dev/null 127.0.0.1:18000/health && curl -fs -m 5 -o /dev/null 127.0.0.1:18080/health' ||
+{ engine /health >/dev/null && $ssh "$cyan" 'curl -fs -m 5 -o /dev/null 127.0.0.1:18080/health'; } ||
   die "the box is not up: the engine (through the tunnel) or the gateway does not answer on cyan"
-$ssh "$cyan" 'curl -fs -m 5 "127.0.0.1:18000/server_info?config_format=json"' | grep -o '"scheduler_cls": *"[^"]*"\|"scheduler_cls": *null' \
+engine '/server_info?config_format=json' | grep -o '"scheduler_cls": *"[^"]*"\|"scheduler_cls": *null' \
   >"$out/scheduler" || true
 # A deliberate kill must not run into the units' crash-loop guard (StartLimitBurst=3 in 30 min).
 $ssh "$gpu" 'systemctl --user reset-failed lh-engine 2>/dev/null || true'
