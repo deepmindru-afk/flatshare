@@ -58,7 +58,7 @@ from leaseholder_bench.e2.report import (
     configurations,
     figure_name,
     hardware,
-    leaseholder_counts,
+    lifecycle_counts,
     load_points,
     mark_frontier,
     read_dots,
@@ -825,7 +825,7 @@ def test_a_failed_turn_is_censored_and_keeps_its_configuration_off_the_frontier(
 @pytest.mark.parametrize(
     "name", ["leaseholder", "lifecycle"]
 )  # as E2's arm files spell it, and its own
-def test_policy_leaseholder_shows_what_it_deferred_and_what_it_capped(
+def test_the_lifecycle_policy_shows_what_it_deferred_and_what_it_capped(
     tmp_path: Path, name: str
 ) -> None:
     a9 = point(tmp_path, "disc-a9-s24", "9", 3400, 2057)
@@ -850,7 +850,7 @@ def test_policy_leaseholder_shows_what_it_deferred_and_what_it_capped(
     assert all(by["disc-frozen-s24"][column] is None for column in ADMISSION_COLUMNS)
     out = tmp_path / "report"
     write_report(rows, out)
-    section = (out / "frontier.md").read_text().split("## Policy leaseholder")[1]
+    section = (out / "frontier.md").read_text().split("## The lifecycle policy")[1]
     assert "| disc-a9-s24 | 41 | 0 | 60 of 60 (100%) |" in section
     assert "disc-frozen-s24" not in section  # a point without the policy has no line
     with (out / "frontier.csv").open() as f:
@@ -1310,7 +1310,7 @@ def test_the_record_and_the_report_read_series_the_gateway_exports() -> None:
         moved(USAGE, {"class": "background", "kind": kind}) for kind in ("prompt", "completion")
     ]
     assert cell["background_tokens_per_s"] == sum(usage) and all(usage)
-    counts = leaseholder_counts(cell["counters"])
+    counts = lifecycle_counts(cell["counters"])
     deferred = "lh_gateway_admission_deferred_total"
     assert counts["deferred_headroom"] == moved(deferred, {"reason": "headroom"}) > 0
     assert counts["deferred_critical"] == moved(deferred, {"reason": "critical"}) > 0

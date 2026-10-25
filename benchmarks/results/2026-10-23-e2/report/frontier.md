@@ -513,9 +513,9 @@ The voice worker's own timing of each turn, p50 / p95 in ms: from the end of the
 | disc-a9-window48-s24 (upstream-r1) | 818 / 845 | 823 / 852 | 218 / 303 | 480 / 705 | 484 / 708 | 249 / 317 | 1,593 / 1,826 | 240 / 0 / 0 |
 | disc-a9-window48-s24 (upstream-r2) | 816 / 926 | 820 / 931 | 232 / 351 | 427 / 729 | 433 / 735 | 236 / 387 | 1,486 / 1,986 | 240 / 0 / 0 |
 
-## Policy leaseholder
+## The lifecycle policy
 
-What the gateway's policy `leaseholder` did in each point that ran it: the background requests its admission point deferred, by what held them back when they arrived (the KV headroom first, then the critical window's prefill budget), and the realtime replies it capped at `degrade_max_tokens` because the headroom was not there, of the realtime requests it admitted. A mechanism that deferred or capped nothing did not act in that point.
+What the gateway's lifecycle policy (`policy = "lifecycle"`; E2's arm files spell it `leaseholder`) did in each point that ran it: the background requests its admission point deferred, by what held them back when they arrived (the KV headroom first, then the critical window's prefill budget), and the realtime replies it capped at `degrade_max_tokens` because the headroom was not there, of the realtime requests it admitted. A mechanism that deferred or capped nothing did not act in that point.
 
 | Point | Deferred by the headroom | Deferred by the critical window | Degraded replies |
 |---|---:|---:|---:|

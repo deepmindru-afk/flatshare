@@ -146,7 +146,7 @@ CPU_TIER_COLUMNS = (
 """Columns that only some points have, each group shown when one of them has it: the GPU nodes of a
 point on several, which every other column then totals; the voice worker's stage times and lifecycle
 events; the GPU's median SM clock and highest temperature during the calls (over every node's GPU on
-several); under the gateway's policy ``leaseholder``, the background requests it deferred by what held
+several); under the gateway's lifecycle policy, the background requests it deferred by what held
 them back and the realtime replies it capped, with their share of its realtime requests; and on vLLM
 its prompt tokens by source at their first scheduling and the CPU tier's loads and stores of every
 scheduling, in tokens at the bytes of KV a token takes in the engine's pool."""
@@ -272,7 +272,7 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
     row |= {f"events_{kind}": events.get(kind) for kind in ("sent", "dropped", "failed")}
     policy = ((arm.get("gateway") or {}).get("admission") or {}).get("policy")
     row |= (
-        leaseholder_counts(gateway.get("counters") or {})
+        lifecycle_counts(gateway.get("counters") or {})
         if policy in LIFECYCLE_POLICY
         else dict.fromkeys(ADMISSION_COLUMNS)
     )
@@ -330,8 +330,8 @@ def cpu_tier(
     return row
 
 
-def leaseholder_counts(counters: Mapping[str, int]) -> dict[str, int | float | None]:
-    """What policy ``leaseholder`` did over the window, from the gateway's counters (those that moved):
+def lifecycle_counts(counters: Mapping[str, int]) -> dict[str, int | float | None]:
+    """What the lifecycle policy did over the window, from the gateway's counters (those that moved):
     the background requests it deferred, by what held them back when they arrived (the KV headroom,
     then the critical window's prefill budget), and the realtime replies it capped because the
     headroom was not there, with their share of the realtime requests it admitted."""
@@ -896,12 +896,13 @@ def _stages(rows: Sequence[Mapping[str, Any]]) -> list[str]:
 
 
 def _admission(rows: Sequence[Mapping[str, Any]]) -> list[str]:
-    """What policy ``leaseholder`` did in each point that ran it."""
+    """What the lifecycle policy did in each point that ran it."""
     lines = [
         "",
-        "## Policy leaseholder",
+        "## The lifecycle policy",
         "",
-        "What the gateway's policy `leaseholder` did in each point that ran it: the background requests "
+        "What the gateway's lifecycle policy (`policy = \"lifecycle\"`; E2's arm files spell it "
+        "`leaseholder`) did in each point that ran it: the background requests "
         "its admission point deferred, by what held them back when they arrived (the KV headroom "
         "first, then the critical window's prefill budget), and the realtime replies it capped at "
         "`degrade_max_tokens` because the headroom was not there, of the realtime requests it "
