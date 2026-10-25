@@ -48,7 +48,7 @@ deploy/deploy.sh gray.cis.upenn.edu            # the second GPU node
 
 ```sh
 # Phastform
-systemctl --user start leaseholder.target        # STT and TTS first, then the LLM; ~2 min warm, ~7.5 min on first boot (Gray: ~12)
+systemctl --user start leaseholder.target        # the three servers start at once; the box is ready when the engine is
 systemctl --user stop leaseholder.target
 systemctl --user restart lh-engine               # one server; returns once /health answers
 systemctl --user list-units 'lh-*'

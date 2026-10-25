@@ -44,10 +44,10 @@ Every measurement runs on one pinned configuration with the audio models on the 
 | Component | Configuration | GPU memory |
 |---|---|---|
 | LLM | vLLM 0.32.0, `Qwen/Qwen3-4B-Instruct-2507-FP8`, 32k context, `--kv-cache-memory` 5 GiB (36,400 tokens), prefix caching, priority scheduling, step cap 512/256, KV cache metrics, the `OffloadingConnector` (20 GiB in `/dev/shm`, write-through, generated tokens included) | ≈ 10.6 GiB |
-| STT | vLLM 0.32.0 serving `openai/whisper-large-v3-turbo` at `/v1/audio/transcriptions` | ≈ 2.4 GiB |
+| STT | vLLM 0.32.0 serving `openai/whisper-large-v3-turbo` at `/v1/audio/transcriptions`, `--kv-cache-memory` 437.5 MiB (4,020 tokens) | ≈ 2.4 GiB |
 | TTS | Kokoro-82M on Kokoro-FastAPI 0.9.1-rc1 at `/v1/audio/speech` | ≈ 1.0 GiB |
 
-- **Units.** Each server is a `systemd --user` unit, restarted on failure. `leaseholder.target` starts STT and TTS first, then the LLM, so vLLM's free-memory check sees the audio servers resident; a unit counts as started once its health endpoint answers. `gpu-guard` refuses to start a GPU unit while another user's process holds the GPU.
+- **Units.** Each server is a `systemd --user` unit, restarted on failure. `leaseholder.target` starts the three at once: both vLLM servers fix their KV pools, so neither profiles memory at its start, and each one's free-memory check passes in any order while the budgets fit the card together ([HARDWARE.md](HARDWARE.md#the-rules), R2); a unit counts as started once its health endpoint answers, and the box once the engine does. `gpu-guard` refuses to start a GPU unit while another user's process holds the GPU.
 - **NUMA.** vLLM runs on the GPU's node (node 1, cores 8–15), the audio servers on node 0. The CPU tier's shared memory prefers node 1.
 - **Pinned environment.** vLLM 0.32.0 with torch 2.13.0+cu130 serves the LLM and Whisper, Kokoro runs on torch 2.8.0+cu128; lock files are in `deploy/phastform/requirements/`.
 - **Time-slicing, not MPS.** As MPS clients, STT and TTS gain a little under agent prefill, but the LLM stage and its tail get worse: the interference that matters is inside the engine ([BENCHMARKS.md](BENCHMARKS.md#voice-on-the-shared-gpu)).

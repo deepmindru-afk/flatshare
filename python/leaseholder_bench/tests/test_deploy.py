@@ -1018,6 +1018,36 @@ def exec_lines(text: str, key: str) -> list[str]:
     return [line.partition("=")[2] for line in lines if line.startswith(f"{key}=")]
 
 
+def test_the_gpu_servers_start_at_once_and_each_variant_orders_only_what_it_needs() -> None:
+    # Both vLLM servers fix their KV pools, so neither profiles memory at its start and nothing orders the three
+    # GPU servers among themselves: leaseholder.target starts them at once. The mps variant orders each after the
+    # MPS daemon it needs; SGLang sizes its pool from the memory free at its start, so its engine waits for the
+    # audio servers, as every measured start of the variant did.
+    servers = {"lh-engine.service", "lh-stt.service", "lh-tts.service"}
+
+    def ordering(text: str) -> set[str]:
+        keys = ("After", "Before", "Requires", "BindsTo", "Wants")
+        return {name for key in keys for line in exec_lines(text, key) for name in line.split()}
+
+    for directory in (DEPLOY / "phastform" / "systemd", DEPLOY / "templates" / "systemd"):
+        target = (directory / "leaseholder.target").read_text()
+        assert ordering(target) == servers, directory
+        for unit in servers:
+            assert not ordering((directory / unit).read_text()) & servers, (directory, unit)
+    for unit in servers:
+        conf = (
+            DEPLOY / "phastform" / "variants" / "mps" / unit.replace(".service", ".conf")
+        ).read_text()
+        assert exec_lines(conf, "Requires") == exec_lines(conf, "After") == ["lh-mps.service"], unit
+    sglang = DEPLOY / "phastform" / "variants" / "sglang" / "lh-engine.conf"
+    for conf in [
+        *(DEPLOY / "phastform" / "variants").glob("*/*.conf"),
+        *(DEPLOY / "templates" / "variants").glob("*/*.conf"),
+    ]:
+        among = ordering(conf.read_text()) & servers
+        assert among == ({"lh-stt.service", "lh-tts.service"} if conf == sglang else set()), conf
+
+
 def test_the_gpu_nodes_servers_listen_on_their_sockets_in_a_private_directory() -> None:
     phastform = DEPLOY / "phastform"
     for config in ("engine.yaml", "stt.yaml"):

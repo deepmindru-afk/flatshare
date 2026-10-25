@@ -178,6 +178,55 @@ def test_the_a100_profile_derives_its_values_from_the_host(tmp_path: Path) -> No
     assert json.loads((out / "node.json").read_text()) == node
 
 
+STT_KV = 458_752_000
+"""The STT's fixed KV pool: 1,400 blocks of 16 tokens at 327,680 bytes a block (Whisper large-v3-turbo's 4 decoder
+layers, 20 heads of 64, FP16 keys and values), the 4,020 tokens the box's 0.15 gave it (vLLM's "GPU KV cache size:
+4,020 tokens" at the 2026-10-25 start, benchmarks/results/2026-10-25-drills/w6-start-box)."""
+
+
+def test_both_vllm_servers_fix_their_pools_and_the_stt_keeps_the_boxs_on_every_card(
+    tmp_path: Path,
+) -> None:
+    # A fixed pool is what lets the three servers start at once: neither vLLM server profiles memory, which would
+    # read what the others allocate meanwhile. vLLM still checks the budget's free memory at start.
+    assert STT_KV == 1400 * 16 * 4 * 20 * 64 * 2 * 2
+    box, _ = render(tmp_path, "rtx-5060-ti", None)
+    a100, _ = render(tmp_path, "a100-40gb", host())
+    for out, budget in ((box, "0.15"), (a100, "0.06")):
+        stt = (out / "stt.yaml").read_text()
+        assert f"\nkv-cache-memory: {STT_KV}\n" in stt, out
+        assert f"\ngpu-memory-utilization: {budget}\n" in stt, out
+        assert "\nkv-cache-memory: 5368709120\n" in (out / "engine.yaml").read_text(), out
+
+
+def test_the_budgets_and_the_tts_must_fit_the_card_together(tmp_path: Path) -> None:
+    # R2: the servers start at once, so the last to check its free memory may find the others resident. The
+    # engine's and the STT's budgets and the TTS's share fit the card together, at most 0.95 of it, as one budget
+    # alone: vLLM's total is the card less the driver's reserve (the box: 15,852 of nvidia-smi's 16,311 MiB).
+    values, _, _ = profile.resolve(profile.load("rtx-5060-ti"), None)
+    # The box: 0.70 + 0.15 + the TTS's 1.08 GiB of 16,311 MiB.
+    assert values["derived.card_share"] == "0.92"
+    box = profile.load("rtx-5060-ti")
+    box["engine"]["gpu_memory_utilization"] = "0.75"
+    with pytest.raises(profile.ProfileError, match=r"refused: .* 0\.97 of the 16311 MiB card"):
+        profile.render(box, None, tmp_path / "box")
+    # The A100: the box's budgets in GiB, 0.28 + 0.06 + 1.08 GiB of 40 GiB.
+    _, node = render(tmp_path, "a100-40gb", host())
+    assert node["values"]["derived.card_share"] == "0.37"
+    # 36 GiB for the engine passes as one budget (0.90), not beside the STT and the TTS.
+    big = profile.load("a100-40gb")
+    big["budgets"]["engine_gib"] = 36
+    assert profile.utilization(36, 40960) == "0.90"
+    with pytest.raises(profile.ProfileError, match=r"refused: .* 0\.99 of the 40960 MiB card"):
+        profile.render(big, host(), tmp_path / "big")
+    # A profile that does not say what the TTS takes, or what its card holds, is refused, not passed.
+    for table, key in (("budgets", "tts_gib"), ("profile", "memory_mib")):
+        partial = profile.load("rtx-5060-ti")
+        del partial[table][key]
+        with pytest.raises(profile.ProfileError, match=f"{table}.{key}"):
+            profile.resolve(partial, None)
+
+
 def test_a_host_with_its_own_cuda_13_toolkit_compiles_with_it(tmp_path: Path) -> None:
     facts = host(cuda_toolkit={"version": "13.0", "path": "/usr/local/cuda-13.0"})
     out, _ = render(tmp_path, "a100-40gb", facts)

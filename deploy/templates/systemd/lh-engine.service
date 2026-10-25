@@ -2,8 +2,11 @@
 Description=Leaseholder LLM engine: vLLM 0.32, {{model.title}} on %t/lh/engine.sock
 Documentation=https://github.com/StevenWang-CY/leaseholder/blob/main/ops/RUNBOOK.md
 PartOf=leaseholder.target
-# Start after the audio servers so vLLM's free-memory check sees them resident.
-After=lh-stt.service lh-tts.service
+# No After= on the audio servers: leaseholder.target starts the three at once. Neither vLLM server profiles memory,
+# both KV pools being fixed (kv-cache-memory), so their order matters only to each one's free-memory check at start,
+# and that passes in any order wherever starting the audio servers first passed: the engine's worst case, the audio
+# servers resident, is that order's, and the STT's, the engine resident, holds while the two budgets and the TTS's
+# share fit the card together, which deploy/profile.py checks (R2).
 StartLimitIntervalSec=1800
 StartLimitBurst=3
 
