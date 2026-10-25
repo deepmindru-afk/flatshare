@@ -1,9 +1,10 @@
 """E2's frontier across points (``lh-bench e2 report``).
 
 :func:`write_report` places the points on E2's frontier: background goodput on x, voice-to-voice
-p95 on y, one frontier per arm and workload (the agents' corpus and the number of callers, and the GPU
-and the model where they are not the frozen box's, since points of different workloads are never
-compared). A point is on its arm's frontier when no other
+p95 on y, one frontier per arm and workload (the agents' corpus and the number of callers, the GPU
+and the model where they are not the frozen box's, and the warm-up turns that open each call where
+the points differ in them, since points of different workloads are never compared). A point is on
+its arm's frontier when no other
 point of the arm and workload harvests at least as much background goodput at a V2V p95 at least as
 low, and one of the two strictly better. A point on several GPU nodes is placed by its totals.
 Points measured from the same arm file in several campaigns are repeats of one configuration, which
@@ -159,6 +160,13 @@ def load_points(run_dirs: Iterable[Path]) -> tuple[list[dict[str, Any]], list[Pa
             incomplete.append(run_dir)
             continue
         rows.append(_row(run_dir, *point))
+    # A record set opens every call with as many warm-up turns (W4's none, W5's one), and its
+    # workloads leave them unnamed; points that differ in them are of different workloads.
+    named = len({r["warmup_turns"] for r in rows}) > 1
+    for row in rows:
+        warmup = row["warmup_turns"] if named else 0
+        row["workload"] = _workload(row["data"], row["callers"], row["hardware"], warmup)
+        row["figure"] = figure_name(row["data"], row["callers"], row["hardware"], warmup)
     groups = configurations(rows)
     mark_frontier(groups)
     placed = {_configuration(g): g for g in groups}
@@ -172,6 +180,7 @@ def load_points(run_dirs: Iterable[Path]) -> tuple[list[dict[str, Any]], list[Pa
         data, callers = r["data"], r["callers"]
         first = (
             r.get("hardware", ""),
+            r["warmup_turns"],
             (data, callers) != STANDARD_WORKLOAD,
             data != STANDARD_WORKLOAD[0],
             data,
@@ -188,9 +197,15 @@ def _configuration(row: Mapping[str, Any]) -> tuple[str, str, str]:
     return row["workload"], row["arm"], row["point"]
 
 
-def _workload(data: str, callers: int, on: str = "") -> str:
-    """A workload's name, as frontier.csv and frontier.md give it; ``on`` is :func:`hardware`'s."""
-    return f"{data}, {callers} caller{'' if callers == 1 else 's'}" + (f", {on}" if on else "")
+def _workload(data: str, callers: int, on: str = "", warmup_turns: int = 0) -> str:
+    """A workload's name, as frontier.csv and frontier.md give it; ``on`` is :func:`hardware`'s, and
+    ``warmup_turns`` the warm-up turns its calls open with, where the report names them."""
+    name = f"{data}, {callers} caller{'' if callers == 1 else 's'}" + (f", {on}" if on else "")
+    return name + (f", {_warmups(warmup_turns)}" if warmup_turns else "")
+
+
+def _warmups(turns: int) -> str:
+    return f"{turns} warm-up turn{'' if turns == 1 else 's'}"
 
 
 def hardware(gpu_name: str | None, model: str | None) -> str:
@@ -202,8 +217,8 @@ def hardware(gpu_name: str | None, model: str | None) -> str:
 
 
 def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> dict[str, Any]:
-    """A point's row of frontier.csv; a point on several GPU nodes also carries each node's numbers
-    (``by_node``) for frontier.md."""
+    """A point's row of frontier.csv but for its workload, which load_points names; a point on
+    several GPU nodes also carries each node's numbers (``by_node``) for frontier.md."""
     arm, voice = run["arm"], summary["voice"]
     background = summary["background"] or {}
     gateway, engine = summary["gateway"], summary["engine"]
@@ -219,7 +234,6 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
     on = hardware((summary.get("gpu") or {}).get("name"), model)
     row = {
         "arm": CONFIGURATION_ARMS.get(run["name"], str(arm["arm"])),
-        "workload": _workload(arm["agents"]["data"], arm["voice"]["callers"], on),
         "point": run["name"],
         "campaign": run_dir.absolute().parent.name,
         "label": arm["label"],
@@ -259,10 +273,13 @@ def _row(run_dir: Path, run: Mapping[str, Any], summary: Mapping[str, Any]) -> d
         if policy == "leaseholder"
         else dict.fromkeys(ADMISSION_COLUMNS)
     )
-    # What frontier.csv leaves out: the corpus, which the workload names, and the stage waterfall's
-    # inputs, the count and mean of each of the worker's stages and the callers' V2V samples.
+    # What frontier.csv leaves out: the corpus, the hardware and the warm-up turns, from which
+    # load_points names the workload, and the stage waterfall's inputs, the count and mean of each
+    # of the worker's stages and the callers' V2V samples. An arm from before 2c2c0dc names no
+    # warm-up turns: it ran none.
     row["data"] = arm["agents"]["data"]
     row["hardware"] = on
+    row["warmup_turns"] = arm["voice"].get("warmup_turns", 0)
     row["stage_means"] = {s: (c["n"], c["mean"]) for s, c in waterfall.items() if "mean" in c}
     row["v2v_samples"] = samples
     row["nodes"] = " ".join(nodes) or None
@@ -437,18 +454,23 @@ SLO_MARGIN_MS = 250.0
 
 
 def voice_slo(
-    groups: Sequence[Mapping[str, Any]], callers: int, on: str = ""
+    groups: Sequence[Mapping[str, Any]],
+    callers: int,
+    on: str = "",
+    warmup_turns: int | None = None,
 ) -> tuple[float, list[str]] | None:
     """The V2V p95 that the voice SLO allows with ``callers`` callers on the GPU and model ``on``
-    names (:func:`hardware`; the box's when empty), and the configurations of voice alone it is read
-    against: arm 1's with as many callers on the same hardware, from whichever corpus, since voice
-    alone replays none. Their median V2V p95 plus SLO_MARGIN_MS; None without one."""
+    names (:func:`hardware`; the box's when empty), in calls that open with ``warmup_turns``
+    warm-up turns (any when None), and the configurations of voice alone it is read against: arm
+    1's with as many callers on the same hardware and as many warm-up turns, from whichever corpus,
+    since voice alone replays none. Their median V2V p95 plus SLO_MARGIN_MS; None without one."""
     alone = [
         g
         for g in groups
         if arm_order(g["arm"])[0] == 1
         and g["runs"][0]["callers"] == callers
         and g["runs"][0].get("hardware", "") == on
+        and (warmup_turns is None or g["runs"][0]["warmup_turns"] == warmup_turns)
         and g["v2v_p95_ms"] is not None
     ]
     if not alone:
@@ -572,9 +594,8 @@ def write_report(
     groups = configurations(rows)
     for members in _by_workload(rows):
         first = members[0]
-        on = first.get("hardware", "")
-        slo = voice_slo(groups, first["callers"], on)
-        figure = out_dir / figure_name(first["data"], first["callers"], on)
+        slo = voice_slo(groups, first["callers"], first["hardware"], first["warmup_turns"])
+        figure = out_dir / first["figure"]
         if plot(members, figure, None if slo is None else slo[0]):
             written.append(figure)
     if cells and plot_waterfall(cells, out_dir / "waterfall.svg"):
@@ -588,7 +609,8 @@ def write_report(
                     f"{len(found)} configurations of {dot['point']} in the report, not 1"
                 )
             chosen.append((found[0], dot["label"], bool(dot.get("change", False))))
-        slo = voice_slo(groups, chosen[0][0]["runs"][0]["callers"])
+        first = chosen[0][0]["runs"][0]
+        slo = voice_slo(groups, first["callers"], first["hardware"], first["warmup_turns"])
         alone = None
         if slo is not None:
             alone = statistics.median(g["v2v_p95_ms"] for g in groups if g["point"] in slo[1])
@@ -605,10 +627,11 @@ def _by_workload(rows: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, An
     return list(members.values())
 
 
-def figure_name(data: str, callers: int, on: str = "") -> str:
+def figure_name(data: str, callers: int, on: str = "", warmup_turns: int = 0) -> str:
     """A workload's frontier figure: frontier.svg for STANDARD_WORKLOAD on the box, else named after
-    the corpus when it is another (frontier-weka-x32-long.svg), the callers when they are, and the GPU
-    and model off the box (frontier-weka-x32-long-nvidia-a100-sxm4-40gb.svg)."""
+    the corpus when it is another (frontier-weka-x32-long.svg), the callers when they are, the GPU
+    and model off the box (frontier-weka-x32-long-nvidia-a100-sxm4-40gb.svg), and the warm-up turns
+    where the workload's name gives them (frontier-1-warm-up-turn.svg)."""
     name = "frontier"
     if data != STANDARD_WORKLOAD[0]:
         name += "-" + data.replace("/", "-")
@@ -616,6 +639,8 @@ def figure_name(data: str, callers: int, on: str = "") -> str:
         name += f"-{callers}-callers"
     if on:
         name += "-" + re.sub(r"[^a-z0-9]+", "-", on.lower()).strip("-")
+    if warmup_turns:
+        name += "-" + _warmups(warmup_turns).replace(" ", "-")
     return name + ".svg"
 
 
@@ -707,9 +732,8 @@ def _slo_line(
     row: Mapping[str, Any], groups: Mapping[tuple[str, str, str], Mapping[str, Any]]
 ) -> str:
     """The sentence that opens the section of ``row``'s workload: its voice SLO, and its figure."""
-    on = row.get("hardware", "")
-    callers, figure = row["callers"], figure_name(row["data"], row["callers"], on)
-    slo = voice_slo(list(groups.values()), callers, on)
+    callers, figure = row["callers"], row["figure"]
+    slo = voice_slo(list(groups.values()), callers, row["hardware"], row["warmup_turns"])
     if slo is None:
         return (
             f"No point of voice alone with {callers} callers sets a voice SLO. Figure: `{figure}`."

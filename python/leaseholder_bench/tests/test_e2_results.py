@@ -318,8 +318,10 @@ def point(
     *,
     callers: int = 2,
     data: str = "weka-x32",
+    warmup_turns: int | None = None,
 ) -> Path:
-    """A run directory as lh-bench e2 run leaves it."""
+    """A run directory as lh-bench e2 run leaves it; without ``warmup_turns``, its arm names none,
+    as the arms run before 2c2c0dc."""
     run_dir = root / name
     run_dir.mkdir(parents=True)
     settings = {
@@ -330,6 +332,8 @@ def point(
         "agents": {"sessions": 0 if tokens_per_s is None else 16, "data": data},
         "engine": {"variant": "frozen", "flags": ["--max-num-seqs", "12"]},
     }
+    if warmup_turns is not None:
+        settings["voice"]["warmup_turns"] = warmup_turns
     run = {"kind": "e2-point", "name": name, "status": status, "arm": settings}
     run["window"] = {"start": T0, "end": T0 + 100}
     (run_dir / "run.json").write_text(json.dumps(run))
@@ -656,6 +660,43 @@ def test_a_point_off_the_box_is_a_workload_of_its_own(tmp_path: Path) -> None:
         "allows a V2V p95 of 1,950 ms" in table and "`frontier-nvidia-a100-sxm4-40gb.svg`" in table
     )
     assert figure_name("weka-x32", 2) == "frontier.svg"
+
+
+def test_points_that_differ_in_warm_up_turns_are_workloads_of_their_own(tmp_path: Path) -> None:
+    # W5's calls open with a warm-up turn that no caller measures; W4's arms name none and open with
+    # none. One report over both must neither compare their points nor read them against one SLO.
+    dirs = [
+        point(tmp_path / "w4", "a1-voice", "1", None, 1760),
+        point(tmp_path / "w4", "a2-s8", "2", 3000, 2000),
+        point(tmp_path / "w4", "a2-s16", "2", 5000, 2600),
+        point(tmp_path / "w5", "w5-a1-voice", "1", None, 1700, warmup_turns=1),
+        point(tmp_path / "w5", "w5-a2-s16", "2", 5500, 1950, warmup_turns=1),  # beats both of W4's
+    ]
+    rows, _ = load_points(dirs)
+    warm = "weka-x32, 2 callers, 1 warm-up turn"
+    assert [(r["point"], r["workload"], r["frontier"]) for r in rows] == [
+        ("a1-voice", "weka-x32, 2 callers", True),
+        ("a2-s8", "weka-x32, 2 callers", True),
+        ("a2-s16", "weka-x32, 2 callers", True),
+        ("w5-a1-voice", warm, True),
+        ("w5-a2-s16", warm, True),
+    ]
+    groups = configurations(rows)
+    assert voice_slo(groups, 2, warmup_turns=0) == (2010.0, ["a1-voice"])
+    assert voice_slo(groups, 2, warmup_turns=1) == (1950.0, ["w5-a1-voice"])
+    written = write_report(rows, tmp_path / "report")
+    table = (tmp_path / "report" / "frontier.md").read_text()
+    assert f"## Workload: {warm}\n" in table
+    assert "(a1-voice: 1,760 ms). Figure: `frontier.svg`." in table
+    assert "(w5-a1-voice: 1,700 ms). Figure: `frontier-1-warm-up-turn.svg`." in table
+    if importlib.util.find_spec("matplotlib"):
+        figures = [p.name for p in written if p.suffix == ".svg"]
+        assert figures == ["frontier.svg", "frontier-1-warm-up-turn.svg"]
+    # A report of one record set names no warm-up turns, as each committed report reads one.
+    w5, _ = load_points(dirs[3:])
+    assert [r["workload"] for r in w5] == ["weka-x32, 2 callers"] * 2
+    assert voice_slo(configurations(w5), 2, warmup_turns=1) == (1950.0, ["w5-a1-voice"])
+    assert figure_name("weka-x32", 2, warmup_turns=2) == "frontier-2-warm-up-turns.svg"
 
 
 def test_a_records_engine_json_keeps_the_linear_kernel_where_the_engine_reported_it() -> None:
