@@ -394,8 +394,13 @@ def test_placeholders_fill_and_an_empty_one_takes_its_line() -> None:
         profile.resolve(profile.load("a100-40gb"), None)
 
 
+A100_ROW = "NVIDIA A100-SXM4-40GB, 40960, 8.0, 580.65.06, 4, 16, Disabled, 400.00, 00000000:3B:00.0, Enabled"
 FAKES = {
-    "nvidia-smi": 'echo "NVIDIA A100-SXM4-40GB, 40960, 8.0, 580.65.06, 4, 16, Disabled, 400.00, 00000000:3B:00.0, Enabled"',
+    # nvidia-smi --query-gpu=index,uuid,name,...: the card's row; -L its line.
+    "nvidia-smi": f"""case "$*" in
+  -L) echo "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-6f1c2d3e-aaaa-bbbb-cccc-000000000001)" ;;
+  *) echo "0, GPU-6f1c2d3e-aaaa-bbbb-cccc-000000000001, {A100_ROW}" ;;
+esac""",
     "systemctl": "echo running",
     "loginctl": "echo yes",
     "unshare": "exit 1",
@@ -483,3 +488,79 @@ def test_detect_reads_the_host_through_its_tools_and_files(tmp_path: Path, monke
     _, node = render(tmp_path, "a100-40gb", facts | {"shm": shm_facts})
     assert node["plan"]["engine_numa"] == "1"
     assert node["values"]["units.cuda_home"] == str(tmp_path.resolve())
+
+
+TWO_GPUS = f"""case "$*" in
+  -L)
+    echo "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaaa)"
+    echo "GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-bbbb)"
+    echo "  MIG 3g.20gb     Device  0: (UUID: MIG-bbbb-0)" ;;
+  *)
+    echo "0, GPU-aaaa, {A100_ROW}"
+    echo "1, GPU-bbbb, {A100_ROW.replace("Disabled", "Enabled").replace("3B:00.0", "AF:00.0")}" ;;
+esac"""
+"""nvidia-smi on a host with two A100s, the second in MIG mode with one slice."""
+
+
+def test_detect_takes_the_lent_gpu_of_several_by_index_or_uuid(tmp_path: Path, monkeypatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in FAKES.items():
+        (bin_dir / name).write_text(f"#!/bin/sh\n{TWO_GPUS if name == 'nvidia-smi' else body}\n")
+        (bin_dir / name).chmod(0o755)
+    sysfs, procfs, rootfs, shm = (tmp_path / d for d in ("sys", "proc", "root", "shm"))
+    for bus, node in (("0000:3b:00.0", "0"), ("0000:af:00.0", "1")):
+        (sysfs / "bus" / "pci" / "devices" / bus).mkdir(parents=True)
+        (sysfs / "bus" / "pci" / "devices" / bus / "numa_node").write_text(f"{node}\n")
+    (procfs / "1").mkdir(parents=True)
+    (procfs / "1" / "cgroup").write_text("0::/init.scope\n")
+    rootfs.mkdir()
+    shm.mkdir()
+    for key, value in {
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "LH_SYSFS": str(sysfs),
+        "LH_PROCFS": str(procfs),
+        "LH_ROOTFS": str(rootfs),
+        "LH_SHM": str(shm),
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("LH_GPU_ID", raising=False)
+    # Two cards and none chosen: the facts say so (the preflight refuses), and the units name no GPU.
+    gpu = profile.detect()["gpu"]
+    assert (gpu["count"], gpu["chosen"], gpu["wanted"]) == (2, False, None)
+    assert gpu["all"] == [
+        "0: NVIDIA A100-SXM4-40GB (GPU-aaaa)",
+        "1: NVIDIA A100-SXM4-40GB (GPU-bbbb)",
+    ]
+    out, _ = render(tmp_path, "a100-40gb", host(gpu=gpu))
+    assert "CUDA_VISIBLE_DEVICES" not in (out / "systemd" / "lh-engine.service").read_text()
+    for wanted in ("1", "GPU-bbbb"):
+        monkeypatch.setenv("LH_GPU_ID", wanted)
+        gpu = profile.detect()["gpu"]
+        assert (gpu["index"], gpu["uuid"], gpu["chosen"], gpu["numa_node"]) == (
+            1,
+            "GPU-bbbb",
+            True,
+            1,
+        )
+        assert gpu["bus_id"] == "00000000:AF:00.0" and gpu["mig"] == "Enabled"
+        assert gpu["mig_devices"] == [{"profile": "3g.20gb", "uuid": "MIG-bbbb-0"}]
+    monkeypatch.setenv("LH_GPU_ID", "GPU-aaaa")
+    gpu = profile.detect()["gpu"]
+    assert (gpu["index"], gpu["chosen"], gpu["mig_devices"]) == (0, True, [])
+    # The three GPU units run on it alone, by its UUID (in nvidia-smi's PCI order for CUDA), and gpu-guard asks
+    # nvidia-smi about it alone.
+    out, _ = render(tmp_path / "chosen", "a100-40gb", host(gpu=gpu))
+    for unit in ("lh-engine", "lh-stt", "lh-tts"):
+        text = (out / "systemd" / f"{unit}.service").read_text()
+        for line in (
+            "Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID",
+            "Environment=CUDA_VISIBLE_DEVICES=GPU-aaaa",
+            "Environment=LH_GPU_ID=GPU-aaaa",
+        ):
+            assert line in text.splitlines(), (unit, line)
+        # The unit's environment is its commands', gpu-guard's (an ExecStartPre) among them.
+        assert "ExecStartPre=%h/leaseholder/src/deploy/bin/gpu-guard" in text.splitlines()
+    monkeypatch.setenv("LH_GPU_ID", "7")
+    gpu = profile.detect()["gpu"]
+    assert (gpu["chosen"], gpu["wanted"]) == (False, "7")

@@ -679,6 +679,27 @@ def test_the_voice_plane_runs_in_the_hosts_namespace_where_there_is_none_of_its_
         holder.wait()
 
 
+def test_gpu_guard_reads_the_lent_gpu_alone(tmp_path: Path) -> None:
+    # On a host that lends one of its GPUs (LH_GPU_ID, which the GPU units carry), another tenant's work on the
+    # others is none of the guard's business; without it (the box, one GPU), it reads every GPU, as before.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    asked = tmp_path / "asked"
+    (bin_dir / "nvidia-smi").write_text(f'#!/bin/sh\necho "$*" >>{asked}\n')
+    (bin_dir / "nvidia-smi").chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "LH_GPU_ID"}
+    env["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+    for extra in ({"LH_GPU_ID": "GPU-bbbb"}, {}):
+        done = subprocess.run(
+            ["bash", str(BIN / "gpu-guard")], env=env | extra, capture_output=True, text=True
+        )
+        assert done.returncode == 0, done.stderr
+    assert asked.read_text().splitlines() == [
+        "-i GPU-bbbb --query-compute-apps=pid --format=csv,noheader",
+        "--query-compute-apps=pid --format=csv,noheader",
+    ]
+
+
 @pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="reads /proc (Linux)")
 def test_gpu_guard_tells_the_supervisors_units_from_foreign_processes(tmp_path: Path) -> None:
     # Two processes on the GPU (a stand-in nvidia-smi lists them): one of lh-svc's units, which carries its

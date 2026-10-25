@@ -53,6 +53,12 @@ def gpu(**fields) -> dict:
     return {
         "name": A100,
         "count": 1,
+        "index": 0,
+        "uuid": "GPU-1",
+        "chosen": True,
+        "wanted": None,
+        "all": [f"0: {A100} (GPU-1)"],
+        "mig_devices": [],
         "memory_mib": 40960,
         "compute_cap": "8.0",
         "driver": "580.65.06",
@@ -504,6 +510,75 @@ def test_the_preflight_refuses_an_engine_venv_without_pythons_headers(
     assert host_py.python_headers(tmp_path / "no-venv") is None
 
 
+def test_the_preflight_takes_the_lent_gpu_of_several_and_refuses_none_chosen(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    two = [f"0: {A100} (GPU-aaaa)", f"1: {A100} (GPU-bbbb)"]
+    node = ready_host(
+        tmp_path,
+        venv,
+        engine,
+        monkeypatch,
+        facts(gpu=gpu(count=2, chosen=False, index=0, uuid="GPU-aaaa", all=two)),
+    )
+    smi = tmp_path / "smi.log"
+    script(
+        tmp_path / "bin" / "nvidia-smi",
+        f'echo "$*" >>{smi}\ncase "$*" in -L) printf "GPU 0: A100 (UUID: GPU-aaaa)\\nGPU 1: A100 (UUID: GPU-bbbb)\\n" ;; esac',
+    )
+
+    def rows() -> dict[str, host_py.Check]:
+        return {
+            c.check: c for c in host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)
+        }
+
+    # Two cards and none chosen: which one the core runs on, and whose processes gpu-guard reads, is the host's guess.
+    row = rows()["GPU"]
+    assert row.status == "refused" and row.value == f"2 GPUs, none chosen: {'; '.join(two)}"
+    assert "LH_GPU_ID=INDEX|UUID bootstrap.sh stage" in row.reason
+    node.host["gpu"] = gpu(count=2, index=1, uuid="GPU-bbbb", all=two)
+    smi.unlink()
+    checks = rows()
+    assert checks["GPU"].status == "ok" and checks["GPU"].value == "GPU 1 of 2: GPU-bbbb"
+    # The guard and the process count read the lent GPU alone.
+    assert checks["GPU exclusive"].status == "ok"
+    asked = smi.read_text().splitlines()
+    assert "-i GPU-bbbb --query-compute-apps=pid --format=csv,noheader" in asked  # gpu-guard's
+    assert "-i GPU-bbbb --query-compute-apps=pid,process_name --format=csv,noheader" in asked
+    node.host["gpu"] = gpu(count=2, chosen=False, wanted="7", all=two)
+    row = rows()["GPU"]
+    assert row.status == "refused" and row.value == f"LH_GPU_ID=7 names none of: {'; '.join(two)}"
+
+
+def test_a_mig_slice_is_refused_unless_allowed(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # A MIG slice is one GPU to the host, but the profile's budgets and the forecast are the whole card's.
+    monkeypatch.delenv("LH_ALLOW_MIG", raising=False)
+    slice_ = [{"profile": "3g.20gb", "uuid": "MIG-1"}]
+    node = ready_host(
+        tmp_path, venv, engine, monkeypatch, facts(gpu=gpu(mig="Enabled", mig_devices=slice_))
+    )
+
+    def mig() -> host_py.Check:
+        checks = host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)
+        return next(c for c in checks if c.check == "MIG")
+
+    row = mig()
+    assert row.status == "refused" and row.value == "enabled, one slice (3g.20gb, MIG-1)"
+    assert "whole card" in row.reason and "LH_ALLOW_MIG=1" in row.reason
+    monkeypatch.setenv("LH_ALLOW_MIG", "1")
+    row = mig()
+    assert row.status == "degraded" and "a slice is a smaller card" in row.effect
+    # Where it is allowed, CUDA runs on the slice, and gpu-guard reads its card.
+    out, _ = render(tmp_path / "slice", facts(gpu=gpu(mig="Enabled", mig_devices=slice_)))
+    engine_unit = (out / "systemd" / "lh-engine.service").read_text().splitlines()
+    assert "Environment=CUDA_VISIBLE_DEVICES=MIG-1" in engine_unit
+    assert "Environment=LH_GPU_ID=GPU-1" in engine_unit
+    node.host["gpu"] = gpu(mig="Enabled", mig_devices=slice_ * 2)
+    assert mig().status == "refused"
+
+
 def test_the_corpus_row_refuses_traces_that_do_not_resolve_on_this_host(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:
@@ -678,6 +753,7 @@ def test_env_sh_is_written_for_lh_svc_with_the_override(tmp_path: Path, monkeypa
     text = host_py.write_env(node, home).read_text()
     assert "shims" not in text  # systemd runs the units
     assert "export LH_SUPERVISOR=systemd\n" in text  # the choice, kept for the later stages
+    assert "export LH_GPU_ID=GPU-1\n" in text  # the lent GPU, for the later stages and the sampler
     monkeypatch.setenv("LH_SUPERVISOR", "lh-svc")
     env_sh = host_py.write_env(node, home)
     text = env_sh.read_text()
@@ -751,7 +827,13 @@ def test_the_preflight_names_what_a_bare_container_lacks(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:
     host = facts(
-        gpu=gpu(mig="Enabled"),
+        gpu=gpu(
+            mig="Enabled",
+            mig_devices=[
+                {"profile": "3g.20gb", "uuid": "MIG-1"},
+                {"profile": "4g.20gb", "uuid": "MIG-2"},
+            ],
+        ),
         systemd_user=False,
         linger=None,
         userns=False,
@@ -783,10 +865,6 @@ def test_the_preflight_names_what_a_bare_container_lacks(
     }
     (root / "cache" / "warm.json").write_text(json.dumps(warm))
     (Path(os.environ["LH_PROCFS"]) / "mounts").write_text("tmpfs / tmpfs rw 0 0\n")
-    script(
-        Path(os.environ["PATH"].split(os.pathsep)[0]) / "nvidia-smi",
-        'case "$*" in -L) printf "GPU 0: A100\\n  MIG 3g.20gb Device 0\\n  MIG 4g.20gb Device 1\\n" ;; esac',
-    )
     script(Path(os.environ["PATH"].split(os.pathsep)[0]) / "systemctl", "exit 3")
     shutil.rmtree(root / "data" / "weka-x32")
     (venv / "leaseholder" / "venvs" / "engine" / "bin" / "fail").write_text("torch")

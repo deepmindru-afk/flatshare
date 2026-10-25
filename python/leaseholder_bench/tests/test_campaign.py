@@ -112,11 +112,27 @@ def test_each_point_runs_with_the_gpu_nodes_deployed_revision(hosts: Hosts) -> N
     switch = ["variant.sh measure on", "variant.sh use frozen"]
     assert hosts.calls(PHASTFORM, "variant") == switch * 2
     assert f"a1: phastform has {DEPLOYED}" in (hosts.results / "c1" / "campaign.log").read_text()
-    # The GPU's samples end in its name, so that a record says which card it ran on.
+    # The GPU's samples end in its name and UUID, so that a record says which card it ran on; a node that names
+    # no GPU of its own (LH_GPU_ID) is sampled whole, as before.
     [query] = {call.split()[1] for call in hosts.calls(PHASTFORM, "nvidia-smi")}
-    assert query.startswith("--query-gpu=timestamp,clocks.sm,") and query.endswith(",name")
+    assert query.startswith("--query-gpu=timestamp,clocks.sm,") and query.endswith(",name,uuid")
     samples = (hosts.home("cyan") / "leaseholder/runs/e2/c1/a1/gpu.csv").read_text().splitlines()
-    assert samples and all(line.endswith(", NVIDIA GeForce RTX 5060 Ti") for line in samples)
+    assert samples and all(
+        line.endswith(", NVIDIA GeForce RTX 5060 Ti, GPU-5060") for line in samples
+    )
+
+
+def test_a_host_that_lends_one_of_its_gpus_has_it_sampled_alone(hosts: Hosts) -> None:
+    # A single host's env.sh names its lent GPU (LH_GPU_ID), which the sampler, run there, reads: only that GPU is
+    # sampled, and the file says which it is.
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c9", ["arms/a1.toml"], {"a1": VOICE})
+    done = hosts.run(campaign, LH_GPU_ID="GPU-5060")
+    assert done.returncode == 0, done.stdout + done.stderr
+    [call] = set(hosts.calls(PHASTFORM, "nvidia-smi"))
+    assert call.startswith("nvidia-smi -i GPU-5060 --query-gpu=timestamp,")
+    samples = (hosts.home("cyan") / "leaseholder/runs/e2/c9/a1/gpu.csv").read_text().splitlines()
+    assert samples[0] == "# gpu GPU-5060" and samples[1].endswith(", GPU-5060")
 
 
 def test_lh_profile_names_the_gpu_nodes_profile_for_the_engine_check(hosts: Hosts) -> None:

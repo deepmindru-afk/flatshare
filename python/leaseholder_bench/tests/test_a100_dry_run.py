@@ -456,16 +456,10 @@ def ubuntu(tmp_path: Path) -> dict:
 
 
 def bootstrap(host: dict, *steps: str, **env: str) -> subprocess.CompletedProcess[str]:
-    """One invocation of bootstrap.sh's own steps, sourced: its supervisor's choice, then STEPS, each a command
-    under its set -e, as main runs a stage's (its tools aside: py is this Python)."""
+    """One invocation of bootstrap.sh's own steps, sourced: its choices (the supervisor, the GPU), then STEPS, each a
+    command under its set -e, as main runs a stage's (its tools aside: py is this Python)."""
     script = "\n".join(
-        [
-            f"source {BOOTSTRAP}",
-            f"py={sys.executable}",
-            "choose_supervisor",
-            'mkdir -p "$node"',
-            *steps,
-        ]
+        [f"source {BOOTSTRAP}", f"py={sys.executable}", "choose", 'mkdir -p "$node"', *steps]
     )
     return subprocess.run(
         ["bash", "-c", script],
@@ -588,3 +582,37 @@ def test_bootstrap_makes_the_venvs_from_uvs_own_python(ubuntu: dict) -> None:
     for line in BOOTSTRAP.read_text().splitlines():
         if re.search(r'"\$uv" (venv|sync|python find)\b', line):
             assert "--managed-python" in line, line
+
+
+TWO_GPUS = """\
+#!/bin/sh
+# nvidia-smi on a host with two A100s.
+case "$*" in
+  -L) printf 'GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-aaaa)\\nGPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-bbbb)\\n' ;;
+  --query-gpu=*)
+    for row in "0, GPU-aaaa" "1, GPU-bbbb"; do
+      echo "$row, NVIDIA A100-SXM4-40GB, 40960, 8.0, 580.65.06, 4, 16, Disabled, 400.00, 00000000:3B:00.0, Enabled"
+    done ;;
+  *) exit 1 ;;
+esac
+"""
+
+
+def test_bootstrap_keeps_the_lent_gpu_that_the_first_stage_named(ubuntu: dict) -> None:
+    # LH_GPU_ID=1 at the first stage: the facts resolve it to its UUID, env.sh keeps that for the later stages,
+    # which then need not name it again; a bad value is refused before anything is written.
+    tools = Path(ubuntu["env"]["PATH"].split(os.pathsep)[0])
+    (tools / "nvidia-smi").write_text(TWO_GPUS)
+    node = ubuntu["node"]
+    done = bootstrap(ubuntu, "render", "shell_env", LH_GPU_ID="1")
+    assert done.returncode == 0, done.stdout + done.stderr
+    for invocation in ("stage", "gpu"):
+        facts = json.loads((node / "host.json").read_text())["gpu"]
+        assert (facts["uuid"], facts["chosen"]) == ("GPU-bbbb", True), invocation
+        assert "export LH_GPU_ID=GPU-bbbb\n" in (node / "env.sh").read_text(), invocation
+        units = (node / "systemd" / "lh-engine.service").read_text()
+        assert "Environment=CUDA_VISIBLE_DEVICES=GPU-bbbb" in units.splitlines(), invocation
+        done = bootstrap(ubuntu, "render", "shell_env")
+        assert done.returncode == 0, done.stdout + done.stderr
+    bad = bootstrap(ubuntu, "true", LH_GPU_ID="all")
+    assert bad.returncode == 2 and "LH_GPU_ID is a GPU's index or UUID" in bad.stderr

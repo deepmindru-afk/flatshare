@@ -247,7 +247,7 @@ def write_env(node: Node, home: Path | None = None) -> Path:
         _write(
             path,
             "# Sourced before any command on this host (deploy/a100/host.py env writes it): systemd runs the units.\n"
-            "export LH_SUPERVISOR=systemd\n",
+            "export LH_SUPERVISOR=systemd\n" + _gpu_line(node.host),
         )
         return path
     state = os.environ.get("XDG_STATE_HOME") or str(home / ".local" / "state")
@@ -270,8 +270,13 @@ def write_env(node: Node, home: Path | None = None) -> Path:
         # The choice is kept: the later stages run the units where this one did (bootstrap.sh).
         "export LH_SUPERVISOR=lh-svc",
     ]
-    _write(path, "\n".join(lines) + "\n")
+    _write(path, "\n".join(lines) + "\n" + _gpu_line(node.host))
     return path
+
+
+def _gpu_line(host: dict) -> str:
+    """env.sh's line naming the lent GPU, for the later stages (detect reads it) and the GPU sampler."""
+    return f"export LH_GPU_ID={uuid}\n" if (uuid := lent_gpu(host)) else ""
 
 
 def active_elsewhere(host: dict) -> tuple[str, list[str]]:
@@ -814,9 +819,20 @@ def _yaml_model(path: Path) -> tuple[str, str] | None:
     return (model.group(1), revision.group(1)) if model and revision else None
 
 
-def _gpu_processes() -> list[str] | None:
+def lent_gpu(host: dict) -> str | None:
+    """The UUID of the GPU this host lends, once its facts chose one (profile.py detect, LH_GPU_ID)."""
+    card = host.get("gpu") or {}
+    return card.get("uuid") if card.get("chosen") else None
+
+
+def _gpu_processes(uuid: str | None = None) -> list[str] | None:
     done = shutil.which("nvidia-smi") and _run(
-        ["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"]
+        [
+            "nvidia-smi",
+            *(["-i", uuid] if uuid else []),
+            "--query-compute-apps=pid,process_name",
+            "--format=csv,noheader",
+        ]
     )
     if not done or done.returncode:
         return None
@@ -1180,9 +1196,29 @@ def preflight(
         add("Engine starts", "ok", ", ".join(f"{n} {e['ready_s']} s" for n, e in warmed.items()))
 
     # The GPU's own state.
+    lent = lent_gpu(host)
+    if card.get("count", 1) > 1 or card.get("wanted"):
+        listed = "; ".join(card.get("all") or [])
+        if lent:
+            add("GPU", "ok", f"GPU {card.get('index')} of {card.get('count')}: {lent}")
+        else:
+            add(
+                "GPU",
+                "refused",
+                f"LH_GPU_ID={card['wanted']} names none of: {listed}"
+                if card.get("wanted")
+                else f"{card.get('count')} GPUs, none chosen: {listed}",
+                "the core runs on one GPU, which the units, gpu-guard and the sampler must name: "
+                "LH_GPU_ID=INDEX|UUID bootstrap.sh stage (env.sh keeps it)",
+            )
+    elif card:
+        add("GPU", "ok", f"the host's one GPU{f': {lent}' if lent else ''}")
     if gpu:
-        guard = _run(["bash", str(DEPLOY / "bin" / "gpu-guard")])
-        processes = _gpu_processes()
+        guard = _run(
+            ["bash", str(DEPLOY / "bin" / "gpu-guard")],
+            env=os.environ | ({"LH_GPU_ID": lent} if lent else {}),
+        )
+        processes = _gpu_processes(lent)
         add(
             "GPU exclusive",
             "ok" if guard.returncode == 0 else "refused",
@@ -1191,21 +1227,28 @@ def preflight(
         )
     mig = card.get("mig")
     if mig and mig.lower() == "enabled":
-        listed = _run(["nvidia-smi", "-L"]) if shutil.which("nvidia-smi") else None
-        count = (
-            len(re.findall(r"^\s+MIG ", listed.stdout, re.M))
-            if listed and listed.returncode == 0
-            else 0
-        )
-        add(
-            "MIG",
-            "degraded" if count == 1 else "refused",
-            f"enabled, {count} instances",
-            "MIG instance: one slice of the card"
-            if count == 1
-            else "MIG is on: the core runs on the whole card; turn it off (nvidia-smi -mig 0, root and a GPU reset)",
-            "a slice is a smaller card" if count == 1 else "",
-        )
+        # A slice is one GPU to the host, but the profile's budgets and the forecast are the whole card's.
+        slices = card.get("mig_devices") or []
+        off = "turn MIG off (nvidia-smi -mig 0, root and a GPU reset)"
+        if len(slices) == 1:
+            allowed = os.environ.get("LH_ALLOW_MIG") == "1"
+            add(
+                "MIG",
+                "degraded" if allowed else "refused",
+                f"enabled, one slice ({slices[0]['profile']}, {slices[0]['uuid']})",
+                "LH_ALLOW_MIG=1: the core on one slice of the card"
+                if allowed
+                else "a MIG slice: the profile's memory budgets and the forecast are the whole card's; "
+                f"{off}, or measure on the slice anyway: LH_ALLOW_MIG=1",
+                "a slice is a smaller card: the forecast does not hold" if allowed else "",
+            )
+        else:
+            add(
+                "MIG",
+                "refused",
+                f"enabled, {len(slices)} slices",
+                f"MIG is on: the core runs on the whole card; {off}",
+            )
     elif card:
         add("MIG", "ok", str(mig))
     power = card.get("power_limit_w")

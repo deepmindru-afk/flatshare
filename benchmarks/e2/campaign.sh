@@ -141,8 +141,10 @@ fetch() { # fetch POINT: mirror its run directory, without AIPerf's copy of the 
 }
 # A consumer card's boost clock follows its temperature, so each point keeps the clocks it ran at: nvidia-smi on each
 # GPU node, once a second while the point runs (line-buffered, timestamps in UTC); it stops when its ssh does. The
-# GPU's name comes last, so that a record says which card it ran on.
-gpu_query=timestamp,clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_event_reasons.active,name
+# GPU's name and UUID come last, so that a record says which card it ran on. A host that lends one of several GPUs
+# names it in its environment (LH_GPU_ID, from its env.sh): only that GPU is sampled, and the file's first line, a
+# comment, says which (lh-bench's record reads that GPU's rows alone).
+gpu_query=timestamp,clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_event_reasons.active,name,uuid
 samplers=()
 trap 'for sampler in ${samplers[@]+"${samplers[@]}"}; do kill "$sampler" 2>/dev/null; done' EXIT
 gpu_csv() { # gpu_csv HOST: the file of its GPU's samples in a run directory
@@ -150,7 +152,8 @@ gpu_csv() { # gpu_csv HOST: the file of its GPU's samples in a run directory
 }
 sample_gpus() { # sample_gpus POINT
   for gpu in "${gpus[@]}"; do
-    $ssh "$gpu" "exec env TZ=UTC stdbuf -oL nvidia-smi --query-gpu=$gpu_query --format=csv,noheader -l 1" \
+    $ssh "$gpu" "if [ -n \"\${LH_GPU_ID:-}\" ]; then echo \"# gpu \$LH_GPU_ID\"; fi
+      exec env TZ=UTC stdbuf -oL nvidia-smi \${LH_GPU_ID:+-i \"\$LH_GPU_ID\"} --query-gpu=$gpu_query --format=csv,noheader -l 1" \
       >"$results/$1.$(gpu_csv "$gpu")" 2>>"$results/campaign.log" &
     samplers+=($!)
   done

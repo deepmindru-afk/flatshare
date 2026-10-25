@@ -38,6 +38,7 @@ from leaseholder_bench.e2.record import (
     logged_first_byte,
     summarize_point,
 )
+from leaseholder_bench.e2.record import gpu as gpu_samples
 from leaseholder_bench.e2.report import (
     ADMISSION_COLUMNS,
     COLUMNS,
@@ -1480,3 +1481,34 @@ def test_a_point_summary_reads_its_run_directory(tmp_path: Path) -> None:
     (run_dir / "bots" / "summary.json").write_text(json.dumps(bots))
     with pytest.raises(ValueError, match="measured no voice-to-voice latency"):
         summarize_point(run_dir, T0, T0 + 321, agents=False)
+
+
+def test_the_gpu_columns_read_the_lent_gpu_of_several_alone(tmp_path: Path) -> None:
+    # A sampler file from a host with four GPUs, the point's at 1,410 MHz and three idle at 210: the file's header
+    # names the lent one, whose rows alone count; with no header the GPUs are not mixed (nothing is kept), and a
+    # file of one GPU, a UUID or not (the box's records), reads as before.
+    start = datetime(2026, 10, 25, 9, 0, 0, tzinfo=UTC).timestamp()
+    window = {"start": start, "end": start + 60}
+    rows = []
+    for second in range(3):
+        for index, (clock, temperature) in enumerate(((1410, 61), (210, 34), (210, 34), (210, 35))):
+            rows.append(
+                f"2026/10/25 09:00:0{second}.000, {clock} MHz, 1215 MHz, {temperature}, 55.00 W, "
+                f"0x0000000000000000, NVIDIA A100-SXM4-40GB, GPU-{index}"
+            )
+    named = tmp_path / "named.csv"
+    named.write_text("# gpu GPU-0\n" + "\n".join(rows) + "\n")
+    assert gpu_samples([named], window) == {
+        "gpu_sm_clock_p50_mhz": 1410,
+        "gpu_temperature_max_c": 61,
+        "gpu_name": "NVIDIA A100-SXM4-40GB",
+    }
+    unnamed = tmp_path / "unnamed.csv"
+    unnamed.write_text("\n".join(rows) + "\n")
+    assert gpu_samples([unnamed], window) == {
+        "gpu_sm_clock_p50_mhz": None,
+        "gpu_temperature_max_c": None,
+    }
+    one = tmp_path / "one.csv"
+    one.write_text("\n".join(row.rsplit(", GPU-", 1)[0] for row in rows[::4]) + "\n")
+    assert gpu_samples([one], window)["gpu_sm_clock_p50_mhz"] == 1410

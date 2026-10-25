@@ -11,6 +11,8 @@
 #   gpu    with the card: the facts again, now with the driver (the engine venv re-synced if the lock changes),
 #          vLLM's own parse of the node's configs, and the preflight with the GPU's checks
 #   warm   one engine start for each compile configuration (cache/warm.json), so that the campaign starts warm
+# LH_GPU_ID names the GPU the host lends, by nvidia-smi's index or its UUID, on a host with several (the preflight
+# refuses several and none named): detect resolves it to its UUID, which the GPU units run on alone and env.sh keeps.
 # LH_PROFILE names another profile; LH_MODELS adds MODEL@REVISION words to download (the 14B, for C'); LH_WARM is a
 # file of the configurations to warm (host.py warm --configs). The first stage chooses what runs the units, the user
 # manager where it outlives the session (lingering, which it enables where a user may) or else deploy/bin/lh-svc, and
@@ -35,6 +37,20 @@ choose_supervisor() { # LH_SUPERVISOR, checked before anything is written; previ
     *) echo "bootstrap: LH_SUPERVISOR is auto or lh-svc, not '$LH_SUPERVISOR'" >&2; exit 2 ;;
   esac
   export LH_SUPERVISOR
+}
+
+choose_gpu() { # LH_GPU_ID, checked before anything is written: unset, an earlier stage's (env.sh, its UUID)
+  if [[ -z ${LH_GPU_ID:-} && -f $node/env.sh ]]; then
+    LH_GPU_ID=$(sed -n 's/^export LH_GPU_ID=//p' "$node/env.sh")
+  fi
+  [[ -z ${LH_GPU_ID:-} || $LH_GPU_ID =~ ^([0-9]+|GPU-[0-9A-Za-z-]+)$ ]] ||
+    { echo "bootstrap: LH_GPU_ID is a GPU's index or UUID (nvidia-smi -L), not '$LH_GPU_ID'" >&2; exit 2; }
+  [[ -z ${LH_GPU_ID:-} ]] || export LH_GPU_ID
+}
+
+choose() { # what runs the units, and on which GPU
+  choose_supervisor
+  choose_gpu
 }
 
 # uv at the version the locks were resolved with or newer (uv 0.10.8 could not resolve the engine lock's torchcodec
@@ -254,7 +270,7 @@ preflight() { # preflight [--gpu]: the stage's status is the preflight's
 main() {
   stage=${1:-}
   [[ $stage == stage || $stage == gpu || $stage == warm ]] || { echo "usage: bootstrap.sh stage|gpu|warm" >&2; exit 2; }
-  choose_supervisor
+  choose
   mkdir -p "$root"/{bin,venvs,vendor,data,runs,results,cache} "$node"
   exec > >(tee -a "$node/bootstrap.log") 2>&1
   log "from $src ($(cat "$src/DEPLOYED" 2>/dev/null || echo 'no DEPLOYED'))"

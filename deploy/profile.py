@@ -172,16 +172,41 @@ def cpulist(cpus: list[int]) -> str:
     return ",".join(parts)
 
 
+GPU_QUERY = (
+    "index,uuid,name,memory.total,compute_cap,driver_version,pcie.link.gen.current,pcie.link.width.current,"
+    "mig.mode.current,power.limit,pci.bus_id,ecc.mode.current"
+)
+
+
+def _mig_devices(uuid: str) -> list[dict]:
+    """The MIG devices of the GPU ``uuid``, from nvidia-smi -L: each one's profile and UUID."""
+    done = _run(["nvidia-smi", "-L"])
+    devices: list[dict] = []
+    ours = False
+    for line in done.stdout.splitlines() if done is not None and done.returncode == 0 else []:
+        if line.startswith("GPU "):
+            ours = f"(UUID: {uuid})" in line
+        elif ours and (m := re.match(r"\s+MIG (\S+)\s+Device\s+\d+: \(UUID: (\S+)\)", line)):
+            devices.append({"profile": m.group(1), "uuid": m.group(2)})
+    return devices
+
+
 def _gpu(sysfs: Path) -> dict | None:
-    fields = (
-        "name,memory.total,compute_cap,driver_version,pcie.link.gen.current,pcie.link.width.current,"
-        "mig.mode.current,power.limit,pci.bus_id,ecc.mode.current"
-    )
-    done = _run(["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"])
+    """The GPU's facts: on a host with several, the one LH_GPU_ID names (nvidia-smi's index or the GPU's UUID); with
+    one, it. ``chosen`` says whether one is: several and none named leave GPU 0's facts and chosen false, which the
+    preflight refuses."""
+    done = _run(["nvidia-smi", f"--query-gpu={GPU_QUERY}", "--format=csv,noheader,nounits"])
     if done is None or done.returncode != 0 or not done.stdout.strip():
         return None
     rows = [[x.strip() for x in line.split(",")] for line in done.stdout.strip().splitlines()]
-    name, memory, cap, driver, gen, width, mig, power, bus, ecc = rows[0]
+    wanted = os.environ.get("LH_GPU_ID", "").strip() or None
+    if wanted:
+        matches = [row for row in rows if wanted in (row[0], row[1])]
+    else:
+        matches = rows if len(rows) == 1 else []
+    index, uuid, name, memory, cap, driver, gen, width, mig, power, bus, ecc = (
+        matches[0] if matches else rows[0]
+    )
     number = lambda x: float(x) if re.fullmatch(r"[0-9.]+", x) else None  # noqa: E731
     # nvidia-smi gives the bus id with an 8-digit domain ("00000000:3B:00.0"), sysfs with a 4-digit one.
     domain, _, rest = bus.partition(":")
@@ -189,17 +214,39 @@ def _gpu(sysfs: Path) -> dict | None:
     return {
         "name": name,
         "count": len(rows),
+        "index": int(index) if index.isdigit() else None,
+        "uuid": uuid,
+        "chosen": bool(matches),
+        "wanted": wanted,
+        "all": [f"{row[0]}: {row[2]} ({row[1]})" for row in rows],
         "memory_mib": int(number(memory) or 0),
         "compute_cap": cap,
         "driver": driver,
         "pcie_gen": int(number(gen) or 0),
         "pcie_width": int(number(width) or 0),
         "mig": mig,
+        "mig_devices": _mig_devices(uuid) if mig.lower() == "enabled" else [],
         "power_limit_w": number(power),
         "ecc": ecc,
         "bus_id": bus,
         "numa_node": int(node) if node is not None and node.strip().lstrip("-").isdigit() else None,
     }
+
+
+def gpu_select(gpu: dict) -> str:
+    """The GPU units' lines that run them on the lent GPU alone, by UUID (on its MIG slice where MIG is on and
+    allowed), and tell gpu-guard which GPU's processes to read; none until one is chosen."""
+    if not gpu.get("chosen") or not gpu.get("uuid"):
+        return ""
+    slices = gpu.get("mig_devices") or []
+    visible = slices[0]["uuid"] if len(slices) == 1 else gpu["uuid"]
+    return (
+        f"# GPU {gpu.get('index')} of {gpu.get('count', 1)}, the one this host lends (bootstrap.sh's LH_GPU_ID, else "
+        "its only one): CUDA sees it alone, by UUID,\n# and gpu-guard reads its processes alone.\n"
+        "Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID\n"
+        f"Environment=CUDA_VISIBLE_DEVICES={visible}\n"
+        f"Environment=LH_GPU_ID={gpu['uuid']}"
+    )
 
 
 def _cpus(sysfs: Path) -> dict[str, list[int]]:
@@ -612,6 +659,7 @@ def resolve(profile: dict, host: dict | None) -> tuple[dict[str, str], dict | No
         "units.cuda_ldflags": "Environment=FLASHINFER_EXTRA_LDFLAGS=-L%h/leaseholder/cache/cuda_lib"
         if cuda == VENV_CUDA
         else "",
+        "units.gpu_select": gpu_select(gpu),
         "units.cuda_compat": (
             f"# Driver {gpu['driver']}: CUDA 13.0 through the forward-compatibility libraries of cuda-compat-13-0,\n"
             f"# which a data-center GPU can load.\nEnvironment=LD_LIBRARY_PATH={host['cuda_compat']}"
