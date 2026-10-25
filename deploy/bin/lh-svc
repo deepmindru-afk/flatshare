@@ -665,12 +665,17 @@ class Runner:
             return
         signum = getattr(signal, unit.last("KillSignal", "SIGTERM"), signal.SIGTERM)
         timeout = unit.seconds("TimeoutStopSec", 90.0)
-        kill_group(self.main.pid, signum)
-        if self.main.poll() is None:
+        exited = self.main.poll() is not None
+        self.reap()  # an orphan of the group that has exited is no longer what is left of it
+        if kill_group(self.main.pid, signum) and exited:
+            self.say(
+                f"Killing what is left of process group {self.main.pid} with signal {signum.name}."
+            )
+        if not exited:
             try:
                 self.main.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                self.say("stop timed out: killing")
+                self.say("State 'stop-sigterm' timed out. Killing.")
                 kill_group(self.main.pid, signal.SIGKILL)
                 self.main.wait()
             timeout = 5.0
@@ -680,9 +685,13 @@ class Runner:
         self.stopping.set()
 
 
-def kill_group(pid: int, signum: int) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError):
+def kill_group(pid: int, signum: int) -> bool:
+    """Whether the group had a process to signal."""
+    try:
         os.killpg(pid, signum)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
 
 
 KILLED_GONE_S = 30.0
@@ -694,7 +703,7 @@ def group_gone(pgid: int | None, timeout: float, runner: Runner | None = None) -
     """Wait for every process of the group ``pgid`` (the main process's own) to exit, SIGKILL what is left after
     ``timeout``, and wait for that to be gone too: a stop returns once the unit's processes have exited, as systemd's
     once the unit's cgroup is empty, so that the next start does not meet the last one's engine still exiting. The
-    unit's ``runner``, where it waits, reaps the members it adopted meanwhile."""
+    unit's ``runner``, where it waits, reaps the members it adopted meanwhile, and its journal says when it kills."""
     if not pgid:
         return
 
@@ -714,6 +723,8 @@ def group_gone(pgid: int | None, timeout: float, runner: Runner | None = None) -
             time.sleep(0.05)
 
     if not wait(timeout):
+        if runner:
+            runner.say("State 'stop-sigterm' timed out. Killing.")
         kill_group(pgid, signal.SIGKILL)
         wait(KILLED_GONE_S)
 

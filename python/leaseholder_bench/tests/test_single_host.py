@@ -392,21 +392,22 @@ def test_a_unit_whose_main_process_exits_leaves_no_process_of_its_group(host: di
         except FileNotFoundError:
             return True
 
-    pids: list[int] = []
+    # The children not yet seen ended, which alone the cleanup kills: a pid seen gone may name another process since.
+    left: list[int] = []
     try:
         assert ctl(host, "--user", "start", "leaves.service").returncode == 0
         deadline = time.monotonic() + 30
         while ctl(host, "--user", "is-failed", "leaves.service").stdout.strip() != "failed":
             assert time.monotonic() < deadline, "the unit failed after its restarts"
             time.sleep(0.1)
-        pids = [int(pid) for pid in children.read_text().split()]
+        left = pids = [int(pid) for pid in children.read_text().split()]
         assert len(pids) == 2, pids  # StartLimitBurst
         deadline = time.monotonic() + 10
-        while not all(ended(pid) for pid in pids):
-            assert time.monotonic() < deadline, [pid for pid in pids if not ended(pid)]
+        while left := [pid for pid in left if not ended(pid)]:
+            assert time.monotonic() < deadline, left
             time.sleep(0.05)
     finally:
-        for pid in pids:
+        for pid in left:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
 
@@ -517,6 +518,39 @@ def test_a_unit_is_deactivating_while_what_is_left_of_its_group_is_ended(
         # starting a runner of its own beside the one deactivating.
         assert took >= 3 and len(list(home.glob("ready.*"))) == 2, took
         assert ctl(host, "--user", "is-active", "leaves.service").stdout.strip() == "active"
+    finally:
+        ctl(host, "--user", "stop", "leaves.service")
+
+
+def test_what_is_left_of_a_units_group_gets_its_kill_signal_then_sigkill(host: dict) -> None:
+    # As systemd ends what is left of a unit's cgroup once its main process has exited: the unit's KillSignal first,
+    # SIGKILL once TimeoutStopSec has passed, then ExecStopPost, which finds it gone, and the restart. Here the child
+    # records each signal it gets and ignores it.
+    home, py = host["home"], sys.executable
+    (home / "leaves.py").write_text(LEAVES)
+    alive = "kill -0 $(cat %h/child.pid) 2>/dev/null && echo alive || echo gone"
+    (host["units"] / "leaves.service").write_text(
+        f"[Service]\nExecStart={py} %h/leaves.py 1\nExecStartPost={py} %h/wait.py %h/ready.${{MAINPID}}\n"
+        f"ExecStopPost=/bin/sh -c '({alive}) >> %h/post'\n"
+        "KillSignal=SIGINT\nTimeoutStopSec=1\nRestart=on-failure\nRestartSec=0.1\n"
+    )
+    try:
+        assert ctl(host, "--user", "start", "leaves.service").returncode == 0
+        (home / "exit").touch()  # the main process exits 1, leaving the child
+        deadline = time.monotonic() + 15
+        while len(list(home.glob("ready.*"))) < 2:  # the restart's main process
+            assert time.monotonic() < deadline, "the unit did not restart"
+            time.sleep(0.05)
+        signals = home / "signals"
+        assert (signals.read_text().split() if signals.exists() else []) == ["SIGINT"]
+        assert (home / "post").read_text().split()[0] == "gone"
+        [exited] = journal_times(host, "leaves", "Main process exited, status=1")
+        restarted = journal_times(host, "leaves", "lh-svc: Starting leaves.service")[1]
+        assert restarted - exited >= 1.0, restarted - exited  # TimeoutStopSec
+        # The journal says why the restart came so late, in systemd's words.
+        [signaled] = journal_times(host, "leaves", "with signal SIGINT.")
+        [killed] = journal_times(host, "leaves", "State 'stop-sigterm' timed out. Killing.")
+        assert exited <= signaled and signaled + 1.0 <= killed <= restarted
     finally:
         ctl(host, "--user", "stop", "leaves.service")
 
