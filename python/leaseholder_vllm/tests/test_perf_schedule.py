@@ -75,6 +75,23 @@ def test_the_check_fails_a_state_whose_on_off_grew_past_the_tolerance():
     assert P.check({"A16": {"ratio": 0.0}}, baseline) == ["A16: not in the baseline"]
 
 
+def test_a_state_cheaper_past_the_tolerance_passes_and_is_reported():
+    """An on/off that fell by more than the tolerance means that the change got cheaper or the step with the switches
+    off costlier: the baseline no longer describes the code, though nothing costs more."""
+    baseline = {"tolerance": 0.04, "cells": {"B64": {"ratio": 0.6}, "C16": {"ratio": 0.8}}}
+    measured = {
+        "B64": {"ratio": 0.5},
+        "C16": {"ratio": 0.75},
+    }  # 1.5 / 1.6: -6.25%; 1.75 / 1.8: -2.8%
+    assert P.check(measured, baseline) == []
+    assert P.cheaper(measured, baseline) == ["B64: on/off 1.50 against the baseline's 1.60, -6.2%"]
+    assert (
+        P.cheaper({"A16": {"ratio": 0.0}}, baseline) == []
+    )  # not in the baseline: check() says so
+    lines = P.table(P.cells([process("B64", 1000, 1500)]), baseline).splitlines()
+    assert lines[2].endswith("| +0.50 | +0.60 | -6.2% | +64 µs | cheaper |")
+
+
 @pytest.mark.parametrize("again_ratio, fails", [(0.6, False), (0.7, True)])
 def test_a_failing_state_is_measured_again_and_fails_only_if_it_still_exceeds(again_ratio, fails):
     baseline = {"tolerance": 0.04, "cells": {"B64": {"ratio": 0.6}, "C16": {"ratio": 0.8}}}

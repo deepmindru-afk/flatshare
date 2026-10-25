@@ -36,7 +36,9 @@ move it. Each cell records the ratio by the median step as well, as information 
 The check fails a state whose on/off exceeds the baseline's by more than the baseline's tolerance, a fraction of it
 (tolerance()), measured again over twice as many processes more and still exceeding it (confirm()). The baseline (benchmarks/perf/make-room-schedule.json) is two such runs, A and B, their repetitions
 interleaved and the off configuration timed twice in each process: its noise is off against off within each process,
-and run A against run B, compared as the check compares a run with the baseline.
+and run A against run B, compared as the check compares a run with the baseline. A state whose on/off fell below the
+baseline's by more than the tolerance passes with a note (cheaper()): the change got cheaper, or the step with the
+switches off costlier, and either way the baseline no longer describes the code.
 
     python tests/perf_schedule.py check BASELINE [--out JSON] [--reps 3] [--states A16,B64] [--module MODULE]
     python tests/perf_schedule.py baseline BASELINE [--reps 3] [--beside TEXT]
@@ -426,6 +428,23 @@ def check(measured: dict[str, dict], baseline: dict) -> list[str]:
     return failures
 
 
+def cheaper(measured: dict[str, dict], baseline: dict) -> list[str]:
+    """The states in ``measured`` whose on/off fell below the baseline's by more than its tolerance. They pass: the
+    change got cheaper, or the step with the switches off costlier, and either way the baseline no longer describes
+    the code."""
+    notes = []
+    for key, cell in measured.items():
+        base = baseline["cells"].get(key)
+        if base is None:
+            continue
+        over = excess(cell["ratio"], base["ratio"])
+        if over < -baseline["tolerance"]:
+            notes.append(
+                f"{key}: on/off {1 + cell['ratio']:.2f} against the baseline's {1 + base['ratio']:.2f}, {over:+.1%}"
+            )
+    return notes
+
+
 def load_warning(load: list[dict], baseline_load: list[dict]) -> str | None:
     """A warning when the 1-minute load during a run went past the highest it reached as the baseline was measured by
     half of that or more, so that a state failing under such load reads as possibly the load's; None otherwise."""
@@ -478,7 +497,9 @@ def table(measured: dict[str, dict], baseline: dict | None) -> str:
                 line += " — | — | not in the baseline |"
             else:
                 over = excess(cell["ratio"], base["ratio"])
-                verdict = "costlier" if over > baseline["tolerance"] else "ok"
+                verdict = "ok"
+                if abs(over) > baseline["tolerance"]:
+                    verdict = "costlier" if over > 0 else "cheaper"
                 # The change may cost this much more a step before the state fails.
                 room = cell["off_us"] * baseline["tolerance"] * (1 + base["ratio"])
                 line += f" {base['ratio']:+.2f} | {over:+.1%} | +{room:,.0f} µs | {verdict} |"
@@ -700,6 +721,7 @@ def command() -> int:
             "tolerance": baseline["tolerance"],
         },
         "failures": failures,
+        "cheaper": cheaper(measured, baseline),
     } | ({"machine_differs": warning} if warning else {})
     busy = load_warning(result["load"], baseline["load"])
     if busy:
@@ -717,9 +739,15 @@ def command() -> int:
     if failures:
         print(f"FAIL: the change costs more than it did in {len(failures)} states:")
         print("\n".join(f"  {failure}" for failure in failures))
-        return 1
-    print(f"ok: {len(measured)} states within it")
-    return 0
+    else:
+        print(f"ok: {len(measured)} states within it")
+    if record["cheaper"]:
+        print(
+            f"note: {len(record['cheaper'])} states cheaper than the baseline by more than the tolerance, which no "
+            "longer describes the code: once the change is meant, measure a new baseline"
+        )
+        print("\n".join(f"  {note}" for note in record["cheaper"]))
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
