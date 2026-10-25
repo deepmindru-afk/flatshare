@@ -1344,8 +1344,7 @@ def _stale_install(pyproject: Path = PYPROJECT) -> str | None:
 
 def preflight_summary(path: Path) -> dict[str, Any]:
     """What a point keeps of its host's preflight: when it ran and each check that was not ok, with
-    its reason and what it changes in what the results mean (DESIGN: a degraded check is recorded in
-    every point)."""
+    its reason and what it changes in what the results mean (docs/HARDWARE.md, the preflight)."""
     try:
         data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:

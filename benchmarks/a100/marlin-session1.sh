@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# marlin-session1.sh [--fallback]: session 1 of the Marlin dry run on the box (DESIGN.md §8), from the workstation, with
-# the GPU free (no campaign running) and the box at a revision that has benchmarks/a100. About 25 minutes of GPU time:
+# marlin-session1.sh [--fallback]: session 1 of the Marlin dry run on the box (docs/HARDWARE.md, the Marlin dry run),
+# from the workstation, with the GPU free (no campaign running) and the box at a revision that has benchmarks/a100.
+# About 25 minutes of GPU time:
 #   1. the same day's reference: the frozen engine (DeepGEMM W8A8) with the measurement drop-in on (variant.sh
 #      measure on: /server_info, which step 2 reads), E0 with 3 reps from cyan (lh-bench tiers, through the tunnel)
 #   2. the frozen engine with the linear layers on Marlin (--linear-backend marlin): the engine log must show

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# run.sh [--until HH:MM] [--cap TOKENS] [BLOCK...]: the A100 run on this host (DESIGN.md §5.3), block by block. A block
-# is complete when it ends, a block done before is skipped, so that a rerun resumes and a stop anywhere leaves whole
-# comparisons; without BLOCK it runs the core, 0 to 10, in order. Started from an SSH session, it outlives the session:
+# run.sh [--until HH:MM] [--cap TOKENS] [BLOCK...]: the A100 run on this host (docs/HARDWARE.md, the core block by
+# block), block by block. A block is complete when it ends, a block done before is skipped, so that a rerun resumes and
+# a stop anywhere leaves whole comparisons; without BLOCK it runs the core, 0 to 10, in order. Started from an SSH
+# session, it outlives the session:
 #   nohup setsid bash ~/leaseholder/src/benchmarks/a100/run.sh >>~/leaseholder/runs/a100/run.log 2>&1 </dev/null &
 # The core:
 #   0     bootstrap.sh gpu and warm (the preflight with the card, each compile configuration started once), the
@@ -11,12 +12,12 @@
 #   5     the calibration point (calibration.sh, 16 sessions)
 #   6-9   E2 rounds 2 to 5
 #   10    the GPU units stopped; the records stay for deploy/a100/pull.sh
-# The optional arms (DESIGN.md §5.4), by name, in DESIGN's order: cprime (cprime.sh), branches (branches.sh run, once
-# branches.sh stage has built the two envs), resubmit (the stock engine behind the gateway's preempt-resubmit, seeds
-# 13 to 15), batch (batch.sh) and aprime (the box's pool at 32 sessions, two rounds).
-# --until HH:MM (UTC; tomorrow's when today's has passed) starts no block that DESIGN's estimate says cannot end before
-# then, and hands the deadline to each campaign, which then starts no point that cannot. Each block's start and end go
-# to ~/leaseholder/runs/a100/blocks.log; a block done leaves blocks/BLOCK.done.
+# The optional arms (docs/HARDWARE.md, the optional arms), by name, in its order: cprime (cprime.sh), branches
+# (branches.sh run, once branches.sh stage has built the two envs), resubmit (the stock engine behind the gateway's
+# preempt-resubmit, seeds 13 to 15), batch (batch.sh) and aprime (the box's pool at 32 sessions, two rounds).
+# --until HH:MM (UTC; tomorrow's when today's has passed) starts no block that the page's estimate says cannot end
+# before then, and hands the deadline to each campaign, which then starts no point that cannot. Each block's start
+# and end go to ~/leaseholder/runs/a100/blocks.log; a block done leaves blocks/BLOCK.done.
 set -euo pipefail
 usage() { echo "usage: run.sh [--until HH:MM] [--cap TOKENS] [BLOCK...]" >&2; exit 2; }
 until="" cap=1536
@@ -50,7 +51,7 @@ if [[ -n $until ]]; then
   ((deadline > now)) || deadline=$((deadline + 86400))
 fi
 
-# DESIGN.md §5.3's estimates, in minutes, for --until (block 0 assumes staging did not warm the caches).
+# docs/HARDWARE.md's estimates, in minutes, for --until (block 0 assumes staging did not warm the caches).
 minutes() {
   case $1 in
     0) echo 40 ;; 1) echo 25 ;; 2) echo 26 ;; 3) echo 17 ;; 4) echo 29 ;; 5) echo 17 ;; 6 | 7 | 8 | 9) echo 28 ;;

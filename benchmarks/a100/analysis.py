@@ -1,4 +1,5 @@
-"""The A100 run's analysis (DESIGN.md §6.2), on a CPU, from a single host's records as deploy/a100/pull.sh copies them.
+"""The A100 run's analysis (docs/HARDWARE.md, the analysis), on a CPU, from a single host's records as
+deploy/a100/pull.sh copies them.
 
     python3 benchmarks/a100/analysis.py report HOST_DIR --corpus WEKA_X32 --lh-sim LH_SIM --out OUT [--lh-bench BIN]
     python3 benchmarks/a100/analysis.py calibration-check EXPORTS --corpus WEKA_X32 --lh-sim LH_SIM --out OUT

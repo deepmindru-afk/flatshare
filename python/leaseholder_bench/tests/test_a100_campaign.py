@@ -1,5 +1,5 @@
 """The A100 run's campaign files (benchmarks/a100): the core's five rounds and the optional arms' campaigns name arm
-files that load, with the seeds and the order DESIGN.md §5.3 gives; probe_results.py reads what probe.py and tail.py
+files that load, with the seeds and the order docs/HARDWARE.md, the core block by block gives; probe_results.py reads what probe.py and tail.py
 print and picks C''s stock arm by P-1's rule; and the run scripts parse."""
 
 from __future__ import annotations

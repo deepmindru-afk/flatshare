@@ -35,7 +35,7 @@ What the measurements say:
 | What stock priority scheduling does about it | vLLM preempts among running requests, but a waiting voice turn cannot preempt running work when the KV cache is full ([#40004](https://github.com/vllm-project/vllm/issues/40004)) |
 | What a control plane in front costs | `lh-gateway` adds **0.38 ms** to a voice request's first token: the paired median against the engine's own socket (W1 build, on cyan) |
 
-The frozen box is the one pinned configuration every experiment runs on: the LLM, STT and TTS servers sharing the GPU. More numbers are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The frozen box is the one pinned configuration every experiment runs on: the LLM, STT and TTS servers sharing the GPU. More numbers are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md); [docs/HARDWARE.md](docs/HARDWARE.md) says what changes on another GPU, how one host runs every part, and how the A100 40 GB run is laid out, with its forecast.
 
 ## How it works
 
@@ -109,10 +109,10 @@ crates/lh-gateway/        the control-plane service in front of vLLM, with its o
 crates/lh-sim/            the KV cache simulator: AIPerf's replay, vLLM's two tiers, policy arms
 python/leaseholder_bench/ trace conversion, AIPerf plugins and configs, latency probes, the E2 harness
 python/leaseholder_voice/ the voice agent, measurement callers, LiveKit integration and its hermetic barge-in test
-benchmarks/               E2's arm files and campaigns, the committed records, and runs against upstream projects
-deploy/                   per-host bootstrap, systemd units, the engine variants' drop-ins, tunnels, smoke test
+benchmarks/               E2's arm files and campaigns, the committed records, runs against upstream projects, the A100 run
+deploy/                   per-host bootstrap, hardware profiles, systemd units, the engine variants' drop-ins, tunnels, single-host mode, smoke test
 ops/                      the runbook; dashboards and alert rules are planned
-docs/                     architecture, protocol, SLOs, experiments, benchmarks, production guide, methods, prior art, ADRs, figures
+docs/                     architecture, protocol, SLOs, experiments, benchmarks, production guide, hardware, methods, prior art, ADRs, figures
 ```
 
 ## Why not llm-d, Dynamo or vllm-project/router?

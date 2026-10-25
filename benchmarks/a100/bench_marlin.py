@@ -1,13 +1,13 @@
-"""bench_marlin.py: Qwen3-4B-Instruct-2507-FP8's linear layers on this GPU, kernel against kernel (DESIGN.md §8,
-session 2 of the Marlin dry run): the time of one layer's GEMM for M tokens, as vLLM 0.32.0 runs it,
-- Marlin: the FP8 checkpoint's block-scaled weights through MarlinFP8ScaledMMLinearKernel's path, W8A16
-  (process_fp8_weight_block_strategy, prepare_fp8_layer_for_marlin, apply_fp8_marlin_linear: vLLM's marlin_gemm);
-- BF16: torch's GEMM on the same weights in BF16, the rate Marlin's factor is taken against;
-- DeepGEMM: DeepGemmFp8BlockScaledMMKernel's path, W8A8 (the activations' per-token-group FP8 quantization and
-  fp8_gemm_nt), where the card runs it (sm90, sm100, sm120; the box's own path);
-at the model's four shapes, qkv 2,560 to 6,144, o 4,096 to 2,560, gate_up 2,560 to 19,456 and down 9,728 to 2,560,
-for each M of --m. Each time is the median of --iters CUDA-event timings, the L2 flushed before each by writing a
-buffer twice its size. Run it with the engine venv's Python on the GPU with the engine stopped:
+"""bench_marlin.py: Qwen3-4B-Instruct-2507-FP8's linear layers on this GPU, kernel against kernel (docs/HARDWARE.md, the
+Marlin dry run, session 2 of the Marlin dry run): the time of one layer's GEMM for M tokens, as vLLM 0.32.0 runs it, -
+Marlin: the FP8 checkpoint's block-scaled weights through MarlinFP8ScaledMMLinearKernel's path, W8A16
+(process_fp8_weight_block_strategy, prepare_fp8_layer_for_marlin, apply_fp8_marlin_linear: vLLM's marlin_gemm); - BF16:
+torch's GEMM on the same weights in BF16, the rate Marlin's factor is taken against; - DeepGEMM:
+DeepGemmFp8BlockScaledMMKernel's path, W8A8 (the activations' per-token-group FP8 quantization and fp8_gemm_nt), where
+the card runs it (sm90, sm100, sm120; the box's own path); at the model's four shapes, qkv 2,560 to 6,144, o 4,096 to
+2,560, gate_up 2,560 to 19,456 and down 9,728 to 2,560, for each M of --m. Each time is the median of --iters CUDA-event
+timings, the L2 flushed before each by writing a buffer twice its size. Run it with the engine venv's Python on the GPU
+with the engine stopped:
 
     ~/leaseholder/venvs/engine/bin/python benchmarks/a100/bench_marlin.py --m 1,16,64,128,256,512,1024 --out gemm.csv
 

@@ -27,9 +27,10 @@ never replaced.
 `jit-check` builds FlashInfer's top-k/top-p sampler, the kernel the engine JIT-compiles at its first start on this
 card (vLLM 0.32.0 samples with FlashInfer on CUDA cards of more than 16 SMs), with the engine unit's environment and
 the GPU's architecture, into the engine's own FlashInfer workspace: a check of the compiler, its headers and the link
-that needs no GPU, and so runs before the billed clock. `preflight` checks what the campaign depends on (DESIGN.md
-§3): each check ok, degraded with a named reason and what that changes in what results mean, refused, or pending
-(it needs the GPU or the engine's first start); with --gpu it also runs the checks that need the card. `warm` starts
+that needs no GPU, and so runs before the billed clock. `preflight` checks what the campaign depends on
+(docs/HARDWARE.md, the preflight): each check ok, degraded with a named reason and what that changes in what results
+mean, refused, or pending (it needs the GPU or the engine's first start); with --gpu it also runs the checks that
+need the card. `warm` starts
 the GPU units once per compile configuration the campaign uses (vLLM's compile cache is keyed by the step cap, not
 by the scheduler class, so make-room shares the frozen engine's), each to ready, and keeps each start's time, the
 engine log's kernel, attention and cache lines, /server_info's scheduler and /metrics' cache geometry, with the
@@ -105,7 +106,7 @@ WARM = (
     ),
 )
 """The core's compile configurations: the frozen box's 512-token step cap (make-room's too), vLLM's default 2,048/0
-and the time-equivalent cap (DESIGN.md R4, its central value; T = B/2)."""
+and the time-equivalent cap (docs/HARDWARE.md's R4, its central value; T = B/2)."""
 ENGINE_LINES = re.compile(
     r"Selected \S+ for Fp8LinearMethod|native support for FP8|Using \S+ attention backend|"
     r"Using FlashAttention version|Using \S+ KV cache layout|cudaHostRegister|top-p & top-k sampling|"
@@ -701,7 +702,7 @@ def preflight(
     data: tuple[str, ...] = ("weka-x32-long", "weka-x32", "callers"),
     gateway_url: str = GATEWAY_URL,
 ) -> list[Check]:
-    """Every check, in DESIGN.md §3's order."""
+    """Every check, in docs/HARDWARE.md's order (the preflight)."""
     home = home or _home()
     root = home / "leaseholder"
     host, values = node.host, node.node["values"]

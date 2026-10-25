@@ -110,9 +110,9 @@ forecast-a100:
 	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu a100-40gb --markdown benchmarks/a100/forecast.md >/dev/null
 	@ls benchmarks/a100/forecast.md
 
-# The A100 run's analysis (benchmarks/a100/analysis.py, DESIGN.md §6.2) from a single host's records as
-# deploy/a100/pull.sh copies them, and the 32x corpus, into build/reproduce-a100/a100.md, with the bench venv for E2's
-# report. check-a100-calibration first runs its calibration code on the box's W2 points (the calibration exports, as
+# The A100 run's analysis (benchmarks/a100/analysis.py; docs/HARDWARE.md, the analysis) from a single host's records
+# as deploy/a100/pull.sh copies them, and the 32x corpus, into build/reproduce-a100/a100.md, with the bench venv for
+# E2's report. check-a100-calibration runs its calibration code on the box's W2 points (the calibration exports, as
 # reproduce-calibration takes them) and checks that it gives the box's rows. Usage: make reproduce-a100 RECORDS=<dir>
 # CORPUS=<dir>; make check-a100-calibration EXPORTS=<dir> CORPUS=<dir>.
 A100_REPORT ?= build/reproduce-a100

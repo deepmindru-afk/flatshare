@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# batch.sh [--rounds N]: the A100 run's optional arm 4 (DESIGN.md §5.4, P-1's slot S-7), on this host: the scheduler's
-# cost at a datacenter batch. vllm bench serve keeps 256 requests in flight on the core's engine, 26 of them (10%) at
-# priority 0 and 230 at priority 2 (two clients side by side, each its requests' priority in --extra-body), random
-# 1,024-token prompts and 256 output tokens, N rounds (20) of each client's concurrency, on three engines in turn:
-# frozen (stock vLLM 0.32.0), make-room with its switches off (its code path, nothing it does), and make-room with
-# the PRs' values. Each client's result (vllm bench serve's JSON: request and output throughput, TTFT, TPOT and ITL
-# percentiles) goes to ~/leaseholder/runs/a100/batch/ENGINE-pPRIORITY.json; a result already there is kept.
+# batch.sh [--rounds N]: the A100 run's optional arm 4 (docs/HARDWARE.md, the optional arms, P-1's slot S-7), on this
+# host: the scheduler's cost at a datacenter batch. vllm bench serve keeps 256 requests in flight on the core's engine,
+# 26 of them (10%) at priority 0 and 230 at priority 2 (two clients side by side, each its requests' priority in
+# --extra-body), random 1,024-token prompts and 256 output tokens, N rounds (20) of each client's concurrency, on three
+# engines in turn: frozen (stock vLLM 0.32.0), make-room with its switches off (its code path, nothing it does), and
+# make-room with the PRs' values. Each client's result (vllm bench serve's JSON: request and output throughput, TTFT,
+# TPOT and ITL percentiles) goes to ~/leaseholder/runs/a100/batch/ENGINE-pPRIORITY.json; a result already there is kept.
 # vllm bench serve speaks TCP and the engine serves on its socket only: the clients reach it through
 # deploy/bin/lh-forward, from a loopback port (LH_FORWARD_PORT, 18000) to the socket, on their own cores, the same
 # hop for each engine.

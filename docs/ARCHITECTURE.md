@@ -77,6 +77,8 @@ Every measurement runs on one pinned configuration with the audio models on the 
 | **cyan** | The control host: `lh-gateway`, LiveKit and the voice worker, the measurement callers and AIPerf, each on its own cores |
 | **peacock** | Linux release builds of `lh-gateway` and `lh-sim`, and simulator runs |
 
+Another GPU node's files come from a hardware profile (`deploy/profiles/`, rendered by `deploy/profile.py`, which renders the box's own files byte for byte), and a host without cyan beside it runs the GPU servers and the control plane together, on loopback and its own cores, under systemd or a small supervisor where it has none ([HARDWARE.md](HARDWARE.md)).
+
 ### 3.3 Network and security
 
 See [ADR-0005](adr/0005-loopback-services-and-node-sticky-kv.md).
