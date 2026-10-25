@@ -14,7 +14,9 @@
 #   3. fetches that run directory into $LH_E2_RESULTS/CAMPAIGN/POINT (default ~/leaseholder/runs/e2).
 # A complete point is skipped, so running a stopped campaign again resumes it; the first failure stops it. At the end
 # it writes the campaign's frontier (lh-bench e2 report, fetched into CAMPAIGN/report) and puts cyan's units back
-# (lh-bench e2 reset). --pause then stops the GPU node's units. --dry-run copies and checks every arm file and lists
+# (lh-bench e2 reset). --pause then stops the GPU node's units. A campaign that fails once it has switched the node
+# puts cyan's units back and pauses too, unless a point may still be running on cyan (the lock is held, or the
+# connection to cyan was lost): then it leaves both as they are, and says so. --dry-run copies and checks every arm file and lists
 # the points with their engines, without switching or measuring anything. LH_SSH is your ssh command for the hosts,
 # as for deploy.sh; LH_CYAN names cyan, and LH_GPU the GPU node every point of the campaign runs on, one host, which
 # run.json names after its first label (phastform for phastform.cis.upenn.edu). LH_PROFILE names the GPU node's hardware
@@ -146,8 +148,10 @@ rsync -a -e "$ssh" "${arms[@]}" "$cyan:$runs/arms/"
 engines=()
 for point in "${points[@]}"; do
   state="{ $(complete "$point") && echo complete || echo pending; }"
-  answer=$($ssh "$cyan" "$bench e2 engine $runs/arms/$point.toml && $state") ||
-    die "$point: its arm file does not load (above)"
+  status=0
+  answer=$($ssh "$cyan" "$bench e2 engine $runs/arms/$point.toml && $state") || status=$?
+  ((status != 255)) || die "$point: lost the connection to cyan (ssh exit status 255)"
+  ((status == 0)) || die "$point: its arm file does not load (above)"
   engines+=("${answer%%$'\n'*}")
   log "$point: ${answer#*$'\n'}, engine ${answer%%$'\n'*}"
 done
@@ -163,7 +167,33 @@ fetch() { # fetch POINT: mirror its run directory, without AIPerf's copy of the 
 # comment, says which (lh-bench's record reads that GPU's rows alone).
 gpu_query=timestamp,clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_event_reasons.active,name,uuid
 sampler=""
-trap '[[ -z $sampler ]] || kill "$sampler" 2>/dev/null' EXIT
+restore() { # put cyan's units back and, with --pause, stop the GPU node's units
+  $ssh "$cyan" "$bench e2 reset" 2>&1 | tee -a "$results/campaign.log" ||
+    { log "campaign: lh-bench e2 reset failed"; return 1; }
+  if $pause; then
+    # Naming the units makes systemctl wait for their stops too, not only the target's, which returns at once: a
+    # campaign started right after would otherwise meet an engine still shutting down.
+    $ssh "$gpu" systemctl --user stop leaseholder.target lh-engine lh-stt lh-tts ||
+      { log "campaign: the units of $node did not stop"; return 1; }
+    log "$node is paused; start it again with systemctl --user start leaseholder.target"
+  fi
+}
+# changed: the GPU node was switched; busy: a point may still be running on cyan, which a reset or a pause would spoil;
+# ended: the campaign's end ran restore itself.
+changed=false busy=false ended=false
+finish() {
+  local status=$?
+  if [[ -n $sampler ]]; then kill "$sampler" 2>/dev/null || true; fi
+  if $changed && ! $ended; then
+    if $busy; then
+      log "campaign: cyan's units and the GPU node stay as they are: a point may still be running on cyan"
+    else
+      restore || true
+    fi
+  fi
+  exit "$status"
+}
+trap finish EXIT
 sample_gpu() { # sample_gpu POINT
   $ssh "$gpu" "if [ -n \"\${LH_GPU_ID:-}\" ]; then echo \"# gpu \$LH_GPU_ID\"; fi
     exec env TZ=UTC stdbuf -oL nvidia-smi \${LH_GPU_ID:+-i \"\$LH_GPU_ID\"} --query-gpu=$gpu_query --format=csv,noheader -l 1" \
@@ -213,7 +243,12 @@ minutes() { # minutes ARM ENGINE PREVIOUS
 previous=""
 for i in "${!points[@]}"; do
   point=${points[$i]}
-  if $ssh "$cyan" "$(complete "$point")"; then
+  status=0
+  $ssh "$cyan" "$(complete "$point")" || status=$?
+  if ((status == 255)); then
+    busy=true
+    die "$point: lost the connection to cyan (ssh exit status 255)"
+  elif ((status == 0)); then
     fetch "$point"
     previous=${engines[$i]}
     continue
@@ -229,8 +264,14 @@ for i in "${!points[@]}"; do
   [[ ${engines[$i]} == "$previous" ]] || switching=true
   previous=${engines[$i]}
   # A point whose ssh session dropped may still be running on cyan; switching the engine would spoil it.
-  $ssh "$cyan" flock -n leaseholder/runs/.lh-bench-e2.lock true ||
+  status=0
+  $ssh "$cyan" flock -n leaseholder/runs/.lh-bench-e2.lock true || status=$?
+  if ((status)); then
+    busy=true
+    ((status != 255)) || die "$point: lost the connection to cyan (ssh exit status 255)"
     die "a point is still running on cyan (its pid is in leaseholder/runs/.lh-bench-e2.lock); run again once it ends"
+  fi
+  changed=true
   switched=$(date -u +%s)
   log "$point: $node runs ${engines[$i]}"
   variant="bash $node_dir/variant.sh"
@@ -250,6 +291,7 @@ for i in "${!points[@]}"; do
     tee -a "$results/campaign.log" || status=$?
   stop_gpu "$point"
   if ((status == 255)); then
+    busy=true
     die "$point: lost the connection to cyan; the point may still be running there"
   elif ((status)); then
     fetch "$point" || true
@@ -265,11 +307,6 @@ log "the frontier of $name"
 $ssh "$cyan" "$bench e2 report$dirs --out $runs/report" 2>&1 | tee -a "$results/campaign.log" ||
   die "lh-bench e2 report failed"
 rsync -a --delete -e "$ssh" "$cyan:$runs/report/" "$results/report/"
-$ssh "$cyan" "$bench e2 reset" 2>&1 | tee -a "$results/campaign.log" || die "lh-bench e2 reset failed"
-if $pause; then
-  # Naming the units makes systemctl wait for their stops too, not only the target's, which returns at once: a
-  # campaign started right after would otherwise meet an engine still shutting down.
-  $ssh "$gpu" systemctl --user stop leaseholder.target lh-engine lh-stt lh-tts || die "the units of $node did not stop"
-  log "$node is paused; start it again with systemctl --user start leaseholder.target"
-fi
+ended=true
+restore || exit 1
 log "done: $results/report/frontier.md"

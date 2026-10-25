@@ -385,6 +385,62 @@ def test_until_epoch_is_one_deadline_that_has_no_tomorrow(hosts: Hosts) -> None:
     assert hosts.run(campaign, "--until-epoch", "soon").returncode == 2
 
 
+STOP = "systemctl --user stop leaseholder.target lh-engine lh-stt lh-tts"
+"""What --pause asks of the GPU node's user manager."""
+LEFT = "cyan's units and the GPU node stay as they are: a point may still be running on cyan"
+
+
+def test_a_failed_campaign_puts_cyan_back_and_with_pause_stops_the_node(hosts: Hosts) -> None:
+    # A failure ended the campaign before its end put cyan's units back and paused the GPU node, so
+    # a failed campaign left the node running and cyan on the failed arm's overlay.
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c13", ["arms/a1.toml", "arms/a2.toml"], {"a1": VOICE, "a2": VOICE})
+    done = hosts.run(campaign, "--pause", FAKE_E2_FAIL="a2")
+    assert done.returncode == 1
+    log = (hosts.results / "c13" / "campaign.log").read_text()
+    assert "a2 failed (exit status 1)" in log
+    assert hosts.calls("cyan", "lh-bench")[-1] == "lh-bench e2 reset"
+    assert hosts.calls(PHASTFORM, "systemctl") == [STOP]
+    assert "phastform is paused" in log
+
+
+def test_a_lost_connection_to_cyan_is_said_so_and_touches_nothing(hosts: Hosts) -> None:
+    # A probe of whether a point is complete that lost its connection read as an incomplete point,
+    # and the lock's probe after it as a point still running on cyan.
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c14", ["arms/a1.toml", "arms/a2.toml"], {"a1": VOICE, "a2": VOICE})
+    done = hosts.run(campaign, "--pause", FAKE_SSH_DOWN=r"cyan:^grep .*/a2/run\.json")
+    assert done.returncode == 1
+    log = (hosts.results / "c14" / "campaign.log").read_text()
+    assert "a2: lost the connection to cyan (ssh exit status 255)" in log
+    assert "still running" not in log.replace(LEFT, "")
+    assert len(runs(hosts)) == 1  # a1's
+    assert hosts.calls(PHASTFORM, "systemctl") == [] and LEFT in log
+
+
+def test_a_point_still_running_on_cyan_is_left_to_end(hosts: Hosts) -> None:
+    # The lock is held when a's point comes: a point of an earlier campaign whose ssh dropped runs
+    # on, and neither cyan's units nor the node may change under it.
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c15", ["arms/a1.toml", "arms/a2.toml"], {"a1": VOICE, "a2": VOICE})
+    done = hosts.run(campaign, "--pause", FAKE_FLOCK_HELD="2")
+    assert done.returncode == 1
+    log = (hosts.results / "c15" / "campaign.log").read_text()
+    assert "a point is still running on cyan" in log and LEFT in log
+    assert "lh-bench e2 reset" not in hosts.calls("cyan", "lh-bench")
+    assert hosts.calls(PHASTFORM, "systemctl") == []
+
+
+def test_a_point_whose_connection_dropped_is_left_to_end(hosts: Hosts) -> None:
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c16", ["arms/a1.toml"], {"a1": VOICE})
+    done = hosts.run(campaign, "--pause", FAKE_SSH_DOWN="cyan:e2 run ")
+    assert done.returncode == 1
+    log = (hosts.results / "c16" / "campaign.log").read_text()
+    assert "a1: lost the connection to cyan; the point may still be running there" in log
+    assert hosts.calls(PHASTFORM, "systemctl") == [] and LEFT in log
+
+
 def test_pull_copies_a_single_hosts_results_and_runs(hosts: Hosts, tmp_path: Path) -> None:
     home = hosts.home("a100")
     (home / "leaseholder" / "results" / "e2" / "core").mkdir(parents=True)
