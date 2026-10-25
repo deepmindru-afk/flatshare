@@ -678,11 +678,20 @@ def test_a_stopped_step_is_given_the_time_its_tools_take_to_stop(tmp_path: Path)
     assert host_sh("state", "point").stdout.strip() == "done 143"
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+def host_state(home: Path, name: str, **env: str) -> str:
+    """host.sh state NAME, with HOME and any of the environment given."""
+    done = subprocess.run(
+        ["bash", str(HOST_SH), "state", name],
+        env=os.environ | {"HOME": str(home)} | env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return done.stdout.strip()
 
 
-@pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="reads /proc (Linux)")
+@PROC
 def test_a_running_step_reads_as_running_whatever_its_environment_holds(tmp_path: Path) -> None:
     # host.sh tells a step's process by LH_REHEARSAL_STEP in its /proc/PID/environ. Read through tr and grep -q under
     # pipefail, tr died of SIGPIPE once grep had matched while more of the environment was to come, and the running
@@ -699,14 +708,118 @@ def test_a_running_step_reads_as_running_whatever_its_environment_holds(tmp_path
     step = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env)
     try:
         (steps / "stage.pid").write_text(f"{step.pid}\n")
-        done = subprocess.run(
-            ["bash", str(HOST_SH), "state", "stage"],
-            env=os.environ | {"HOME": str(tmp_path)},
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert done.stdout.strip() == f"running {step.pid}", done.stdout + done.stderr
+        assert host_state(tmp_path, "stage") == f"running {step.pid}"
     finally:
         step.kill()
         step.wait()
+
+
+def test_a_steps_status_once_written_is_final_whatever_its_pid_names(tmp_path: Path) -> None:
+    # Once its status is written, a step reads done although its pid names a live process, as one reused since can:
+    # here this test's own, which where no /proc tells a process's mark (macOS) would read as running.
+    steps = tmp_path / ".rehearsal" / "steps"
+    steps.mkdir(parents=True)
+    (steps / "stage.pid").write_text(f"{os.getpid()}\n")
+    (steps / "stage.status").write_text("0\n")
+    assert host_state(tmp_path, "stage") == "done 0"
+
+
+@PROC
+def test_a_step_that_ends_while_its_process_is_looked_at_reads_done(tmp_path: Path) -> None:
+    # state looks at the status, then the process, then the status again: a step writes its status before it exits,
+    # so one seen gone has written any status it was to write. Here the step ends during the look at its process: a
+    # grep that reads its environment writes its status, and answers that the mark is gone.
+    steps = tmp_path / ".rehearsal" / "steps"
+    steps.mkdir(parents=True)
+    status = shlex.quote(str(steps / "stage.status"))
+    write(tmp_path / "bin" / "grep", f"#!/bin/sh\necho 0 >{status}\nexit 1\n", 0o755)
+    env = os.environ | {"LH_REHEARSAL_STEP": "stage"}
+    step = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env)
+    try:
+        (steps / "stage.pid").write_text(f"{step.pid}\n")
+        path = f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"
+        assert host_state(tmp_path, "stage", PATH=path) == "done 0"
+    finally:
+        step.kill()
+        step.wait()
+
+
+@PROC
+def test_a_pid_file_naming_another_live_process_reads_as_no_running_step(tmp_path: Path) -> None:
+    # A process is the step's only while its environment carries the step's mark, and a status once written is final.
+    # A pid file that names another live process of this user reads died, whether its environment lacks the mark or
+    # cannot be read (a non-dumpable process, as ssh-agent is: prctl PR_SET_DUMPABLE 0), and done once the step's
+    # status is written.
+    steps = tmp_path / ".rehearsal" / "steps"
+    steps.mkdir(parents=True)
+    rest = {k: v for k, v in os.environ.items() if k != "LH_REHEARSAL_STEP"}
+    sleep = "import time; time.sleep(60)"
+    hidden = "import ctypes; ctypes.CDLL(None).prctl(4, 0, 0, 0, 0); " + sleep
+    plain = subprocess.Popen([sys.executable, "-c", sleep], env=rest)
+    marked = rest | {"LH_REHEARSAL_STEP": "stage"}
+    agent = subprocess.Popen([sys.executable, "-c", hidden], env=marked)
+    try:
+        deadline = time.monotonic() + 10
+        while os.access(f"/proc/{agent.pid}/environ", os.R_OK):
+            assert time.monotonic() < deadline, "the process stayed dumpable"
+            time.sleep(0.05)
+        for process in (plain, agent):
+            (steps / "stage.pid").write_text(f"{process.pid}\n")
+            (steps / "stage.status").unlink(missing_ok=True)
+            assert host_state(tmp_path, "stage") == f"died {process.pid}"
+            (steps / "stage.status").write_text("0\n")
+            assert host_state(tmp_path, "stage") == "done 0"
+    finally:
+        for process in (plain, agent):
+            process.kill()
+            process.wait()
+
+
+def test_wait_follows_a_log_that_grows_as_it_is_read(tmp_path: Path) -> None:
+    # wait shows the step's log up to the size it saw. A log that grows past that size before it is read must not end
+    # wait: read with tail in front of head, under pipefail, tail died of SIGPIPE once head had its bytes, and wait
+    # exited 141, which rehearse.sh takes for the step's status. Here wc grows the log by 1 MiB as it answers.
+    home = tmp_path / "home"
+    home.mkdir()
+    log = shlex.quote(str(home / ".rehearsal" / "steps" / "burst.log"))
+    grow = f'#!/usr/bin/env bash\ncommand -p wc "$@"\nstatus=$?\nhead -c 1048576 /dev/zero >>{log}\nexit $status\n'
+    write(tmp_path / "bin" / "wc", grow, 0o755)
+
+    def host_sh(*args: str, **more: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ | {"HOME": str(home), "REHEARSAL_POLL_S": "0.1"} | more
+        return subprocess.run(
+            ["bash", str(HOST_SH), *args], env=env, capture_output=True, text=True, timeout=60
+        )
+
+    assert host_sh("start", "burst", "echo a burst of output; exit 7").returncode == 0
+    deadline = time.monotonic() + 10
+    while host_state(home, "burst") != "done 7":
+        assert time.monotonic() < deadline, host_state(home, "burst")
+        time.sleep(0.05)
+    waited = host_sh("wait", "burst", PATH=f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}")
+    assert waited.returncode == 7, waited.stdout + waited.stderr
+    assert "a burst of output" in waited.stdout and "burst ended, exit status 7" in waited.stdout
+
+
+def test_a_step_that_ends_before_its_pid_file_is_written_does_not_start(tmp_path: Path) -> None:
+    # start returns once the step's bash has written its pid file, and fails, its command not run, when that bash
+    # ends first: here the pid file's temporary name is a directory. It waited 5 s for the pid file, then returned 0
+    # with the command run unwatched.
+    home = tmp_path / "home"
+    (home / ".rehearsal" / "steps" / "lost.pid.new").mkdir(parents=True)
+    ran = tmp_path / "ran"
+    started = subprocess.run(
+        ["bash", str(HOST_SH), "start", "lost", f"touch {shlex.quote(str(ran))}"],
+        env=os.environ | {"HOME": str(home)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert started.returncode == 1, started.stdout + started.stderr
+    assert "rehearsal: lost did not start" in started.stdout
+    time.sleep(0.5)
+    assert not ran.exists() and host_state(home, "lost") == "none"
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-q"]))

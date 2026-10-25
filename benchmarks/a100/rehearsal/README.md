@@ -396,7 +396,8 @@ It holds:
   - `cleanup` fails where the host does not answer whether it has the rehearsal's home.
 - **Resuming:**
   - a step done is not run again;
-  - a step on the host outlives the call that started it, is not started twice, gives its exit status even when its command calls `exit`, and is ended by `stop`, which waits for its whole process group, not its leader alone.
+  - a step on the host outlives the call that started it, is not started twice, gives its exit status even when its command calls `exit`, and is ended by `stop`, which waits for its whole process group, not its leader alone;
+  - a step's state is done once its status is written, and running only while its pid names a process with the step's mark (Linux); `wait` follows a log that grows as it is read; `start` fails, its command not run, when the step ends before its pid file is written.
 - **Block 0:**
   - a refused audit stops the rehearsal;
   - the audit's degraded line fails block 0's check where the host allows user namespaces, and is the line expected where it refuses them;

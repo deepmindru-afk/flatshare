@@ -13,7 +13,8 @@
 #   purge HOME            the rehearsal's home removed
 # In the rehearsal's environment (bin/rehearsal-ssh sources rehearsal.env first), from its home:
 #   start [--again] NAME COMMAND   COMMAND detached from the SSH session (its own session, stdin /dev/null), its
-#             output in .rehearsal/steps/NAME.log, its exit status in NAME.status; nothing if it runs already, or if
+#             output in .rehearsal/steps/NAME.log, its exit status in NAME.status, once its pid file is written
+#             (it fails, COMMAND not run, if the step's bash cannot write it); nothing if it runs already, or if
 #             it is done and --again is not given
 #   wait NAME             follow the step's log until it ends; exit with its status (254 for a status of 255)
 #   state NAME            done STATUS, running PID, died PID (gone without a status) or none
@@ -349,14 +350,20 @@ purge() {
 steps=$HOME/.rehearsal/steps
 
 state() {
-  local base=$steps/$1 pid=""
-  [[ ! -f $base.pid ]] || pid=$(cat "$base.pid")
-  # The process first, then its status: a step writes its status before it exits, so one seen gone has written any
-  # status it was to write (the other order misreads a step that ends between the two looks as died). On Linux the
-  # process must be the step's own (LH_REHEARSAL_STEP in its environment), not a pid reused since; grep reads the file
-  # itself, as behind a pipe under pipefail its exit at the first match can kill the writer (SIGPIPE).
+  local base=$steps/$1 pid
+  # A status, once written, is final, whatever process its pid names by now.
+  if [[ -f $base.status ]]; then
+    echo "done $(cat "$base.status")"
+    return 0
+  fi
+  pid=$(cat "$base.pid" 2>/dev/null || true)
+  # Then the process, then the status again: a step writes its status before it exits, so one seen gone has written
+  # any status it was to write (without the second look a step that ends between the two reads as died). On Linux
+  # the process must be the step's own (LH_REHEARSAL_STEP in its environment), not a pid reused since: one whose
+  # environment cannot be read (another user's, or a non-dumpable one of this user's, as ssh-agent is) is not. grep
+  # reads the file itself, as behind a pipe under pipefail its exit at the first match can kill the writer (SIGPIPE).
   if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null &&
-    { [[ ! -r /proc/$pid/environ ]] || grep -qzx "LH_REHEARSAL_STEP=$1" "/proc/$pid/environ"; }; then
+    { [[ ! -d /proc/self ]] || grep -qzx "LH_REHEARSAL_STEP=$1" "/proc/$pid/environ" 2>/dev/null; }; then
     echo "running $pid"
   elif [[ -f $base.status ]]; then
     echo "done $(cat "$base.status")"
@@ -368,7 +375,7 @@ state() {
 }
 
 start() {
-  local again=false name command base i
+  local again=false name command base
   if [[ $1 == --again ]]; then
     again=true
     shift
@@ -394,9 +401,17 @@ start() {
   LH_REHEARSAL_STEP=$name python3 -c '
 import os
 import sys
+import time
 
 base, command = sys.argv[1], sys.argv[2]
-if os.fork():
+child = os.fork()
+if child:
+    # The parent returns once the bash of the step has written its pid file, so that start reads the step as
+    # running, or fails once that bash has ended without writing it, which no fixed wait could tell from a slow start.
+    while not os.path.exists(base + ".pid"):
+        if os.waitpid(child, os.WNOHANG)[0]:
+            os._exit(0 if os.path.exists(base + ".pid") else 1)
+        time.sleep(0.01)
     os._exit(0)
 os.setsid()
 log = os.open(base + ".log", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -405,18 +420,15 @@ os.dup2(null, 0)
 os.dup2(log, 1)
 os.dup2(log, 2)
 # The bash of the step writes the pid file once the exec is done: until then /proc/PID/environ reads empty, and the
-# step would read as died. The command runs in a subshell, so that an exit in it ends the subshell alone, and the
-# status is still written.
+# step would read as died. A bash that cannot write it ends there, its command not run. The command runs in a
+# subshell, so that an exit in it ends the subshell alone, and the status is still written.
 script = (
-    "echo $$ >\"$0.pid.new\" && mv \"$0.pid.new\" \"$0.pid\"\n(\n" + command + "\n)\n"
+    "{ echo $$ >\"$0.pid.new\" && mv \"$0.pid.new\" \"$0.pid\"; } || exit 1\n(\n" + command + "\n)\n"
     "status=$?\necho $status >\"$0.status.new\" && mv \"$0.status.new\" \"$0.status\"\nexit $status\n"
 )
 os.execvp("bash", ["bash", "-c", script, base])
-' "$base" "$command"
-  for i in $(seq 50); do
-    [[ ! -f $base.pid ]] || break
-    sleep 0.1
-  done
+' "$base" "$command" ||
+    { echo "rehearsal: $name did not start: its bash ended with no pid file (.rehearsal/steps/$name.log)"; return 1; }
   echo "rehearsal: $name started ($(state "$name"))"
 }
 
@@ -428,7 +440,9 @@ wait_step() {
     s=$(state "$name")
     size=$(wc -c <"$base.log" 2>/dev/null | tr -d ' ' || echo 0)
     if ((size > shown)); then
-      tail -c +$((shown + 1)) "$base.log" | head -c $((size - shown))
+      # The log's first SIZE bytes, then those not shown yet: no reader of the pipe stops early, where head behind
+      # tail, with the log grown past SIZE, would leave tail to die of SIGPIPE, and wait with it (pipefail).
+      head -c "$size" "$base.log" | tail -c +$((shown + 1))
       shown=$size
     fi
     case $s in
