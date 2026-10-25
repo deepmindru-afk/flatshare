@@ -19,7 +19,7 @@
 # session, so that a dropped connection loses nothing, and rehearse.sh run again waits for it.
 #   --redo STEP          run STEP again although it is done (repeatable): a step on the host is run again, and a
 #                        block's blocks/N.done on the host removed first, so that run.sh runs the block again
-#   --purge              cleanup also removes the rehearsal's home on the host
+#   --purge              cleanup, run again although it is done, also removes the rehearsal's home on the host
 # The environment: REHEARSAL_HOST (phastform.cis.upenn.edu), REHEARSAL_SSH (the ssh command: LH_SSH, else ssh),
 # REHEARSAL_HOME (a100-rehearsal, a directory under the host's login home), REHEARSAL_REPO (the checkout pushed: the one
 # this script is in), REHEARSAL_CYAN and REHEARSAL_PEACOCK (cyan.cis.upenn.edu, peacock.cis.upenn.edu),
@@ -58,7 +58,7 @@ purge=false redo=" "
 requested=()
 while (($#)); do
   case $1 in
-    --purge) purge=true ;;
+    --purge) purge=true redo+="cleanup " ;;
     --redo)
       [[ " $STEPS " == *" ${2:-} "* ]] || usage
       redo+="$2 "
@@ -141,19 +141,22 @@ step_check() {
 
 step_init() {
   local hub answer
-  hub=$(sed -n 's/^check: hub cache: ok: //p' "$state/check.txt" 2>/dev/null)
+  # Without check.txt no hub cache is named, as the next line says.
+  hub=$(sed -n 's/^check: hub cache: ok: //p' "$state/check.txt" 2>/dev/null || true)
   [[ -n $hub ]] || die "init: state/check.txt names no hub cache (rehearse.sh --redo check check)"
   host_sh init "$rhome" "$hub" || die "init: the rehearsal's home was not made (above)"
   in_rehearsal 'echo "init: the rehearsal environment: HOME $HOME, XDG_RUNTIME_DIR $XDG_RUNTIME_DIR, LH_SUPERVISOR $LH_SUPERVISOR, HF_HUB_CACHE $HF_HUB_CACHE (offline $HF_HUB_OFFLINE), session bus ${DBUS_SESSION_BUS_ADDRESS:-none}"'
   # The box's user manager must be out of the rehearsal's reach: bootstrap.sh, under LH_SUPERVISOR=lh-svc where a user
-  # manager runs, would stop the units of that name it runs (the box's).
-  answer=$(in_rehearsal 'systemctl --user is-system-running 2>&1 || true' | head -1)
-  case $answer in
-    running* | degraded* | starting* | initializing* | maintenance* | stopping*)
-      die "init: the rehearsal's environment reaches the box's user manager ($answer)"
-      ;;
-  esac
-  log "init: the box's user manager is out of the rehearsal's reach (systemctl --user there: ${answer:-nothing})"
+  # manager runs, would stop the units of that name it runs (the box's). Only systemctl's answer that it reaches no
+  # manager passes: "Failed to connect to bus" ("to user scope bus" from systemd 257), or offline where systemd did
+  # not boot the host. Anything else fails: a manager's state, and no answer, as from a dropped connection or
+  # rehearsal-ssh's refusal.
+  answer=$(in_rehearsal 'systemctl --user is-system-running 2>&1 || true') ||
+    die "init: the rehearsal's environment did not answer whether it reaches the box's user manager (above)"
+  answer=${answer%%$'\n'*}
+  [[ $answer == "Failed to connect to "* || $answer == offline* ]] ||
+    die "init: the rehearsal's environment may reach the box's user manager (systemctl --user there: ${answer:-nothing})"
+  log "init: the box's user manager is out of the rehearsal's reach (systemctl --user there: $answer)"
   mark init "~/$rhome on $host"
 }
 
@@ -185,17 +188,21 @@ step_data() {
 }
 
 step_push() {
-  local rev deployed counts
+  local rev deployed counts want="" d
   rev=$(revision)
-  env -u LH_GATEWAY_BIN LH_SSH="$here/bin/rehearsal-ssh" LH_DATA="$data" ${gateway:+LH_GATEWAY_BIN=$gateway} \
+  env -u LH_GATEWAY_BIN LH_SSH="$here/bin/rehearsal-ssh" LH_DATA="$data" ${gateway:+"LH_GATEWAY_BIN=$gateway"} \
     bash "$repo/deploy/a100/push.sh" "$host" || die "push: push.sh failed (above)"
   deployed=$(in_rehearsal cat leaseholder/src/DEPLOYED)
   [[ $deployed == "$rev" ]] || die "push: the rehearsal's DEPLOYED on $host is '$deployed', not $rev"
+  # The host's data as push.sh copies LH_DATA's (-L: the links as files): as many files in each directory, no link.
+  for d in weka-x32 weka-x32-long callers; do
+    want+="$d $(find -L "$data/$d" -type f | wc -l | tr -d ' ') files 0 links; "
+  done
   counts=$(in_rehearsal 'for d in weka-x32 weka-x32-long callers; do
     printf "%s %s files %s links; " $d $(find leaseholder/data/$d -type f | wc -l) $(find leaseholder/data/$d -type l | wc -l)
-    done')
+    done') || die "push: the rehearsal's data on $host was not counted (above)"
   log "push: ~/$rhome/leaseholder on $host: the source at $deployed; $counts"
-  ! grep -Eq '(^| )[1-9][0-9]* links' <<<"$counts" || die "push: links in the host's data (push.sh copies them as files)"
+  [[ $counts == "$want" ]] || die "push: the host's data is not LH_DATA's, copied as files: $want wanted"
   mark push "$deployed; $counts"
 }
 
@@ -269,9 +276,13 @@ step_pull() {
 step_reproduce() {
   local dir=$work/hosts/${host%%.*} out=$work/reproduce there=leaseholder-rehearsal-reproduce corpus_dir section
   "${ssh_cmd[@]}" "$peacock" "mkdir -p $there/src $there/records && cd $there &&
-    find src -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} + && rm -rf records && mkdir records"
-  (cd "$repo" && git ls-files -z | COPYFILE_DISABLE=1 tar --no-xattrs --null -T - -cf -) | "${ssh_cmd[@]}" "$peacock" "tar -xf - -C $there/src"
-  rsync -a -e "$REHEARSAL_SSH" "$dir/" "$peacock:$there/records/"
+    find src -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} + && rm -rf records && mkdir records" ||
+    die "reproduce: ~/$there on $peacock was not emptied for the checkout and the records (above)"
+  (cd "$repo" && git ls-files -z | COPYFILE_DISABLE=1 tar --no-xattrs --null -T - -cf -) |
+    "${ssh_cmd[@]}" "$peacock" "tar -xf - -C $there/src" ||
+    die "reproduce: the checkout was not copied to $peacock (above)"
+  rsync -a -e "$REHEARSAL_SSH" "$dir/" "$peacock:$there/records/" ||
+    die "reproduce: the pulled records were not copied to $peacock (above)"
   corpus_dir=$peacock_corpus
   if ! "${ssh_cmd[@]}" "$peacock" "test -d $peacock_corpus"; then
     log "reproduce: no $peacock_corpus on $peacock: copying this workstation's weka-x32 there"
@@ -292,14 +303,20 @@ step_reproduce() {
 }
 
 step_cleanup() {
-  local status=0 name
-  if ! on_host "test -f $rhome/rehearsal.env"; then
+  local status=0 name home=0
+  # Whether the host has the rehearsal's home: test's 1 is no. Any other failure, as ssh's 255 for a dropped
+  # connection, is no answer, on which cleanup fails rather than passes.
+  on_host "test -f $rhome/rehearsal.env" || home=$?
+  if ((home == 1)); then
     log "cleanup: $host has no ~/$rhome: nothing of the rehearsal to clean"
     mark cleanup "nothing to clean"
-    return
+    return 0
   fi
+  ((home == 0)) || die "cleanup: $host did not answer whether it has ~/$rhome (exit status $home)"
+  # Each stop's line, but those of a step that was not running (none, or done): grep selecting no line is not a
+  # failure, and a stop that fails is.
   for name in $HOST_STEPS; do
-    rehearsal_sh stop "$name" | grep -Ev ': (none|done [0-9]+)$' || true
+    rehearsal_sh stop "$name" | { grep -Ev ': (none|done [0-9]+)$' || true; } || status=1
   done
   rehearsal_sh stop-units || status=1
   host_sh leftovers "$rhome" --kill || status=1
@@ -307,8 +324,12 @@ step_cleanup() {
   # The box's units still as the main session left them, the GPU idle, the ports free again.
   host_sh check-box "$rhome" "18080 17880" "17882" 0 "$(model_of engine.yaml)" "$(model_of stt.yaml)" || status=1
   ((status == 0)) || die "cleanup: something of the rehearsal remains, or the box is not as it was found (above)"
-  if $purge; then host_sh purge "$rhome"; fi
-  mark cleanup "the box's deployment as found$($purge && echo "; ~/$rhome removed")"
+  if $purge; then
+    host_sh purge "$rhome" || die "cleanup: ~/$rhome on $host was not removed (above)"
+    mark cleanup "the box's deployment as found; ~/$rhome removed"
+  else
+    mark cleanup "the box's deployment as found"
+  fi
 }
 
 abort() {
@@ -353,8 +374,16 @@ run_step() {
     die "$step: $previous is not done (rehearse.sh status)"
   fi
   log "$step: start"
-  status=0
-  ("step_$step") 2>&1 | tee -a "$state/logs/$step.log" || status=${PIPESTATUS[0]}
+  # The step in a subshell with set -e, so that a command that fails ends it with its status. Not as `(...) | tee ...
+  # || status=...`: bash ignores set -e in everything on the left of || or &&, a subshell that sets it again included.
+  # So set -e is off only around the pipeline here, whose first status is the step's.
+  set +e
+  (
+    set -e
+    "step_$step"
+  ) 2>&1 | tee -a "$state/logs/$step.log"
+  status=${PIPESTATUS[0]}
+  set -e
   ((status == 0)) || { log "$step: failed, exit status $status (state/logs/$step.log)"; exit "$status"; }
 }
 

@@ -51,7 +51,7 @@ bash rehearse.sh status                    # each step: done or not; each host s
 bash rehearse.sh STEP                      # one step; the steps before it must be done
 bash rehearse.sh --redo STEP STEP          # a step again, although done (on the host too: a block's blocks/N.done goes)
 bash rehearse.sh abort                     # stop what runs on the host, then cleanup
-bash rehearse.sh --purge cleanup           # cleanup, and remove ~/a100-rehearsal on the host
+bash rehearse.sh --purge cleanup           # cleanup, again if done, and remove ~/a100-rehearsal on the host
 ```
 
 **Resumable.** A step done leaves `state/STEP.done` and is skipped from then on.
@@ -99,7 +99,7 @@ The environment it sets:
   The units derive all of these from their `HOME`, which lh-svc gives as the rehearsal's.
 - **lh-svc, and the box's user manager out of reach.**
   - `LH_SUPERVISOR=lh-svc`, which `env.sh` keeps.
-  - The session bus is unset (`DBUS_SESSION_BUS_ADDRESS`), and the runtime directory is not `/run/user/UID`. So `systemctl --user` cannot reach the box's user manager. `init` checks this: in the rehearsal's environment it must not answer `running`.
+  - The session bus is unset (`DBUS_SESSION_BUS_ADDRESS`), and the runtime directory is not `/run/user/UID`. So `systemctl --user` cannot reach the box's user manager. `init` checks this: in the rehearsal's environment it must answer that it cannot connect to a bus.
   - This matters because under `LH_SUPERVISOR=lh-svc`, on a host where a user manager answers, `bootstrap.sh`'s `shell_env` stops that manager's units of the kit's names (`stop_units systemd`). Here those would be the box's own `lh-engine`, `lh-stt` and `lh-tts`.
   - The preflight's "One supervisor" row cannot see the box's units from in here either; `check` reads them instead, in the login environment.
 - **The box's hub cache, read offline.**
@@ -203,11 +203,11 @@ Where the planned minutes came from:
 - the rehearsal environment's values;
 - `init: the box's user manager is out of the rehearsal's reach (systemctl --user there: Failed to connect to bus: ...)`.
 
-It fails if `systemctl --user` answers `running` from inside the rehearsal's environment.
+It fails unless `systemctl --user`, from inside the rehearsal's environment, answers that it cannot connect (`Failed to connect to bus`, or from systemd 257 on `Failed to connect to user scope bus`) or `offline`. An answer that names a manager's state fails it, and so does none, as when the connection drops at the probe.
 
 **data.** `long_traces.py`'s line (`393 traces, median input ...; the 48 largest: ...`), then `data: done: ... weka-x32 393 traces, weka-x32-long 48, callers <n> clips`. It checks for exactly 48 long traces and a `manifest.json`.
 
-**push.** It prints `push: <host> has the source at <revision> and the data`, then the host's file counts, with no link left: `weka-x32 393 files 0 links; weka-x32-long 48 files 0 links; callers <n> files 0 links`. It checks that the rehearsal's `DEPLOYED` is the checkout's `git describe`.
+**push.** It prints `push: <host> has the source at <revision> and the data`, then the host's file counts, with no link left: `weka-x32 393 files 0 links; weka-x32-long 48 files 0 links; callers <n> files 0 links`. It checks that the rehearsal's `DEPLOYED` is the checkout's `git describe`, and that each of the host's three directories holds as many files as `LH_DATA`'s, and no link.
 
 **stage.** Its output is `bootstrap.log`'s:
 
@@ -321,7 +321,7 @@ The audit counts them as the units' own: by their cgroups under systemd, and und
    - checks the GPU and the ports.
 2. **When `cleanup` fails.** It names what remains (a process, a held port, a busy GPU), or each path of the box's that changed (`diff` of the two states, `<` as found and `>` now). Nothing of the rehearsal writes outside `~/a100-rehearsal`, so a changed path is either a finding or a write by something else; the diff shows which file. `.rehearsal/box-before.state` and `box-after.state` stay on the host for reading.
 3. **Restore.** The box's deployment is as it was once `cleanup` passes. Start the units you noted before, for example `systemctl --user start leaseholder.target` with any socket unit that was active, then check `systemctl --user list-units --state=active "lh-*" "leaseholder*"` against your note.
-4. **Purge.** `bash rehearse.sh --purge cleanup` also removes `~/a100-rehearsal`, about 30 GB [estimate], once everything else passes. Keep it to read the rehearsal's logs on the host: `~/a100-rehearsal/leaseholder/node/bootstrap.log`, `runs/a100/run.log`, and `.rehearsal/steps/*.log`.
+4. **Purge.** `bash rehearse.sh --purge cleanup` also removes `~/a100-rehearsal`, about 30 GB [estimate], once everything else passes. It runs `cleanup` again although it is done, so it also removes the home that an earlier `cleanup` kept. Keep it to read the rehearsal's logs on the host: `~/a100-rehearsal/leaseholder/node/bootstrap.log`, `runs/a100/run.log`, and `.rehearsal/steps/*.log`.
 
 ## What only the real run can show
 
@@ -382,6 +382,11 @@ It holds:
   - `push` leaves the box's tree as it was;
   - the box's user manager is asked only `list-units` and `list-unit-files`;
   - the kit runs in the rehearsal's environment: home, runtime directory, lh-svc, the box's hub cache offline, no session bus, sudo refused.
+- **Failures:**
+  - a command that fails ends its step, with its status;
+  - `init` fails unless its isolation probe answers that `systemctl --user` cannot connect;
+  - `push` fails on a file in the host's data that `LH_DATA` lacks;
+  - `cleanup` fails where the host does not answer whether it has the rehearsal's home.
 - **Resuming:**
   - a step done is not run again;
   - a step on the host outlives the call that started it, is not started twice, gives its exit status even when its command calls `exit`, and is ended by `stop`.
@@ -395,6 +400,7 @@ It holds:
   - `reproduce` runs `make reproduce-a100` on peacock over them;
 - **`cleanup`:**
   - it stops lh-svc's units and passes on an untouched box;
-  - it fails, naming the path, on a box file changed after `init`.
+  - it fails, naming the path, on a box file changed after `init`;
+  - `--purge cleanup` after a `cleanup` removes the rehearsal's home.
 
 On Linux the test also runs `cleanup`'s leftover-process check against `/proc`; macOS has no `/proc`, and there the check reports "not checked".

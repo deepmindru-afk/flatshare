@@ -3,10 +3,12 @@ ssh runs commands in, with the real rsync between them), the box's user manager,
 kit's bootstrap.sh, run.sh and lh-svc shims; deploy/a100/push.sh and pull.sh are the repository's own. What it holds:
 the checks refuse a box that runs, a busy GPU or a held port; nothing of the rehearsal reaches the box's deployment
 (its source, its units, its user manager), and cleanup finds it as it was, or says what changed; the environment the
-kit runs in is the rehearsal's (its home, runtime directory, lh-svc, the box's hub cache offline, no sudo); a step on
-the host is detached and waited for, and a step done is not run again but under --redo; block 0's listener audit must
-pass with each GPU server in a network namespace of its own (deploy/bin/in-private-net); block 4 is run for one point and
-its deadline's stop; pull copies the rehearsal's records, not the box's; reproduce runs make on peacock over them.
+kit runs in is the rehearsal's (its home, runtime directory, lh-svc, the box's hub cache offline, no sudo); a command
+that fails ends its step, and a check that gets no answer fails; a step on the host is detached and waited for, and a
+step done is not run again but under --redo (--purge runs cleanup again to remove the home); block 0's listener audit
+must pass with each GPU server in a network namespace of its own (deploy/bin/in-private-net); block 4 is run for one
+point and its deadline's stop; pull copies the rehearsal's records, not the box's; reproduce runs make on peacock over
+them.
 """
 
 from __future__ import annotations
@@ -30,10 +32,11 @@ WHISPER, WHISPER_REV = "openai/whisper-large-v3-turbo", "41f01f3fe87f28c78e2fbf8
 
 TOOLS = {
     # The box's user manager: it answers through the login session's bus, and not where no bus is named (the
-    # rehearsal's environment). Every call is logged: the test holds that none acts on a unit.
+    # rehearsal's environment; FAKE_NO_BUS sets what systemctl says there). Every call is logged: the test holds that
+    # none acts on a unit.
     "systemctl": """\
 #!/usr/bin/env bash
-if [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} ]]; then echo "Failed to connect to bus: No such file or directory" >&2; exit 1; fi
+if [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} ]]; then echo "${FAKE_NO_BUS-Failed to connect to bus: No such file or directory}" >&2; exit 1; fi
 echo "systemctl $*" >>"$FAKE_BOX/.systemctl.log"
 case "$*" in
   *is-system-running*) echo running ;;
@@ -370,6 +373,13 @@ def test_the_rehearsal_runs_every_step_in_its_own_home_and_leaves_the_box_as_it_
     ).stdout.strip()
     assert (root / "src" / "DEPLOYED").read_text().strip() == revision
     assert box_snapshot(box) == before
+    # push holds the host's data to LH_DATA's: a file there that LH_DATA lacks (push.sh's rsync deletes none) fails it.
+    stale = root / "data" / "weka-x32-long" / "stale.json"
+    stale.write_text("{}")
+    done = rehearse(world, "--redo", "push", "push")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "push: the host's data is not LH_DATA's" in done.stdout
+    stale.unlink()
     # The control plane up under the rehearsal's lh-svc; the box's user manager was asked only for what it runs.
     calls = (box / ".systemctl.log").read_text().splitlines()
     assert calls and all("list-unit" in c for c in calls), calls
@@ -453,7 +463,9 @@ def test_the_rehearsal_runs_every_step_in_its_own_home_and_leaves_the_box_as_it_
         )
     ), stops
     assert box_snapshot(box) == before
-    (box / "leaseholder" / "src" / "DEPLOYED").write_text("changed\n")
+    deployed = box / "leaseholder" / "src" / "DEPLOYED"
+    found = deployed.stat()
+    deployed.write_text("changed\n")
     done = rehearse(world, "--redo", "cleanup", "cleanup")
     assert done.returncode == 1, done.stdout + done.stderr
     assert (
@@ -462,6 +474,44 @@ def test_the_rehearsal_runs_every_step_in_its_own_home_and_leaves_the_box_as_it_
     )
     status = rehearse(world, "status")
     assert status.returncode == 0 and "block4     done" in status.stdout, status.stdout
+    # The box as found again (the file's contents and mtime, which the state records): --purge runs cleanup again
+    # although it is done, and removes the rehearsal's home.
+    deployed.write_text("v0.3-191-g987fd09\n")
+    os.utime(deployed, ns=(found.st_atime_ns, found.st_mtime_ns))
+    done = rehearse(world, "--purge", "cleanup")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "cleanup: done: the box's deployment as found; ~/a100-rehearsal removed" in done.stdout
+    assert not home.exists() and box_snapshot(box) == before
+
+
+def test_a_failed_command_ends_its_step_and_init_wants_its_probe_answered(world: dict) -> None:
+    # Each step runs with set -e in force: a command that fails ends the step, with its status. Here the connection to
+    # the host drops at init's line of the rehearsal's environment, so init ends there with ssh's 255, its probe unasked.
+    hosts, state = world["hosts"], world["state"]
+    assert rehearse(world, "check").returncode == 0
+    done = rehearse(world, "init", FAKE_SSH_DOWN="phastform:the rehearsal environment")
+    assert done.returncode == 255, done.stdout + done.stderr
+    assert "init: failed, exit status 255" in done.stdout
+    assert "is-system-running" not in (hosts / "ssh.log").read_text()
+    # The isolation probe passes only on an answer that the rehearsal's systemctl --user reaches no manager: one that
+    # cannot be had, the connection dropped at it, fails init, and so does one that says something else.
+    (hosts / "phastform.down").unlink()
+    done = rehearse(world, "init", FAKE_SSH_DOWN="phastform:is-system-running")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "init: the rehearsal's environment did not answer" in done.stdout
+    (hosts / "phastform.down").unlink()
+    done = rehearse(world, "init", FAKE_NO_BUS="unknown")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "may reach the box's user manager (systemctl --user there: unknown)" in done.stdout
+    assert not (state / "init.done").exists()
+    done = rehearse(world, "init")
+    assert done.returncode == 0 and (state / "init.done").exists(), done.stdout + done.stderr
+    # cleanup likewise fails, rather than finding nothing to clean, where the host does not answer whether it has the
+    # rehearsal's home.
+    done = rehearse(world, "cleanup", FAKE_SSH_DOWN="phastform:rehearsal.env")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "cleanup: phastform did not answer whether it has ~/a100-rehearsal" in done.stdout
+    assert not (state / "cleanup.done").exists()
 
 
 def test_a_step_on_the_host_outlives_its_session_and_is_waited_for_once(tmp_path: Path) -> None:
