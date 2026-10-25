@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import signal
 import sys
 from pathlib import Path
@@ -308,7 +309,7 @@ def _drill(args: argparse.Namespace) -> int:
         )
         drill_clients = clients(config, args.gateway, args.uds or default_uds())
         engine = async_client(args.engine, timeout=10.0)
-        host = Host()
+        host = Host.load()
         try:
             with exclusive(host):  # never beside an E2 point
                 key = agents_key(host)
@@ -321,7 +322,7 @@ def _drill(args: argparse.Namespace) -> int:
         return 0
     if args.action == "cpu-tier":
         try:
-            with exclusive(Host()):  # nothing else may use the engine meanwhile
+            with exclusive(Host.load()):  # nothing else may use the engine meanwhile
                 engine = async_client(args.engine, timeout=300.0)
                 record = asyncio.run(fill_cpu_tier(engine, args.out, factor=args.factor))
         except E2Error as exc:
@@ -435,7 +436,7 @@ def _e2(args: argparse.Namespace) -> int:
         if args.action == "engine":
             print(load_arm(args.arm).engine)
         elif args.action == "reset":
-            applied = reset_cyan(Host(), Systemd())
+            applied = reset_cyan(Host.load(), Systemd())
             for unit in ("gateway", "worker"):
                 print(f"{unit}: {'restarted' if applied[unit]['restarted'] else 'unchanged'}")
         elif args.action == "run":
@@ -443,10 +444,14 @@ def _e2(args: argparse.Namespace) -> int:
             signal.signal(signal.SIGHUP, signal.SIG_IGN)
             signal.signal(signal.SIGTERM, _interrupted)
             sources = gpu_sources(args.gpu_source) if args.gpu_source else None
+            host = Host.load()
+            if args.profile:
+                host = dataclasses.replace(host, profile=args.profile)
             try:
                 summary = run_point(
                     args.arm,
                     args.out,
+                    host,
                     save_audio=args.save_audio,
                     gpu_source=sources,
                     agents_seed=args.agents_seed,
@@ -518,6 +523,13 @@ def _add_e2(commands: Commands) -> None:
         metavar="N",
         help="AIPerf's seed in place of the arm file's [agents] seed, as a campaign file's "
         "agents-seed line sets it for its points; run.json keeps the seed the replay ran with",
+    )
+    run.add_argument(
+        "--profile",
+        metavar="NAME",
+        help="the GPU nodes' hardware profile (deploy/profiles/NAME.toml), whose model and scheduler "
+        "settings the engine check expects; default the host's (~/.config/leaseholder/e2-host.toml), "
+        "else the frozen box's",
     )
     run.add_argument(
         "--gpu-source",

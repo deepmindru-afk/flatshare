@@ -33,6 +33,8 @@ from leaseholder_bench.e2.record import (
     export_point,
     gateway_counts,
     gateway_requests,
+    kv_samples,
+    kv_values,
     logged_first_byte,
     summarize_point,
 )
@@ -49,9 +51,11 @@ from leaseholder_bench.e2.report import (
     WORKER_COLUMNS,
     configurations,
     figure_name,
+    hardware,
     load_points,
     mark_frontier,
     stage_waterfall,
+    voice_slo,
     write_report,
 )
 from leaseholder_bench.e2.run import SECRETS
@@ -92,6 +96,7 @@ def test_background_goodput_counts_the_requests_completed_during_the_calls(tmp_p
     assert (cell["prompt_tokens_per_s"], cell["completion_tokens_per_s"]) == (1000.0, 20.0)
     assert cell["tokens_per_s"] == 1020.0
     assert cell["ttft_ms"]["n"] == 100 and cell["ttft_ms"]["p50"] == 150.5
+    assert cell["itl_ms"] == {"n": 0}  # these requests streamed one token each
     with pytest.raises(ValueError, match="completed no request"):
         background(path, T0 + 200, T0 + 300)
     with pytest.raises(ValueError, match="no per-request records"):
@@ -568,6 +573,95 @@ def test_the_report_shows_stages_and_clocks_only_for_points_that_have_them(tmp_p
     assert "| a2-s16 | 100 / 150 | 200 / 300 | 300 / 450 |" in table
     assert "| 700 / 1,050 | 300 / 0 / 1 |" in table
     assert "| a2-s8 | — / — |" in table
+
+
+def test_the_kv_samples_give_the_time_running_requests_leave_two_calls_short(
+    tmp_path: Path,
+) -> None:
+    exposition = (
+        'vllm:kv_cache_usage_perc{engine="0",model_name="m"} 0.9\n'
+        'vllm:num_requests_running{engine="0",model_name="m"} 3\n'
+        'vllm:num_requests_waiting{engine="0",model_name="m"} 1\n'
+        'vllm:num_requests_waiting{engine="1",model_name="m"} 2\n'
+    )
+    assert kv_values(exposition) == (0.9, 3.0, 3.0)
+    assert kv_values("vllm:num_requests_running 3\n") is None  # no KV use: not vLLM's metrics
+    path = tmp_path / "engine-kv.csv"
+    rows = [
+        (T0 - 1, 1.0, 9, 9),  # before the calls
+        *((T0 + i, 0.97, 4, 2) for i in range(1, 4)),  # 68 of 2,274 blocks free: short of 128
+        *((T0 + i, 0.5, 2, 0) for i in range(4, 8)),
+    ]
+    lines = ["time,kv_cache_usage,running,waiting", *(",".join(map(str, row)) for row in rows)]
+    path.write_text("\n".join([*lines, f"{T0 + 9},0.4"]) + "\n")  # the last cut short
+    engine = {"cache_config": {"block_size": 16, "num_gpu_blocks": 2275}}
+    assert kv_samples(path, {"start": T0, "end": T0 + 100}, engine) == {
+        "samples": 7,
+        "running_share": 0.4286,
+        "free_blocks": {"p50": 1137, "min": 68},
+        "running": {"p50": 2.0, "max": 4.0},
+        "waiting": {"p50": 0.0, "max": 2.0},
+    }
+    assert kv_samples(path, {"start": T0 + 50, "end": T0 + 100}, engine) is None  # none inside
+    assert kv_samples(path, {"start": T0, "end": T0 + 100}, {"cache_config": {}}) is None
+    assert kv_samples(tmp_path / "none.csv", {"start": T0, "end": T0 + 100}, engine) is None
+
+
+def named(at: float, clock: str, gpu: str) -> str:
+    """A sample of campaign.sh's query from 2026-10-25 on, which ends in the GPU's name."""
+    return f"{smi(at, clock, '60')}, {gpu}"
+
+
+def test_a_point_off_the_box_is_a_workload_of_its_own(tmp_path: Path) -> None:
+    a100, box = "NVIDIA A100-SXM4-40GB", "NVIDIA GeForce RTX 5060 Ti"
+    assert hardware(None, None) == hardware(box, "Qwen/Qwen3-4B-Instruct-2507-FP8") == ""
+    assert hardware(a100, "Qwen/Qwen3-14B-FP8") == f"{a100}, Qwen/Qwen3-14B-FP8"
+    dirs = {
+        "a1-voice": point(tmp_path / "box", "a1-voice", "1", None, 2000),
+        "a2-s16": point(tmp_path / "box", "a2-s16", "2", 5000, 2600),
+        "a2-s8": point(
+            tmp_path / "box", "a2-s8", "2", 3000, 2300
+        ),  # its samples name the box's GPU
+        "a100-voice": point(tmp_path / "a100", "a1-voice", "1", None, 1700),
+        "a100-a2": point(tmp_path / "a100", "a2-s16", "2", 9000, 1900),
+        "14b-a2": point(tmp_path / "14b", "a2-s16", "2", 7000, 2100),
+    }
+    for name, gpu in (("a2-s8", box), ("a100-voice", a100), ("a100-a2", a100), ("14b-a2", a100)):
+        samples = [named(T0 + 10, "1410 MHz", gpu), named(T0 + 20, "1395 MHz", gpu)]
+        (dirs[name] / "gpu.csv").write_text("\n".join(samples) + "\n")
+    fourteen = {"model_config": {"model": "Qwen/Qwen3-14B-FP8", "revision": "abc"}}
+    (dirs["14b-a2"] / "engine.json").write_text(json.dumps(fourteen))
+    rows, _ = load_points(list(dirs.values()))
+    workloads = {(r["campaign"], r["point"]): r["workload"] for r in rows}
+    assert workloads == {
+        ("box", "a1-voice"): "weka-x32, 2 callers",
+        ("box", "a2-s16"): "weka-x32, 2 callers",
+        ("box", "a2-s8"): "weka-x32, 2 callers",
+        ("a100", "a1-voice"): f"weka-x32, 2 callers, {a100}",
+        ("a100", "a2-s16"): f"weka-x32, 2 callers, {a100}",
+        ("14b", "a2-s16"): f"weka-x32, 2 callers, {a100}, Qwen/Qwen3-14B-FP8",
+    }
+    assert [r["hardware"] for r in rows][:3] == ["", "", ""]  # the box's first
+    # Each GPU reads its voice SLO against its own voice alone.
+    groups = configurations(rows)
+    assert voice_slo(groups, 2) == (2250.0, ["a1-voice"])
+    assert voice_slo(groups, 2, a100) == (1950.0, ["a1-voice"])
+    assert voice_slo(groups, 2, f"{a100}, Qwen/Qwen3-14B-FP8") is None  # C' needs its own
+    write_report(rows, tmp_path / "report")
+    table = (tmp_path / "report" / "frontier.md").read_text()
+    assert f"## Workload: weka-x32, 2 callers, {a100}\n" in table
+    assert (
+        "allows a V2V p95 of 1,950 ms" in table and "`frontier-nvidia-a100-sxm4-40gb.svg`" in table
+    )
+    assert figure_name("weka-x32", 2) == "frontier.svg"
+
+
+def test_a_records_engine_json_keeps_the_linear_kernel_where_the_engine_reported_it() -> None:
+    kernel = {"linear_backend": "marlin", "moe_backend": "auto"}
+    assert engine_settings(VLLM_CONFIG | {"kernel_config": kernel})["kernel_config"] == {
+        "linear_backend": "marlin"
+    }
+    assert "kernel_config" not in engine_settings(VLLM_CONFIG)  # as records before it
 
 
 def rewrite(run_dir: Path, change: Callable[[dict[str, Any]], None]) -> None:

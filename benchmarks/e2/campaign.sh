@@ -15,7 +15,8 @@
 # the points with their engines, without switching or measuring anything. LH_SSH is your ssh command for the hosts,
 # as for deploy.sh; LH_CYAN names cyan, and LH_GPU the GPU nodes every point of the campaign runs on: one host, or
 # several separated by commas for the points on several GPU nodes. A node is named after its host's first label
-# (gray for gray.cis.upenn.edu), as the arm files' [gateway.nodes] name it.
+# (gray for gray.cis.upenn.edu), as the arm files' [gateway.nodes] name it. LH_PROFILE names the GPU nodes' hardware
+# profile (deploy/profiles) for lh-bench e2 run's engine check, when it is not the one cyan's host settings name.
 set -euo pipefail
 usage() { echo "usage: campaign.sh [--dry-run] [--pause] CAMPAIGN" >&2; exit 2; }
 dry_run=false pause=false
@@ -39,6 +40,11 @@ for gpu in "${gpus[@]}"; do
   [[ -n $gpu && $named != *" ${gpu%%.*} "* ]] || bad_gpus
   named+="${gpu%%.*} "
 done
+profile=""
+if [[ -n ${LH_PROFILE:-} ]]; then
+  [[ $LH_PROFILE =~ ^[a-z0-9][a-z0-9.-]*$ ]] || { echo "campaign: LH_PROFILE is a profile's name: '$LH_PROFILE'" >&2; exit 2; }
+  profile=" --profile $LH_PROFILE"
+fi
 name=$(basename "$1" .campaign)
 here=$(cd "$(dirname "$1")" && pwd)
 results=${LH_E2_RESULTS:-$HOME/leaseholder/runs/e2}/$name
@@ -91,8 +97,9 @@ fetch() { # fetch POINT: mirror its run directory, without AIPerf's copy of the 
   rsync -a --delete -e "$ssh" --exclude aiperf/inputs.json "$cyan:$runs/$1/" "$results/$1/"
 }
 # A consumer card's boost clock follows its temperature, so each point keeps the clocks it ran at: nvidia-smi on each
-# GPU node, once a second while the point runs (line-buffered, timestamps in UTC); it stops when its ssh does.
-gpu_query=timestamp,clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_event_reasons.active
+# GPU node, once a second while the point runs (line-buffered, timestamps in UTC); it stops when its ssh does. The
+# GPU's name comes last, so that a record says which card it ran on.
+gpu_query=timestamp,clocks.sm,clocks.mem,temperature.gpu,power.draw,clocks_event_reasons.active,name
 samplers=()
 trap 'for sampler in ${samplers[@]+"${samplers[@]}"}; do kill "$sampler" 2>/dev/null; done' EXIT
 gpu_csv() { # gpu_csv HOST: the file of its GPU's samples in a run directory
@@ -145,7 +152,7 @@ for i in "${!points[@]}"; do
   log "$point: measuring"
   sample_gpus "$point"
   status=0
-  $ssh "$cyan" "$bench e2 run $runs/arms/$point.toml --out $runs/$point${seed:+ --agents-seed $seed}$sources" 2>&1 |
+  $ssh "$cyan" "$bench e2 run $runs/arms/$point.toml --out $runs/$point${seed:+ --agents-seed $seed}$sources$profile" 2>&1 |
     tee -a "$results/campaign.log" || status=$?
   stop_gpus "$point"
   if ((status == 255)); then

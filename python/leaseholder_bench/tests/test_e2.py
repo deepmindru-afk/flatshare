@@ -31,12 +31,14 @@ from leaseholder_bench.cli import main
 from leaseholder_bench.e2 import run as e2
 from leaseholder_bench.e2.arm import E2Error, Engine, Voice, flag_values, load_arm
 from leaseholder_bench.e2.run import (
+    FROZEN,
     EngineInfo,
     Host,
     Process,
     Systemd,
     check_engine,
     gpu_sources,
+    profile_flags,
     read_env,
     reset_cyan,
     run_point,
@@ -656,6 +658,105 @@ def test_a_vllm_point_needs_the_frozen_settings_its_flags_keep(tmp_path: Path) -
         assert re.search(rf"^{flag.removeprefix('--')}: {value}$", engine_yaml, re.M), flag
 
 
+def rendered_engine_yaml(tmp_path: Path, name: str) -> str:
+    """A profile's engine.yaml as deploy/profile.py renders it, on an A100 host's facts."""
+    facts = json.loads((FAKES / "a100-host.json").read_text())
+    host_file = tmp_path / "host.json"
+    host_file.write_text(json.dumps(facts))
+    out = tmp_path / name
+    render = [sys.executable, str(REPO / "deploy" / "profile.py"), "render", name]
+    done = subprocess.run(
+        [*render, "--host", str(host_file), "--out", str(out)], capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    return (out / "engine.yaml").read_text()
+
+
+def test_a_profile_gives_the_engine_settings_its_engine_yaml_sets(tmp_path: Path) -> None:
+    box = profile_flags("rtx-5060-ti")
+    assert box[: len(FROZEN)] == FROZEN  # the frozen box's scheduler settings, then its model
+    assert flag_values(box[len(FROZEN) :]) == {
+        "--model": "Qwen/Qwen3-4B-Instruct-2507-FP8",
+        "--revision": REVISION,
+        "--max-model-len": "32768",
+    }
+    for name in ("rtx-5060-ti", "a100-40gb"):
+        engine_yaml = (
+            (PHASTFORM / "engine.yaml").read_text()
+            if name == "rtx-5060-ti"
+            else rendered_engine_yaml(tmp_path, name)
+        )
+        for flag, value in flag_values(profile_flags(name)).items():
+            line = rf"^{flag.removeprefix('--')}: {re.escape(value)}$"
+            assert re.search(line, engine_yaml, re.M), (name, flag)
+    with pytest.raises(E2Error, match="no hardware profile h100"):
+        profile_flags("h100")
+
+
+def test_the_engine_check_holds_the_profiles_model_and_the_kernels(tmp_path: Path) -> None:
+    box = profile_flags("rtx-5060-ti")
+    model = {
+        "model": "Qwen/Qwen3-4B-Instruct-2507-FP8",
+        "revision": REVISION,
+        "max_model_len": 32768,
+    }
+    engine = vllm(**model, linear_backend="auto")
+    frozen = ["--scheduling-policy", "--max-num-batched-tokens", "--long-prefill-token-threshold"]
+    assert check_engine(Engine("frozen", ()), engine, base=box) == {
+        "checked": [*frozen, "--model", "--revision", "--max-model-len"],
+        "unchecked": [],
+    }
+    # Another model, as an arm that switches it names it, against the box's.
+    other = ("--model", "Qwen/Qwen3-14B-FP8", "--revision", "abc", "--max-model-len", "32768")
+    with pytest.raises(
+        E2Error,
+        match="model = 'Qwen/Qwen3-4B-Instruct-2507-FP8', the point needs --model Qwen/Qwen3-14B",
+    ):
+        check_engine(Engine("frozen", other), engine, base=box)
+    # The linear kernel an arm asks for is kernel_config's.
+    marlin = Engine("frozen", ("--linear-backend", "marlin"))
+    assert (
+        "--linear-backend"
+        in check_engine(marlin, vllm(**model, linear_backend="marlin"), base=box)["checked"]
+    )
+    with pytest.raises(
+        E2Error, match="linear_backend = 'auto', the point needs --linear-backend marlin"
+    ):
+        check_engine(marlin, engine, base=box)
+
+
+def test_an_engines_settings_name_its_model_by_its_id_and_hold_its_kernels() -> None:
+    engine = fake_engine(dict(FROZEN_SCHEDULER))
+    try:
+        info = e2.describe_engine(engine.url)
+    finally:
+        engine.shutdown()
+    # Offline mode reports the model by its path in the cache; the settings name it by its id.
+    assert (info.settings["model"], info.settings["revision"]) == (
+        "Qwen/Qwen3-4B-Instruct-2507-FP8",
+        REVISION,
+    )
+    assert info.settings["max_model_len"] == 32768 and info.settings["linear_backend"] == "auto"
+    assert info.settings["policy"] == "priority" and info.pool_tokens == 36400
+
+
+def test_a_host_file_sets_the_hosts_fields(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    assert Host.load(home) == Host(home=home)  # cyan: no file, the defaults
+    path = home / ".config" / "leaseholder" / "e2-host.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text('profile = "a100-40gb"\naiperf_cores = "21-27"\ncaller_cores = "28-31"\n')
+    host = Host.load(home)
+    assert (host.profile, host.aiperf_cores, host.caller_cores) == ("a100-40gb", "21-27", "28-31")
+    assert host.engine_url == Host().engine_url and host.home == home
+    path.write_text('profile = "a100-40gb"\nengine_cores = "0-7"\n')
+    with pytest.raises(E2Error, match="sets engine_cores; a host sets"):
+        Host.load(home)
+    path.write_text("aiperf_cores = 21\n")
+    with pytest.raises(E2Error, match="aiperf_cores must be strings"):
+        Host.load(home)
+
+
 # Processes
 
 
@@ -799,12 +900,23 @@ def engine_metrics(n: int) -> tuple[int, str]:
     )
 
 
+REVISION = "8591804019c8b22094c3b5b4454e0edc05dffc98"
+"""The frozen box's model revision (deploy/profiles/rtx-5060-ti.toml)."""
+
+
 def fake_engine(scheduler: dict[str, Any]) -> UnixService:
     """vLLM on a GPU node, through its tunnel's socket: ``scheduler`` is what its /server_info reports,
     as variant.sh use would leave it."""
     vllm_config = {
         "scheduler_config": scheduler,
-        "model_config": {"hf_token": "hf_secret"},
+        # The model as vLLM's offline mode names it: by its path in the Hugging Face cache.
+        "model_config": {
+            "model": f"/home/alice/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507-FP8/snapshots/{REVISION}",
+            "revision": REVISION,
+            "max_model_len": 32768,
+            "hf_token": "hf_secret",
+        },
+        "kernel_config": {"linear_backend": "auto", "moe_backend": "auto"},
         "additional_config": {},
     }
     return UnixService(
@@ -935,8 +1047,11 @@ def cyan(tmp_path: Path) -> Iterator[Cyan]:
 
 
 def run(cyan: Cyan, name: str, text: str, out: str | None = None) -> dict[str, Any]:
+    """A point on the fake cyan, without the KV sampler, whose /metrics reads the fake engine's
+    counters would count (test_an_agent_point_samples_the_engines_kv runs it)."""
     arm_file = write(cyan.arms, f"{name}.toml", text)
-    return run_point(arm_file, cyan.host.root / "runs" / (out or name), cyan.host, cyan.systemd)
+    path = cyan.host.root / "runs" / (out or name)
+    return run_point(arm_file, path, cyan.host, cyan.systemd, kv_sample_s=None)
 
 
 def run_stock(cyan: Cyan, out: str | None = None) -> dict[str, Any]:
@@ -958,12 +1073,14 @@ def test_voice_alone_runs_the_calls_against_the_box_as_it_is(cyan: Cyan) -> None
     run_json = record(cyan, "a1-voice")
     assert run_json["status"] == "complete"
     frozen = ["--scheduling-policy", "--max-num-batched-tokens", "--long-prefill-token-threshold"]
+    model = ["--model", "--revision", "--max-model-len"]  # the box's profile's
     assert run_json["engine"] == {
         "server": "vllm",
         "version": "0.32.0",
         "pool_tokens": 36400,
-        "flags": {"checked": frozen, "unchecked": []},
+        "flags": {"checked": [*frozen, *model], "unchecked": []},
     }
+    assert run_json["profile"] == "rtx-5060-ti"
     engine = json.loads((out / "engine.json").read_text())
     assert engine["scheduler_config"] == FROZEN_SCHEDULER
     assert engine["model_config"]["hf_token"] == "<redacted>"
@@ -1015,6 +1132,8 @@ def test_a_point_with_agents_configures_cyan_and_stops_aiperf_after_the_calls(cy
     assert env["LH_BENCH_URL"] == f"{cyan.gateway.url}/v1/chat/completions"
     assert env["LH_BENCH_API_KEY"] == "agents-key"
     assert env["LH_BENCH_SESSIONS"] == "4"
+    # The model the engine serves, by the box's profile: the arm's flags name none.
+    assert env["LH_BENCH_MODEL"] == env["LH_BENCH_TOKENIZER"] == "Qwen/Qwen3-4B-Instruct-2507-FP8"
     assert env["AIPERF_HTTP_X_SESSION_ID_FROM_CORRELATION_ID"] == "false"  # from configs/aiperf.env
     run_json = record(cyan, "a2-stock-s4")
     assert run_json["aiperf"] == {"exit_status": 0}
@@ -1034,8 +1153,62 @@ def test_a_point_with_agents_configures_cyan_and_stops_aiperf_after_the_calls(cy
         background["requests_per_s"] * 1010, rel=0.01
     )
     assert 100 <= background["ttft_ms"]["p50"] <= 109
+    assert 20 <= background["itl_ms"]["p50"] <= 24  # AIPerf's per request
     window = run_json["window"]
     assert 0.3 <= window["end"] - window["start"] < 5
+
+
+def test_an_agent_point_samples_the_engines_kv(cyan: Cyan) -> None:
+    # The engine's pool full on every other /metrics read (0.999 of 2,274 blocks in use: 2 free, under
+    # two calls' 128) and half used on the others; its counters stand still.
+    def metrics(n: int) -> tuple[int, str]:
+        _, counters = engine_metrics(1)
+        full = n % 2 == 1
+        return 200, counters + (
+            f'vllm:kv_cache_usage_perc{{engine="0"}} {0.999 if full else 0.5}\n'
+            f'vllm:num_requests_running{{engine="0"}} {4 if full else 2}\n'
+            'vllm:num_requests_waiting{engine="0"} 1\n'
+        )
+
+    model = {
+        "model": "Qwen/Qwen3-4B-Instruct-2507-FP8",
+        "revision": REVISION,
+        "max_model_len": 32768,
+    }
+    config = {
+        "model_config": model,
+        "cache_config": {"block_size": 16, "num_gpu_blocks": 2275},
+        "scheduler_config": cyan.scheduler,
+        "additional_config": {},
+    }
+    cyan.engine.routes["/metrics"] = metrics
+    cyan.engine.routes["/server_info"] = lambda n: (200, {"vllm_config": config})
+    cyan.scheduler.update(STOCK_SCHEDULER)
+    arm_file = write(cyan.arms, "a2-stock-s4.toml", ARM)
+    out = cyan.host.root / "runs" / "a2-stock-s4"
+    summary = run_point(arm_file, out, cyan.host, cyan.systemd, kv_sample_s=0.02)
+    lines = (out / "metrics" / "engine-kv.csv").read_text().splitlines()
+    assert lines[0] == "time,kv_cache_usage,running,waiting"
+    window = record(cyan, "a2-stock-s4")["window"]
+    times = [float(line.split(",")[0]) for line in lines[1:]]
+    assert times == sorted(times) and window["start"] <= times[0]
+    kv = summary["kv"]
+    assert kv["samples"] >= 5 and 0.25 <= kv["running_share"] <= 0.75
+    assert kv["free_blocks"]["min"] == 2 and kv["running"]["max"] == 4
+    assert kv["waiting"] == {"p50": 1, "max": 1}
+    # A voice-alone point has no agents, and so no samples.
+    cyan.scheduler.update(FROZEN_SCHEDULER)
+    alone = run_point(
+        write(cyan.arms, "a1-voice.toml", VOICE_ALONE),
+        cyan.host.root / "runs" / "a1-voice",
+        cyan.host,
+        cyan.systemd,
+        kv_sample_s=0.02,
+    )
+    assert (
+        alone["kv"] is None
+        and not (cyan.host.root / "runs" / "a1-voice" / "metrics" / "engine-kv.csv").exists()
+    )
 
 
 def test_a_campaign_sets_the_agents_seed_and_run_json_keeps_it(cyan: Cyan) -> None:

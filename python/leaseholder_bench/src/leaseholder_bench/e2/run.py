@@ -1,7 +1,8 @@
 """``lh-bench e2 run`` measures one E2 point on cyan, the control host, from its arm file:
 
 1. it records the engine behind the tunnel from the engine's own ``/server_info`` and checks the
-   arm's ``[engine]`` against it;
+   arm's ``[engine]`` against it and the GPU node's hardware profile (the frozen box's, unless the
+   host's settings or ``--profile`` name another);
 2. it makes cyan's units serve the point: the router (SMG, for arm 8b), the gateway's configuration
    (``gateway.toml`` with the arm's ``[gateway]`` table merged in) and the voice agent's preemptive
    generation and lifecycle events, restarting only the units whose configuration changes;
@@ -10,7 +11,8 @@
    load-generator cores and waits for its profiling phase and a warm-up;
 4. it snapshots the gateway's and the engine's ``/metrics``, runs ``lh-voice bots`` inside the
    voice-plane namespace (``--save-audio`` has them save each call's audio, for the demo video) and
-   snapshots again: the calls are the measurement window;
+   snapshots again: the calls are the measurement window, through which an agent point samples each
+   engine's KV use and requests every half second;
 5. it stops AIPerf, keeps the gateway's request log of the calls and the voice worker's journal of
    them (its turn lines and its sessions' event counts), and writes ``summary.json``.
 
@@ -44,10 +46,11 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -68,7 +71,9 @@ from leaseholder_bench.e2.arm import (
 from leaseholder_bench.e2.record import (
     OUTCOMES,
     gateway_request_lines,
+    kv_values,
     logged_requests,
+    model_id,
     render,
     summarize_point,
     worker_lines,
@@ -82,6 +87,15 @@ CONFIGS = Path(__file__).resolve().parents[3] / "configs"
 VARIANTS = Path(__file__).resolve().parents[5] / "deploy" / "phastform" / "variants"
 """The GPU node's engine variants, from the same source tree: what each adds to the engine's command
 line, which the engine check expects."""
+PROFILES = Path(__file__).resolve().parents[5] / "deploy" / "profiles"
+"""The GPU nodes' hardware profiles (deploy/profile.py renders a node's deployment from one), from the
+same source tree: the model and the scheduler settings a node's engine.yaml gives its engine, which
+the engine check expects."""
+BOX_PROFILE = "rtx-5060-ti"
+"""The frozen box's profile: Phastform's, and Gray's."""
+HOST_FILE = Path(".config") / "leaseholder" / "e2-host.toml"
+"""Where a control host other than cyan sets :class:`Host`'s fields, under its home directory: a
+single host its cores from its profile's core plan, and its profile. cyan has none."""
 
 PROFILING = "Credit phase start: profiling"
 """AIPerf's log line when its measured phase begins, after the dataset is built and warmed up."""
@@ -114,6 +128,10 @@ ENGINE_UP_S = 60.0
 """How long a node's engine may take to answer through a tunnel that was just started."""
 GATEWAY_IDLE_S = 30.0
 """How long the gateway may take to end its requests once a point's tools have stopped."""
+KV_SAMPLE_S = 0.5
+"""How often an agent point samples each engine's KV use and its running and waiting requests from its
+``/metrics`` while the calls run (P-1's sampler; record.KV_GAUGES), from which the summary takes the
+measured running share."""
 
 SGLANG = "sglang"
 """The one engine variant that serves SGLang; every other variant serves vLLM."""
@@ -136,6 +154,27 @@ class Host:
     """The engine through the tunnel: its socket on cyan."""
     aiperf_cores: str = "16-23"
     caller_cores: str = "24-31"
+    profile: str = BOX_PROFILE
+    """The GPU nodes' hardware profile (deploy/profiles/NAME.toml), whose engine settings the engine
+    check expects."""
+
+    @classmethod
+    def load(cls, home: Path | None = None) -> Host:
+        """The host's settings: the defaults, and the fields its HOST_FILE sets, if it has one."""
+        home = home or Path.home()
+        path = home / HOST_FILE
+        if not path.exists():
+            return cls(home=home)
+        try:
+            table = tomllib.loads(path.read_text())
+        except tomllib.TOMLDecodeError as exc:
+            raise E2Error(f"{path}: {exc}") from None
+        names = [f.name for f in fields(cls) if f.name != "home"]
+        if unknown := sorted(set(table) - set(names)):
+            raise E2Error(f"{path} sets {', '.join(unknown)}; a host sets {', '.join(names)}")
+        if wrong := sorted(key for key, value in table.items() if not isinstance(value, str)):
+            raise E2Error(f"{path}: {', '.join(wrong)} must be strings")
+        return cls(home=home, **table)
 
     @property
     def root(self) -> Path:
@@ -465,13 +504,48 @@ MEASURE = (
 )
 
 
+def profile_flags(name: str, profiles: Path = PROFILES) -> tuple[str, ...]:
+    """The flags a GPU node's engine.yaml amounts to, by its hardware profile, among those the engine
+    reports: FROZEN's scheduler settings as the profile sets them, and its model, revision and context.
+    A vLLM point expects them wherever its flags say nothing else."""
+    path = profiles / f"{name}.toml"
+    if not path.is_file():
+        raise E2Error(f"no hardware profile {name} in {profiles}")
+    profile = tomllib.loads(path.read_text())
+    model, engine = profile["model"], profile["engine"]
+    return (
+        "--scheduling-policy", "priority",  # engine.yaml's for every profile (deploy/templates)
+        "--max-num-batched-tokens", str(engine["max_num_batched_tokens"]),
+        "--long-prefill-token-threshold", str(engine["long_prefill_token_threshold"]),
+        "--model", model["name"],
+        "--revision", model["revision"],
+        "--max-model-len", str(model["max_model_len"]),
+    )  # fmt: skip
+
+
 def describe_engine(engine: str) -> EngineInfo:
     """The engine at the address ``engine``: vLLM (whose ``/server_info`` needs its development mode, from
-    the measurement drop-in) or SGLang."""
+    the measurement drop-in) or SGLang. A vLLM engine's settings are its cache, scheduler and kernel
+    configuration's, and its model, revision and context."""
     info = _get_json(engine, "/server_info", params={"config_format": "json"}, missing=MEASURE)
     if "vllm_config" in info:
         config = info["vllm_config"]
-        settings = {**config.get("cache_config", {}), **config.get("scheduler_config", {})}
+        model = config.get("model_config") or {}
+        name, revision = model_id(model)
+        settings = {
+            **config.get("cache_config", {}),
+            **config.get("scheduler_config", {}),
+            **(config.get("kernel_config") or {}),
+            **{
+                key: value
+                for key, value in (
+                    ("model", name),
+                    ("revision", revision),
+                    ("max_model_len", model.get("max_model_len")),
+                )
+                if value is not None
+            },
+        }
         version = _get_json(engine, "/version").get("version")
         return EngineInfo("vllm", version, pool_tokens(fetch(engine)), settings, config)
     if "internal_states" in info:
@@ -516,12 +590,13 @@ def variant_flags(variant: str, variants: Path = VARIANTS) -> tuple[str, ...]:
 
 
 def check_engine(
-    engine: Engine, info: EngineInfo, variants: Path = VARIANTS
+    engine: Engine, info: EngineInfo, variants: Path = VARIANTS, base: Sequence[str] = FROZEN
 ) -> dict[str, list[str]]:
     """Check the arm's engine against what the engine reports. The point expects the engine's command
-    line as ``variant.sh use`` makes it: on vLLM the frozen box's scheduler settings, then the
-    variant's flags (:func:`variant_flags`), then the arm's, the last of a repeated flag winning. Each
-    flag's setting must match; on vLLM the scheduler class (``scheduler_cls``) must be the one
+    line as ``variant.sh use`` makes it: on vLLM ``base``, the node's engine.yaml (the frozen box's
+    scheduler settings, or :func:`profile_flags`), then the variant's flags (:func:`variant_flags`),
+    then the arm's, the last of a repeated flag winning. Each flag's setting must match; on vLLM the
+    scheduler class (``scheduler_cls``) must be the one
     ``--scheduler-cls`` names, vLLM's own without it, and ``additional_config`` must be exactly what the
     ``--additional-config.KEY`` flags build, so that frozen, make-room and pr54530 engines, and
     make-room with another switch, cannot pass for one another. A flag whose setting the engine does
@@ -532,7 +607,7 @@ def check_engine(
         raise E2Error(f"the engine is {info.server}, the arm file needs {expected}: {switch}")
     wanted = flag_values(variant_flags(engine.variant, variants)) | flag_values(engine.flags)
     if expected == "vllm":
-        wanted = flag_values(FROZEN) | wanted
+        wanted = flag_values(base) | wanted
     checked, unchecked = [], []
     for flag, value in wanted.items():
         if expected == "vllm" and (flag == SCHEDULER or flag.startswith(ADDITIONAL)):
@@ -756,6 +831,7 @@ def run_point(
     save_audio: bool = False,
     gpu_source: Mapping[str, str | None] | None = None,
     agents_seed: int | None = None,
+    kv_sample_s: float | None = KV_SAMPLE_S,
 ) -> dict[str, Any]:
     """Measure the point of ``arm_file`` into the directory ``out``; returns the summary. A
     directory with a complete point is never overwritten, and an earlier attempt that did not
@@ -764,7 +840,9 @@ def run_point(
     deployed revision (its ~/leaseholder/src/DEPLOYED, None where it has none), which campaign.sh
     reads over its SSH at the point's start and run.json keeps beside cyan's; None when unknown.
     ``agents_seed``, a campaign's (``agents-seed`` in its file), replaces the arm file's ``[agents]
-    seed`` for AIPerf; run.json keeps the seed the replay ran with (``agents_seed``)."""
+    seed`` for AIPerf; run.json keeps the seed the replay ran with (``agents_seed``). An agent point
+    samples each engine's KV every ``kv_sample_s`` while the calls run; None samples nothing (tests
+    whose fake engines count their /metrics reads)."""
     if not hasattr(os, "waitid"):
         raise E2Error(NEEDS_WAITID)
     if stale := _stale_install():
@@ -773,7 +851,7 @@ def run_point(
         raise E2Error(f"the agents' seed cannot be negative: {agents_seed}")
     arm = load_arm(arm_file)
     seed = arm.agents.seed if agents_seed is None else agents_seed
-    host = host or Host()
+    host = host or Host.load()
     systemd = systemd or Systemd()
     with exclusive(host):
         _fresh(out)
@@ -789,7 +867,9 @@ def run_point(
             record.say(f"killed {len(leftovers)} processes left by an earlier run: {leftovers}")
         try:
             with contextlib.ExitStack() as running:
-                summary = _measure(arm, out, host, systemd, record, running, save_audio, seed)
+                summary = _measure(
+                    arm, out, host, systemd, record, running, save_audio, seed, kv_sample_s
+                )
         except BaseException as exc:
             record.fail(exc)
             raise
@@ -806,12 +886,15 @@ def _measure(
     running: contextlib.ExitStack,
     save_audio: bool,
     seed: int,
+    kv_sample_s: float | None,
 ) -> dict[str, Any]:
     nodes = gpu_nodes(arm)
     engines: dict[str | None, str] = dict(nodes) or {None: host.engine_url}
     if nodes:
         _start_tunnels(nodes, systemd, record)
-    servers = _check_engines(arm, engines, out, record)
+    base = profile_flags(host.profile)
+    record["profile"] = host.profile
+    servers = _check_engines(arm, engines, out, record, base)
     record.say(f"configuring cyan for {arm.name}")
     record["cyan"] = configure_cyan(arm, host, systemd)
     _until(
@@ -823,10 +906,20 @@ def _measure(
         reset_prefix_cache(url, servers[node])
     # Before the replay and the calls the gateway is idle: the base of the check that its journal kept a
     # line for every request it ended.
-    base = (time.time(), _ended(host))
-    aiperf = _start_aiperf(arm, host, out, record, running, seed) if arm.agents.sessions else None
+    idle = (time.time(), _ended(host))
+    # The model the replay asks for: the engine's, as the node's profile and the arm's flags start it.
+    model = (flag_values(base) | flag_values(arm.engine.flags))["--model"]
+    aiperf = (
+        _start_aiperf(arm, host, out, record, running, seed, model) if arm.agents.sessions else None
+    )
     start = _snapshot(host, out, "start", engines)
+    sampler = None
+    if aiperf is not None and kv_sample_s is not None:
+        sampler = _KvSampler(engines, out / "metrics", kv_sample_s)
+        running.callback(sampler.stop)
     end = _call(arm, host, out, record, running, aiperf, save_audio)
+    if sampler is not None:
+        sampler.stop()
     _snapshot(host, out, "end", engines)
     record["window"] = {"start": start, "end": end}
     if aiperf is not None:
@@ -835,7 +928,7 @@ def _measure(
         if aiperf.status:
             raise aiperf.failure("failed when stopped")
     _gateway_log(systemd, out, start, end)
-    record["gateway_log"] = _check_gateway_log(host, systemd, base)
+    record["gateway_log"] = _check_gateway_log(host, systemd, idle)
     _worker_journal(systemd, out, start, arm.voice.callers)
     try:
         metrics = summarize_point(
@@ -855,7 +948,11 @@ def _measure(
 
 
 def _check_engines(
-    arm: Arm, engines: Mapping[str | None, str], out: Path, record: _Record
+    arm: Arm,
+    engines: Mapping[str | None, str],
+    out: Path,
+    record: _Record,
+    base: Sequence[str] = FROZEN,
 ) -> dict[str | None, str]:
     """Record each engine (``engine.json``, ``engine-NODE.json`` on several GPU nodes, and run.json's
     ``engine``, by node on several) and check it against the arm's; returns each engine's server."""
@@ -872,17 +969,24 @@ def _check_engines(
         _write_json(out / _engine_file(node, "json"), _redacted(info.config))
         engine = {"server": info.server, "version": info.version, "pool_tokens": info.pool_tokens}
         keep(node, engine)  # recorded before the check, which fails on a wrong engine
-        keep(node, engine | {"flags": check_engine(arm.engine, info)})
+        keep(node, engine | {"flags": check_engine(arm.engine, info, base=base)})
     return servers
 
 
 def _start_aiperf(
-    arm: Arm, host: Host, out: Path, record: _Record, running: contextlib.ExitStack, seed: int
+    arm: Arm,
+    host: Host,
+    out: Path,
+    record: _Record,
+    running: contextlib.ExitStack,
+    seed: int,
+    model: str,
 ) -> Process:
-    """Start the replay with ``seed`` and return once it has been profiling for the warm-up."""
+    """Start the replay with ``seed``, asking for ``model``, and return once it has been profiling for
+    the warm-up."""
     agents = arm.agents
     record.say(f"AIPerf: {agents.sessions} session trees through the gateway, seed {seed}")
-    env = _aiperf_env(arm, host, out, seed)
+    env = _aiperf_env(arm, host, out, seed, model)
     aiperf = Process("AIPerf", host.aiperf(), out / "aiperf.log", env)
     running.callback(aiperf.stop, AIPERF_STOP_S)
     deadline = time.monotonic() + PROFILING_TIMEOUT_S
@@ -1033,6 +1137,47 @@ def _start_tunnels(nodes: Mapping[str, str], systemd: Systemd, record: _Record) 
         )
 
 
+class _KvSampler:
+    """Each engine's KV use and running and waiting requests (record.KV_GAUGES) from its ``/metrics``
+    every ``interval`` seconds, from its start until :meth:`stop`, a line a sample (its time, then the
+    three) into ``metrics``' engine-kv.csv (engine-NODE-kv.csv on several GPU nodes). A sample the
+    engine does not answer in time is left out; the summary counts the samples it has."""
+
+    def __init__(
+        self, engines: Mapping[str | None, str], metrics: Path, interval: float = KV_SAMPLE_S
+    ) -> None:
+        self.interval = interval
+        self._stopped = threading.Event()
+        metrics.mkdir(exist_ok=True)
+        self._threads = [
+            threading.Thread(
+                target=self._sample,
+                args=(address, metrics / _engine_file(node, "csv", "kv")),
+                daemon=True,
+            )
+            for node, address in engines.items()
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _sample(self, address: str, path: Path) -> None:
+        with path.open("w") as samples:
+            samples.write("time,kv_cache_usage,running,waiting\n")
+            while not self._stopped.is_set():
+                at = time.time()
+                with contextlib.suppress(httpx.HTTPError):
+                    if (values := kv_values(fetch(address, timeout=2.0))) is not None:
+                        samples.write(f"{at:.6f}," + ",".join(f"{v:g}" for v in values) + "\n")
+                        samples.flush()
+                self._stopped.wait(max(0.0, at + self.interval - time.time()))
+
+    def stop(self) -> None:
+        """Stop sampling once each engine's sample in flight is written; stopping twice is stopping."""
+        self._stopped.set()
+        for thread in self._threads:
+            thread.join()
+
+
 def _engine_file(node: str | None, suffix: str, when: str | None = None) -> str:
     """An engine's file: ``engine[-NODE][-WHEN].SUFFIX``, without a node for a point's one engine."""
     return "-".join(part for part in ("engine", node, when) if part) + f".{suffix}"
@@ -1053,7 +1198,7 @@ def _snapshot(host: Host, out: Path, when: str, engines: Mapping[str | None, str
     return time.time()
 
 
-def _aiperf_env(arm: Arm, host: Host, out: Path, seed: int) -> dict[str, str]:
+def _aiperf_env(arm: Arm, host: Host, out: Path, seed: int, model: str) -> dict[str, str]:
     agents = arm.agents
     data = host.root / "data" / agents.data
     if not data.is_dir():
@@ -1078,6 +1223,8 @@ def _aiperf_env(arm: Arm, host: Host, out: Path, seed: int) -> dict[str, str]:
         "LH_BENCH_SEED": str(seed),
         "LH_BENCH_CLASS": "background",
         "LH_BENCH_ARTIFACTS": str(out / "aiperf"),
+        "LH_BENCH_MODEL": model,
+        "LH_BENCH_TOKENIZER": model,
     }
     return env
 

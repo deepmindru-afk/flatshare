@@ -52,17 +52,21 @@ class Hosts:
         return path
 
     def run(
-        self, campaign: Path, *options: str, gpus: str = PHASTFORM
+        self, campaign: Path, *options: str, gpus: str = PHASTFORM, **extra: str
     ) -> subprocess.CompletedProcess:
-        env = os.environ | {
-            "PATH": f"{FAKES}{os.pathsep}{os.environ['PATH']}",
-            "FAKE_HOSTS": str(self.root),
-            "FAKE_LH_BENCH": str(Path(sys.executable).with_name("lh-bench")),
-            "LH_SSH": str(FAKES / "ssh"),
-            "LH_CYAN": "cyan",
-            "LH_GPU": gpus,
-            "LH_E2_RESULTS": str(self.results),
-        }
+        env = (
+            os.environ
+            | extra
+            | {
+                "PATH": f"{FAKES}{os.pathsep}{os.environ['PATH']}",
+                "FAKE_HOSTS": str(self.root),
+                "FAKE_LH_BENCH": str(Path(sys.executable).with_name("lh-bench")),
+                "LH_SSH": str(FAKES / "ssh"),
+                "LH_CYAN": "cyan",
+                "LH_GPU": gpus,
+                "LH_E2_RESULTS": str(self.results),
+            }
+        )
         return subprocess.run(
             ["bash", str(CAMPAIGN), *options, str(campaign)],
             env=env,
@@ -107,6 +111,22 @@ def test_each_point_runs_with_the_gpu_nodes_deployed_revision(hosts: Hosts) -> N
     switch = ["variant.sh measure on", "variant.sh use frozen"]
     assert hosts.calls(PHASTFORM, "variant") == switch * 2
     assert f"a1: phastform has {DEPLOYED}" in (hosts.results / "c1" / "campaign.log").read_text()
+    # The GPU's samples end in its name, so that a record says which card it ran on.
+    [query] = {call.split()[1] for call in hosts.calls(PHASTFORM, "nvidia-smi")}
+    assert query.startswith("--query-gpu=timestamp,clocks.sm,") and query.endswith(",name")
+    samples = (hosts.home("cyan") / "leaseholder/runs/e2/c1/a1/gpu.csv").read_text().splitlines()
+    assert samples and all(line.endswith(", NVIDIA GeForce RTX 5060 Ti") for line in samples)
+
+
+def test_lh_profile_names_the_gpu_nodes_profile_for_the_engine_check(hosts: Hosts) -> None:
+    hosts.gpu(PHASTFORM)
+    campaign = hosts.campaign("c6", ["arms/a1.toml"], {"a1": VOICE})
+    done = hosts.run(campaign, LH_PROFILE="a100-40gb")
+    assert done.returncode == 0, done.stdout + done.stderr
+    [run] = runs(hosts)
+    assert run.endswith(f" --gpu-source phastform={DEPLOYED} --profile a100-40gb")
+    done = hosts.run(campaign, LH_PROFILE="../a100")
+    assert done.returncode == 2 and "LH_PROFILE is a profile's name" in done.stderr
 
 
 def test_a_gpu_node_without_its_revision_runs_the_point_with_none(hosts: Hosts) -> None:

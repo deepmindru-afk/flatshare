@@ -11,7 +11,7 @@ benchmarks/e2/campaign.sh --pause benchmarks/e2/w2.campaign     # measure, then 
 For each point whose run directory on cyan is not complete, `campaign.sh`:
 
 1. switches the GPU node to the arm's engine with [`variant.sh use`](../../deploy/phastform/variants/README.md), which restarts only what changes and returns once the engine answers `/health`;
-2. runs `lh-bench e2 run` on cyan, into `~/leaseholder/runs/e2/CAMPAIGN/POINT`, with each GPU node's deployed revision, its `~/leaseholder/src/DEPLOYED` read over SSH as the point starts, which `run.json` keeps beside cyan's (`--gpu-source`). Meanwhile it samples the GPU node's `nvidia-smi` once a second (SM and memory clocks, temperature, power and clock event reasons, timestamps in UTC), because a consumer card's boost clock follows its temperature, and puts the samples into that directory as `gpu.csv` when the point ends, failed or not;
+2. runs `lh-bench e2 run` on cyan, into `~/leaseholder/runs/e2/CAMPAIGN/POINT`, with each GPU node's deployed revision, its `~/leaseholder/src/DEPLOYED` read over SSH as the point starts, which `run.json` keeps beside cyan's (`--gpu-source`). Meanwhile it samples the GPU node's `nvidia-smi` once a second (SM and memory clocks, temperature, power and clock event reasons, timestamps in UTC, and the GPU's name, so that a record says which card it ran on), because a consumer card's boost clock follows its temperature, and puts the samples into that directory as `gpu.csv` when the point ends, failed or not;
 3. fetches that directory into `$LH_E2_RESULTS/CAMPAIGN/POINT` (default `~/leaseholder/runs/e2`), without AIPerf's `inputs.json`.
 
 A complete point is skipped, so running a stopped campaign again resumes it. The first failure stops the campaign, with the partial run directory fetched and its `run.json` saying what failed. At the end, `lh-bench e2 report` writes the frontier of the campaign's points (fetched into `CAMPAIGN/report`: `frontier.md`, `frontier.csv` and a figure per workload, `frontier.svg` for the arm files' own) and `lh-bench e2 reset` puts cyan's units back. `--pause` then stops the GPU node's units, which nothing should hold while idle. `campaign.log` beside the points keeps every step.
@@ -98,6 +98,8 @@ policy = "least-loaded"
 ```sh
 LH_GPU=phastform.cis.upenn.edu,gray.cis.upenn.edu benchmarks/e2/campaign.sh --pause benchmarks/e2/NAME.campaign
 ```
+
+`LH_PROFILE` names the GPU nodes' hardware profile ([`deploy/profiles`](../../deploy/profiles)) when it is not the frozen box's: `lh-bench e2 run --profile` then holds each engine to that profile's model and scheduler settings, and the report gives the points a workload of their own, by the GPU and the model their records name.
 
 `lh-bench e2 run` starts each node's tunnel and leaves it running (stop `lh-tunnel@gray` after the window), checks, empties and snapshots each node's engine, and tells the voice worker the nodes, so that each call's STT and TTS follow it. The summary keeps the totals a point on one node has, the engines' counters added up, and each node's share; the report places the point by its totals and gives each node's share in a table of its own ([the summary and the report](../../python/leaseholder_bench/README.md#e2-points)).
 
