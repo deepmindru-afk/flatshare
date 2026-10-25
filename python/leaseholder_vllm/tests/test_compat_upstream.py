@@ -393,8 +393,8 @@ def test_the_patches_apply_to_the_pinned_release_and_a_shifted_one_names_its_hun
         in proc.stdout
     )
     assert (
-        "does not match the scheduler at its line 53); its scheduler.py against v0.32.0: 1 file changed, 2 insertions(+)."
-        in proc.stdout
+        "does not match the scheduler at its line 53); its scheduler.py against v0.32.0: "
+        "1 file changed, 2 insertions(+)." in proc.stdout
     )
 
 

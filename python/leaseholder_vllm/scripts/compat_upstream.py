@@ -15,8 +15,8 @@ release tags into it, and reports:
 - with ``--python``, an interpreter with CPU torch and the Python dependencies of vLLM's main: on each clean merge, the
   test files the PR adds or changes (``tests/**/test_*.py`` in its diff), run on CPU from the merge's source; a test
   that fails on main too is main's, not the PR's. Each step that runs the interpreter has ``--timeout`` seconds (900),
-  and a PR's test run that takes longer fails its files. An interpreter that cannot import main's scheduler is reported as
-  such, and runs nothing;
+  and a PR's test run that takes longer fails its files. An interpreter that cannot import main's scheduler is
+  reported as such, and runs nothing;
 - make-room's patches on a sparse checkout of the newest release, and of a newer release candidate if there is one
   (``build.py make-room OUT --source-tree``): they apply, or the first hunk that does not.
 
