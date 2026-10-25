@@ -189,29 +189,32 @@ check_box() {
 }
 
 init() {
-  local home=$1 hub=$2 root
+  local home=$1 hub=$2 root qroot qhub
   [[ ! -e $home || -f $home/rehearsal.env ]] || { echo "init: ~/$home exists and is no rehearsal's" >&2; exit 2; }
   mkdir -p "$home"
   chmod 700 "$home"
   root=$(cd "$home" && pwd)
   mkdir -p "$root/run" "$root/tmp" "$root/.rehearsal/steps" "$root/.rehearsal/bin"
   chmod 700 "$root/run"
+  # The paths quoted for the shell that sources the file, so that a space in the login home or the hub cache's
+  # path leaves them whole.
+  qroot=$(printf %q "$root") qhub=$(printf %q "$hub")
   cat >"$root/rehearsal.env" <<EOF
 # The single-host rehearsal's environment on this host (rehearse.sh init wrote it; bin/rehearsal-ssh sources it before
 # each of the rehearsal's commands): its own home, runtime directory, caches and supervisor; the box's hub cache, read
 # offline; no way to the box's user manager (no session bus, and a runtime directory that is not /run/user/UID), so
 # that nothing of the rehearsal stops or starts a unit of the box's; and sudo refused.
 export LH_REHEARSAL=1
-export HOME=$root
-export XDG_RUNTIME_DIR=$root/run XDG_CONFIG_HOME=$root/.config XDG_CACHE_HOME=$root/.cache
-export XDG_DATA_HOME=$root/.local/share XDG_STATE_HOME=$root/.local/state TMPDIR=$root/tmp
-export UV_CACHE_DIR=$root/.cache/uv UV_PYTHON_INSTALL_DIR=$root/.local/share/uv/python
-export CARGO_HOME=$root/.cargo RUSTUP_HOME=$root/.rustup
+export HOME=$qroot
+export XDG_RUNTIME_DIR=$qroot/run XDG_CONFIG_HOME=$qroot/.config XDG_CACHE_HOME=$qroot/.cache
+export XDG_DATA_HOME=$qroot/.local/share XDG_STATE_HOME=$qroot/.local/state TMPDIR=$qroot/tmp
+export UV_CACHE_DIR=$qroot/.cache/uv UV_PYTHON_INSTALL_DIR=$qroot/.local/share/uv/python
+export CARGO_HOME=$qroot/.cargo RUSTUP_HOME=$qroot/.rustup
 unset DBUS_SESSION_BUS_ADDRESS UV VIRTUAL_ENV PYTHONPATH HF_HOME HUGGINGFACE_HUB_CACHE TRANSFORMERS_CACHE
 unset VLLM_CACHE_ROOT TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR TORCH_HOME LH_GPU_ID LH_PROFILE LH_NODE_DIR LH_E2_RESULTS
 export LH_SUPERVISOR=lh-svc
-export HF_HUB_CACHE=$hub HF_HUB_OFFLINE=1
-export PATH=$root/.rehearsal/bin:$root/.local/bin:\$PATH
+export HF_HUB_CACHE=$qhub HF_HUB_OFFLINE=1
+export PATH=$qroot/.rehearsal/bin:$qroot/.local/bin:\$PATH
 cd "\$HOME"
 EOF
   cat >"$root/.rehearsal/bin/sudo" <<'EOF'
@@ -241,7 +244,8 @@ verify_box() {
   before=$root/.rehearsal/box-before.state
   after=$root/.rehearsal/box-after.state
   [[ -f $before ]] || { echo "verify: no $before: init recorded no state" >&2; return 2; }
-  hub=$(sed -n 's/^export HF_HUB_CACHE=\([^ ]*\) .*/\1/p' "$root/rehearsal.env")
+  # The hub cache that init recorded, as rehearsal.env sets it (in a subshell: it sets HOME and the directory).
+  hub=$(. "$root/rehearsal.env" && printf '%s\n' "$HF_HUB_CACHE")
   box_state "$hub" >"$after"
   if cmp -s "$before" "$after"; then
     echo "verify: the box's deployment as the rehearsal found it: $(grep -c . "$before") lines (units, files) alike"

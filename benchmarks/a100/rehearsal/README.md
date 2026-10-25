@@ -13,15 +13,13 @@
 
 All of it runs under `LH_SUPERVISOR=lh-svc` in a home of its own, `~/a100-rehearsal`, beside the box's deployment, which shares the account. The rehearsal leaves that deployment as it found it, and checks that it did. On 2026-10-25 its steps took 70 minutes on the box, the GPU in use for 57 of them, from `gpu` to `block4`; two runs before stopped at defects of the kit, which the third ran past once each was fixed ([the records](../../results/2026-10-25-a100-rehearsal/README.md)).
 
-Two features of the kit exist for the rehearsal, and `check` refuses a checkout without them:
+Two features of the kit exist for the rehearsal, and `check` refuses a checkout to push (`REHEARSAL_REPO`) without them:
 
 - **`deploy/bin/in-private-net`** runs each GPU server in a network namespace of its own, so block 0's listener audit passes under lh-svc ([below](#block-0s-listener-audit)).
-- **`run.sh --estimate BLOCK=MINUTES`.** Round 1's 29-minute block estimate covers three points. With it, no deadline can let block 4 start and still stop it after its first point. A deadline late enough to start the block leaves room for the second point.
-- **What it does:** with `--estimate 4=15`, block 4 starts under a deadline 16 to 17 minutes away.
+- **`run.sh --estimate BLOCK=MINUTES`.** Round 1's 29-minute block estimate covers three points. With it, no deadline can let block 4 start and still stop it after its first point: a deadline late enough to start the block leaves room for the second point. With `--estimate 4=15`, block 4 starts under a deadline 16 to 17 minutes away:
   - `campaign.sh`'s own budget lets the first point start: 13 minutes for W5's agent point plus 2 for the engine switch.
   - It then stops the block before the second point (voice alone: 7 minutes and a switch), as it would before any point that cannot end before the deadline.
   - `run.sh` exits 0 with the block left undone.
-- **Requirement:** the checkout pushed (`REHEARSAL_REPO`) must have this change. `check` refuses one without it.
 
 ## Before
 
@@ -43,7 +41,7 @@ Two features of the kit exist for the rehearsal, and `check` refuses a checkout 
 
 ## The commands
 
-From this directory on the workstation, in bash (macOS's 3.2 is enough); the rehearsal's own state, logs and records go to `REHEARSAL_WORK`, `~/leaseholder/rehearsal`:
+From this directory on the workstation, in bash (macOS's 3.2 is enough); the rehearsal's own state, logs and records go to `REHEARSAL_WORK`, `~/leaseholder/rehearsal`. The workstation also needs `git`, `rsync`, `tar` and a `python3` that runs, for the `data` step's `long_traces.py`. On a Mac, `/usr/bin/git` and `/usr/bin/python3` need Xcode's developer tools, their license accepted; another `git` or `python3` first on `PATH` serves as well.
 
 ```sh
 bash rehearse.sh all                       # every step not done yet, in order; stops at the first that fails
