@@ -290,9 +290,10 @@ def test_the_method_records_what_a_process_times():
     assert P.METHOD["configs"] == P.CONFIGS
 
 
-def test_a_check_and_a_baseline_time_the_same_schedulers(monkeypatch, tmp_path, capsys):
-    """Both time stock, off, on and off2 in each process, so that a check's processes are its baseline's; stand-ins
-    take the timing's and the machine's place."""
+@pytest.fixture
+def standins(monkeypatch) -> list:
+    """Stand-ins for the timing, the machine and the build, so that command() runs without torch. Returns the runs
+    asked for, as (their sets of rounds, their configurations)."""
     seen = []
 
     def run(module, model, states, configs, reps, runs="a"):
@@ -308,17 +309,39 @@ def test_a_check_and_a_baseline_time_the_same_schedulers(monkeypatch, tmp_path, 
     monkeypatch.setattr(P, "machine", lambda: here)
     monkeypatch.setattr(P, "importable", lambda modules: None)
     monkeypatch.setattr(P, "build_module", lambda out: out / "lh_make_room_scheduler.py")
+    return seen
+
+
+def command(monkeypatch, *argv: str) -> int:
+    monkeypatch.setattr(sys, "argv", ["perf_schedule.py", *argv])
+    return P.command()
+
+
+ONE = ("--states", "B16", "--rounds", "1")
+
+
+def test_a_check_and_a_baseline_time_the_same_schedulers(standins, monkeypatch, tmp_path, capsys):
+    """Both time stock, off, on and off2 in each process, so that a check's processes are its baseline's."""
     path = tmp_path / "baseline.json"
-    common = ["--states", "B16", "--rounds", "1"]
-    argv = ["perf_schedule.py", "baseline", str(path), *common, "--beside", "nothing"]
-    monkeypatch.setattr(sys, "argv", argv)
-    assert P.command() == 0
-    monkeypatch.setattr(sys, "argv", ["perf_schedule.py", "check", str(path), *common])
-    assert P.command() == 0
-    assert seen == [("ab", P.TIMED), ("a", P.TIMED)]
+    assert command(monkeypatch, "baseline", str(path), *ONE, "--beside", "nothing") == 0
+    assert command(monkeypatch, "check", str(path), *ONE) == 0
+    assert standins == [("ab", P.TIMED), ("a", P.TIMED)]
     out = capsys.readouterr().out
     assert out.count("against stock vLLM (ratio: off/stock - 1):") == 2
     assert "ok: 1 state within it" in out
+
+
+def test_the_record_names_the_module_it_timed_by_its_path(standins, monkeypatch, tmp_path):
+    """Every generated module has the same file name, so the record keeps the whole path --module gave."""
+    path, out = tmp_path / "baseline.json", tmp_path / "check.json"
+    assert command(monkeypatch, "baseline", str(path), *ONE, "--beside", "nothing") == 0
+    assert json.loads(path.read_text())["module"] == "make-room"
+    module = tmp_path / "mutant" / "lh_make_room_scheduler.py"
+    assert (
+        command(monkeypatch, "check", str(path), *ONE, "--module", str(module), "--out", str(out))
+        == 0
+    )
+    assert json.loads(out.read_text())["module"] == str(module.resolve())
 
 
 @pytest.mark.parametrize(

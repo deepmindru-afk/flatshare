@@ -758,7 +758,7 @@ def command() -> int:
     record = {
         "machine": here,
         "date": started.strftime("%Y-%m-%dT%H:%MZ"),
-        "module": "make-room" if args.module is None else args.module.name,
+        "module": "make-room" if args.module is None else str(args.module.resolve()),
         "method": METHOD,
         "reps": args.rounds,
         "load": result["load"],
