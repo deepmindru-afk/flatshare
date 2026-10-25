@@ -48,4 +48,7 @@ KillSignal=SIGINT
 TimeoutStartSec=1300
 TimeoutStopSec=90
 Restart=on-failure
-RestartSec=15
+# systemd counts RestartSec from the exit of the unit's last process, so after the GPU's teardown (7.7 s after a
+# SIGKILL in the W8 engine-kill drill): it is pure wait before a start that takes about 90 s, and StartLimitBurst=3
+# in 30 min ends a crash loop whatever it is.
+RestartSec=5

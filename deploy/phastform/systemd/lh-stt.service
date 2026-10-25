@@ -31,4 +31,5 @@ KillSignal=SIGINT
 TimeoutStartSec=1000
 TimeoutStopSec=60
 Restart=on-failure
-RestartSec=15
+# From the exit of the unit's last process, as lh-engine's: pure wait; StartLimitBurst ends a crash loop.
+RestartSec=5
