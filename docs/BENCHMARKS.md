@@ -288,6 +288,17 @@ What W5's re-measure says:
 
 - **More calls, about as far over the SLO.** The PRs' p95 is over its SLO in every round, by 269 ms (206–370) with 4 callers and 257 ms (226–333) with 6, against 202 ms at the median with two (the fifteen runs above). #63351 holds agent prefill while any call's first tokens are due, so the calls' overlapping replies hold it for longer: in 53% and 64% of the engine's steps over the calls, against 33% with two ([E3](#e3-what-make-room-takes-from-the-agents)), and the agents' throughput over the first 240 s falls to 3,055 and 2,716 tokens/s, from 3,203 with two.
 
+**The final code, five rounds against W5's** (FB, 2026-10-25): voice alone, the frozen box and the PRs' 48-token configuration on the final code, both hosts at v0.3-191-g987fd09: W6's transport (the GPU servers on Unix sockets behind cyan's tunnel of one SSH session a connection, the gateway on its socket unit), the budget cap counting a reply's tokens in flight as #63351 does since its revision 9013ed433, and the harness's fixes. Each round replays the sample of the agents of W5's round of the same number (agent seed 10 + N) with W5's arm files, every call opening with a warm-up turn, so each configuration compares with W5's campaign round by round. V2V p95 in ms, the median of the five rounds and their range, and the agents' tokens/s over the calls' first 240 s:
+
+| Configuration | Rounds | W5 V2V p95 | FB V2V p95 | FB − W5, round by round | Agents' tokens/s, W5 / FB |
+|---|---:|---:|---:|---|---:|
+| Voice alone | 5 | 1,784 (1,764–1,819) | 1,796 (1,768–1,819) | −4, +18, −51, +55, +11 | — |
+| The frozen box | 5 | 10,432 (8,686–10,770) | 10,399 (8,374–10,866) | −177, −2,396, +1,706, +761, +435 | 3,306 / 3,368 |
+| #63350 + #63351, a 48-token window | 5 | 2,250 (2,175–2,307) | 2,268 (2,246–2,343) | +77, +71, −45, +19, +36 | 3,156 / 3,252 |
+
+- **W5's numbers stand on the final code.** The PRs' configuration came out at 2,268 ms against 2,250 in the same five rounds of W5's campaign, higher in four rounds and lower in one, within what two sets of runs of it on the same samples show (W5's fifteen runs of it, whose median of 2,236 ms the tables above and the README give, span 2,132–2,397 ms). Its V2V p50 and its realtime first byte came out lower in four of the five rounds, by a median of 26 ms and 20 ms: the sockets and the pooled connections take a little off each turn and leave the tail where W5 measured it.
+- **The references moved as they move between runs.** Voice alone by −51 to +55 ms, inside W5's own range; the frozen box by −2,396 to +1,706 ms, as its p95 moves from run to run on the same sample (W5's ten runs of it span 8,686–12,115 ms). No turn failed in any of the 15 points. The records are in [`benchmarks/results/2026-10-25-e2-fb`](../benchmarks/results/2026-10-25-e2-fb), whose `compare.py` gives this table from them and W5's, with one row a round.
+
 ### E3: what make-room takes from the agents
 
 The cost to the agents by its mechanism, over W5's points ([EXPERIMENTS.md](EXPERIMENTS.md#e3-the-background-tiers-cost-of-make-room) has the counters and their limits). The median of each configuration's runs:
