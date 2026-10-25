@@ -1,6 +1,6 @@
 # lh-gateway
 
-`lh-gateway` is the process in front of one vLLM engine. It carries Leaseholder's request contract: who a request belongs to, which session and SLO class it has, and which engine inputs a client may not set. It relays responses byte for byte, cancels the engine request when the client leaves, and ingests lifecycle events. Its admission point runs `lh-core`'s admission policies: the E2 baselines it emulates, and the lifecycle policy (`lifecycle`, `leaseholder` in E2's arm files: KV headroom timed by lifecycle events, a prefill budget in the critical window, a realtime class that is never shed and degrades instead), which E2's arm 9 runs with make-room. In E2's discriminating scenario its lifecycle-timed mechanisms could not act, since running agent requests held the KV ([what E2 measured](#the-lifecycle-policy)). A deployment can cap every realtime reply without a policy (`realtime_max_tokens`).
+`lh-gateway` is the process in front of one vLLM engine. It carries Leaseholder's request contract: who a request belongs to, which session and SLO class it has, and which engine inputs a client may not set. It relays responses byte for byte, cancels the engine request when the client leaves, and ingests lifecycle events. Its admission point runs `lh-core`'s admission policies: the E2 baselines it emulates, and the lifecycle policy (`policy = "lifecycle"`; E2's arm files spell it `leaseholder`), which E2's arm 9 runs with make-room: KV headroom timed by lifecycle events, a prefill budget in the critical window, a realtime class that is never shed and degrades instead. In E2's discriminating scenario its lifecycle-timed mechanisms could not act, since running agent requests held the KV ([what E2 measured](#the-lifecycle-policy)). A deployment can cap every realtime reply without a policy (`realtime_max_tokens`).
 
 It is a harness, not a general-purpose router: one upstream, loopback listeners, and nothing a stock proxy would not need besides the contract above. Its cost is measured below.
 
@@ -78,7 +78,7 @@ The `[admission]` table sets the admission policy. A key that belongs to other p
 
 | Key | Default | Policies | Meaning |
 |---|---|---|---|
-| `policy` | `"none"` | | `"none"` (every request goes upstream at once), `"static-cap"`, `"token-reservation"`, `"flow-control"`, `"preempt-resubmit"` or `"lifecycle"` (`"leaseholder"`, its name in E2's arm files, is the same policy) |
+| `policy` | `"none"` | | `"none"` (every request goes upstream at once), `"static-cap"`, `"token-reservation"`, `"flow-control"`, `"preempt-resubmit"` or `"lifecycle"` (E2's arm files spell it `"leaseholder"`) |
 | `background_max_in_flight` | required | `static-cap` | Background requests in flight at most |
 | `pool_tokens` | 36400 | `token-reservation`; `lifecycle` with `headroom` or `degrade` | The KV pool in tokens; the default is the frozen box's |
 | `reserved_tokens` | required | `token-reservation` | Pool tokens background requests leave free; less than `pool_tokens` |
@@ -117,7 +117,7 @@ The first four policies are E2's baselines, the simple answers an operator would
 
 ### The lifecycle policy
 
-**`lifecycle`**, the lifecycle policy (`leaseholder`, its name until 2026-10-25, in E2's arm files), is what E2's arm 9 runs with make-room. Realtime requests go upstream at once and are never queued or refused ([ADR-0003](../../docs/adr/0003-realtime-is-never-shed.md)); background requests yield to the realtime sessions' turns; interactive requests are not held. `lh-core` decides from how many realtime sessions are in each state of their turn; the gateway keeps the states and the clocks.
+**The lifecycle policy** (`policy = "lifecycle"`; E2's arm files spell it `leaseholder`) is what E2's arm 9 runs with make-room. Realtime requests go upstream at once and are never queued or refused ([ADR-0003](../../docs/adr/0003-realtime-is-never-shed.md)); background requests yield to the realtime sessions' turns; interactive requests are not held. `lh-core` decides from how many realtime sessions are in each state of their turn; the gateway keeps the states and the clocks.
 - **Realtime sessions.** Accepted lifecycle events move a session, keyed by its session id, through `idle`, `user_speaking` (`user_speech_started`), `critical` (`user_turn_ended`), `playback` (`playback_started`, the reply's first audio) and back to `idle` (`playback_ended`). `interrupted` is the user speaking again, and `session_closed` forgets the session. A realtime request also puts its session in `critical`: LiveKit's preemptive generation sends it before the end of turn is decided.
   - *Lost or reordered events.* An event moves its session to the event's state whatever the state was, in the order the gateway receives events, and every state but `idle` ends after `state_timeout_s` without an event or a request, counted. A lost event holds a session at most that long.
   - *Without events.* A session that has posted none (its client sends none, or the voice worker's events are off) is `critical` while a realtime request of it is in flight, and the request's end ends it; with events, the reply's first audio does.

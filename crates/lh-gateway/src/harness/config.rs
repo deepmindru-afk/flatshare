@@ -68,7 +68,7 @@ enum PolicyName {
     TokenReservation,
     FlowControl,
     PreemptResubmit,
-    /// The lifecycle policy; `leaseholder`, its name until 2026-10-25, is what E2's arm files say.
+    /// The lifecycle policy (`policy = "lifecycle"`; E2's arm files spell it `leaseholder`).
     #[serde(alias = "leaseholder")]
     Lifecycle,
 }
