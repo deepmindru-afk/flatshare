@@ -49,7 +49,7 @@ The other arms take an earlier arm's winner, so their files are written from its
 | 5, best arm 4 + headroom | `"--watermark", "0.05"` (0.1, 0.2) in `[engine] flags`; or `"--max-num-queued-tokens", "N"`, which answers new requests 503 while the prompt tokens in prefill exceed N, voice requests included. vLLM sizes N as the TTFT target times the prefill throughput |
 | 6, best arm 5 + an operator's cap | `[gateway.admission]` with `policy = "static-cap"` and `background_max_in_flight = 2` (4, 8); or `policy = "token-reservation"` and `reserved_tokens` set to one voice turn's KV: the realtime class's prompt and completion tokens per completed request, from arm 1's `summary.json` (`gateway.counters`) |
 | 8a, best stock + llm-d's flow control | `[gateway.admission]` with `policy = "flow-control"` and `ceilings = { realtime = …, interactive = …, background = … }` |
-| 8b, best stock + SMG | `router = "smg"`, and `[gateway]` with `upstream = "http://127.0.0.1:18090"` and `upstream_priority = ["smg-header"]` |
+| 8b, best stock + SMG | `router = "smg"`, and `[gateway]` with `upstream = "unix:/run/user/1007/lh/smg.sock"` and `upstream_priority = ["smg-header"]`: SMG runs in the voice-plane namespace between two proxies (`deploy/cyan/smg.sh`), since it takes only http:// workers and listens on TCP only |
 | 8c, best stock + preempt-resubmit | `[gateway.admission]` with `policy = "preempt-resubmit"` |
 | factor, frozen and best stock | `[voice] preemptive_generation = false`, `arm = "<arm>-no-preemptive"` |
 | calls, best stock | `[voice] callers = 4` (6), at 0 and 16 sessions, `arm = "<arm>-calls"` |

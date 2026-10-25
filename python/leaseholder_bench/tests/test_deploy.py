@@ -452,3 +452,22 @@ def test_the_gpu_nodes_servers_listen_on_their_sockets_in_a_private_directory() 
     for name in ("engine", "stt", "tts"):
         assert f"${{lh}}/{name}.sock" in smoke or f"$lh/{name}.sock" in smoke, name
     assert '"$(dirname "$0")/../bin/audit-listeners"' in smoke
+
+
+def test_smgs_arm_listens_on_no_tcp_port_of_cyans_network() -> None:
+    # SMG takes only http:// workers and serves TCP only: it runs in the voice-plane namespace, between a proxy
+    # from the gateway's socket and one to the engine's tunnel socket.
+    unit = (DEPLOY / "cyan" / "systemd" / "lh-smg.service").read_text()
+    assert exec_lines(unit, "ExecStart") == [
+        "%h/leaseholder/src/deploy/bin/in-voicenet %h/leaseholder/src/deploy/cyan/smg.sh"
+    ]
+    assert "BindsTo=lh-voicenet.service" in unit.splitlines()
+    smg = (DEPLOY / "cyan" / "smg.sh").read_text()
+    assert '-l 127.0.0.1:18000 "$proxy" "$lh/phastform-engine.sock"' in smg
+    assert '-l "$lh/smg.sock" "$proxy" 127.0.0.1:18090' in smg
+    assert "--worker-urls http://127.0.0.1:18000" in smg and "--prometheus-host 127.0.0.1" in smg
+    arms = [arm for arm in (REPO / "benchmarks" / "e2" / "arms").glob("*.toml")]
+    smg_arms = [arm for arm in arms if 'router = "smg"' in arm.read_text()]
+    assert smg_arms
+    for arm in smg_arms:
+        assert 'upstream = "unix:/run/user/1007/lh/smg.sock"' in arm.read_text(), arm.name

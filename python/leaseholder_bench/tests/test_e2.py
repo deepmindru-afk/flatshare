@@ -401,7 +401,7 @@ def test_flag_values_pair_each_flag_with_its_value() -> None:
 def test_the_gateway_configuration_merges_the_arm_and_round_trips(tmp_path: Path) -> None:
     base = tomllib.loads(EXAMPLE.read_text())
     overlay = {
-        "upstream": "http://127.0.0.1:18090",
+        "upstream": "unix:/run/user/1007/lh/smg.sock",
         "upstream_priority": ["smg-header"],
         "admission": {"policy": "flow-control", "ttft_target_ms": {"realtime": 300.0}},
         "tenants": {"agents": {"max_class": "background"}},
