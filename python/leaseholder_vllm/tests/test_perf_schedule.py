@@ -4,6 +4,8 @@ here times anything: tests/test_perf_control.py, the check's negative control, d
 
 import json
 import statistics
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,6 +188,39 @@ def test_the_json_puts_a_key_a_line_and_a_short_list_on_one():
         " ]",
         "}",
     ]
+
+
+def script(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, P.__file__, *args], capture_output=True, text=True)
+
+
+def test_a_check_without_a_readable_baseline_of_this_method_exits_2(tmp_path):
+    """Exit 2 is "could not measure", which a job tells from 1, "the change costs more"."""
+    proc = script("check", str(tmp_path / "missing.json"))
+    assert proc.returncode == 2, proc.stderr
+    assert "cannot read the baseline" in proc.stderr and "Traceback" not in proc.stderr
+    (tmp_path / "broken.json").write_text("{")
+    assert script("check", str(tmp_path / "broken.json")).returncode == 2
+    other = json.loads(BASELINE.read_text())
+    other["method"] = other["method"] | {"steps": 30}
+    (tmp_path / "other.json").write_text(json.dumps(other))
+    proc = script("check", str(tmp_path / "other.json"))
+    assert proc.returncode == 2 and "measured otherwise" in proc.stderr
+
+
+def test_an_unknown_state_exits_2():
+    proc = script("check", str(BASELINE), "--states", "A16,Z9")
+    assert proc.returncode == 2 and "no state Z9" in proc.stderr
+
+
+def test_a_python_without_torch_or_vllms_scheduler_is_told_why():
+    assert P.importable(["json", "statistics"]) is None
+    assert "no_such_module_lh" in P.importable(["json", "no_such_module_lh"])
+
+
+def test_a_measuring_process_that_fails_means_it_could_not_measure(tmp_path):
+    with pytest.raises(P.CannotMeasure, match="A16: its measuring process failed"):
+        P.run(tmp_path / "no-such-module.py", str(tmp_path), [P.BY_KEY["A16"]], ["off"], 1)
 
 
 def test_the_checked_in_baseline_is_complete_and_its_numbers_agree():

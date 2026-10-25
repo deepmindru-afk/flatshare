@@ -35,7 +35,10 @@ and run A against run B, compared as the check compares a run with the baseline.
     python tests/perf_schedule.py check BASELINE [--out JSON] [--reps 3] [--states A16,B64] [--module MODULE]
     python tests/perf_schedule.py baseline BASELINE [--reps 3] [--beside TEXT]
 
-Both need torch and vLLM 0.32.0's dependencies, with vLLM's source on PYTHONPATH (``make perf-make-room``).
+Both need torch and vLLM 0.32.0's dependencies, with vLLM's source on PYTHONPATH (``make perf-make-room``). The exit
+status is 0 when every state is within the tolerance, 1 when one costs more than it did, and 2 when it could not
+measure: no torch or vLLM's scheduler, a baseline missing, unreadable or measured otherwise, or a measuring process
+that failed or left its steady state.
 """
 
 from __future__ import annotations
@@ -118,6 +121,10 @@ BY_KEY = {state.key: state for state in STATES}
 
 class StateChanged(Exception):
     """The scheduler left the steady state during the measured steps."""
+
+
+class CannotMeasure(Exception):
+    """The check could not measure: the environment, the baseline or a measuring process, not the change. Exit 2."""
 
 
 def cdiv(a: int, b: int) -> int:
@@ -292,7 +299,9 @@ def run(
                 cmd += [model, state.key, *order]
                 proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
                 if proc.returncode:
-                    sys.exit(f"perf_schedule.py: {state.key} failed:\n{proc.stderr[-2000:]}")
+                    raise CannotMeasure(
+                        f"{state.key}: its measuring process failed:\n{proc.stderr[-2000:]}"
+                    )
                 times = json.loads(proc.stdout)
                 processes.append(
                     {
@@ -495,6 +504,35 @@ def machine() -> dict:
     }
 
 
+def importable(modules: list[str]) -> str | None:
+    """None if this Python imports ``modules``, or why not."""
+    for name in modules:
+        try:
+            importlib.import_module(name)
+        except ImportError as error:
+            return f"{name}: {error}"
+    return None
+
+
+def read_baseline(path: Path) -> dict:
+    """The baseline at ``path``, measured as this check measures; CannotMeasure if it is not one."""
+    try:
+        baseline = json.loads(path.read_text())
+        missing = [
+            k for k in ("date", "machine", "method", "tolerance", "cells") if k not in baseline
+        ]
+    except (OSError, ValueError, TypeError) as error:
+        raise CannotMeasure(f"cannot read the baseline {path}: {error}") from error
+    if missing:
+        raise CannotMeasure(f"cannot read the baseline {path}: it has no {', '.join(missing)}")
+    if baseline["method"] != METHOD:
+        raise CannotMeasure(
+            f"{path} was measured otherwise than this check measures: measure a new baseline "
+            "(make perf-make-room UPDATE=1)"
+        )
+    return baseline
+
+
 def build_module(out: Path) -> Path:
     """make-room's module, as build.py writes it at engine start, from the vLLM source on PYTHONPATH."""
     build = load(BUILD, "lh_perf_build")
@@ -502,6 +540,14 @@ def build_module(out: Path) -> Path:
 
 
 def main() -> None:
+    try:
+        sys.exit(command())
+    except CannotMeasure as error:
+        print(f"perf_schedule.py: {error}", file=sys.stderr)
+        sys.exit(2)
+
+
+def command() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("check", "baseline"):
@@ -523,26 +569,16 @@ def main() -> None:
     if args.command == "measure":
         times = measure(args.module, args.model, BY_KEY[args.state], args.configs)
         print(json.dumps({c: [[round(t, 2) for t in s] for s in v] for c, v in times.items()}))
-        return
+        return 0
 
     unknown = [key for key in args.states.split(",") if key not in BY_KEY]
     if unknown:
-        sys.exit(
-            f"perf_schedule.py: no state {', '.join(unknown)}; the states are {', '.join(BY_KEY)}"
-        )
+        raise CannotMeasure(f"no state {', '.join(unknown)}; the states are {', '.join(BY_KEY)}")
     states = [BY_KEY[key] for key in args.states.split(",")]
-    baseline = None
-    if args.command == "check":
-        baseline = json.loads(args.baseline.read_text())
-        if baseline.get("method") != METHOD:
-            sys.exit(
-                f"perf_schedule.py: {args.baseline} was measured otherwise than this check measures: "
-                "measure a new baseline (make perf-make-room UPDATE=1)"
-            )
-    try:
-        suite()
-    except Exception as error:  # pytest's importorskip raises its own exception, not ImportError
-        sys.exit(f"perf_schedule.py: this Python cannot import torch or vLLM's scheduler: {error}")
+    baseline = read_baseline(args.baseline) if args.command == "check" else None
+    why = importable(["pytest", "torch", "vllm.v1.core.sched.scheduler"])
+    if why:
+        raise CannotMeasure(f"this Python cannot import what the scheduler needs ({why})")
     from conftest import write_model
 
     configs = ["off", "on"] + ([NOISE] if args.command == "baseline" else [])
@@ -597,7 +633,7 @@ def main() -> None:
             f"{record['noise_max']:+.1%}, the worst run B against run A {record['aa_max']:+.1%}, "
             f"so a tolerance of {record['tolerance']:.0%}"
         )
-        return
+        return 0
 
     record |= {
         "cells": measured,
@@ -620,8 +656,9 @@ def main() -> None:
     if failures:
         print(f"FAIL: the change costs more than it did in {len(failures)} states:")
         print("\n".join(f"  {failure}" for failure in failures))
-        sys.exit(1)
+        return 1
     print(f"ok: {len(measured)} states within it")
+    return 0
 
 
 if __name__ == "__main__":
