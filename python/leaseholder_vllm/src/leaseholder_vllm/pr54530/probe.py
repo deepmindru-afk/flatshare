@@ -4,20 +4,22 @@ slot. Measured on the frozen box on 2026-10-22, with the port's synchronous Sche
 stock AsyncScheduler over it: 81 ms with the PR, 8,900 ms without; not measured since.
 
 Run it on the GPU node with the engine's environment, which has aiohttp:
-``~/leaseholder/venvs/engine/bin/python probe.py http://127.0.0.1:8000``. ENGINE is the engine's address:
-``http://host:port`` (the default, the GPU node's), or ``unix:`` and its socket.
+``~/leaseholder/venvs/engine/bin/python probe.py unix:$XDG_RUNTIME_DIR/lh/engine.sock``. ENGINE is the engine's
+address: ``unix:`` and its socket (the default, the GPU node's), or ``http://host:port``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
 
 import aiohttp
 
-ENGINE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+ENGINE = sys.argv[1] if len(sys.argv) > 1 else f"unix:{RUNTIME}/lh/engine.sock"
 SOCKET = ENGINE.removeprefix("unix:") if ENGINE.startswith("unix:") else None
 URL = "http://localhost" if SOCKET else ENGINE
 MODEL = "Qwen/Qwen3-4B-Instruct-2507-FP8"

@@ -78,10 +78,6 @@ def test_the_gpu_nodes_publish_no_kv_events_and_the_tunnels_reach_only_their_ser
         text = (DEPLOY / "cyan" / "systemd" / f"{unit}.service").read_text()
         forwarded = {int(forward.rsplit(":", 1)[1]) for forward in re.findall(r"-L (\S+)", text)}
         assert forwarded == SERVICES, unit
-    smoke = (DEPLOY / "phastform" / "smoke.sh").read_text()
-    audited = re.search(r"grep -E ':\(([\d|]+)\)\$'", smoke)
-    assert audited is not None
-    assert {int(port) for port in audited.group(1).split("|")} == SERVICES
     done, authorized = authorize(tmp_path, f"{KEY} lh-tunnel@cyan")
     assert done.returncode == 0, done.stderr
     assert permitted(authorized) == SERVICES
@@ -374,3 +370,52 @@ def test_the_audit_fails_when_another_user_holds_the_gateways_port(tmp_path: Pat
         "audit-listeners: 127.0.0.1:18080 is held by a process that is not lh-gateway.service's: "
         "another user's?\n"
     )
+
+
+def exec_lines(text: str, key: str) -> list[str]:
+    """The values of a unit's ``key=`` lines, continued lines joined."""
+    lines = text.replace("\\\n", " ").splitlines()
+    return [line.partition("=")[2] for line in lines if line.startswith(f"{key}=")]
+
+
+def test_the_gpu_nodes_servers_listen_on_their_sockets_in_a_private_directory() -> None:
+    phastform = DEPLOY / "phastform"
+    for config in ("engine.yaml", "stt.yaml"):
+        keys = re.findall(r"^([a-z-]+):", (phastform / config).read_text(), re.M)
+        assert "host" not in keys and "port" not in keys, config
+    sockets = {
+        "lh-engine": "${LH_ENGINE_SOCKET}",
+        "lh-stt": "${LH_STT_SOCKET}",
+        "lh-tts": "%t/lh/tts.sock",
+    }
+    for unit, socket in sockets.items():
+        text = (phastform / "systemd" / f"{unit}.service").read_text()
+        [start] = exec_lines(text, "ExecStart")
+        assert f"--uds {socket}" in start and "--port" not in start and "--host" not in start, unit
+        pre = exec_lines(text, "ExecStartPre")
+        assert pre[0] == "/usr/bin/install -d -m 0700 %t/lh", unit
+        if (
+            unit != "lh-tts"
+        ):  # vLLM leaves a killed server's socket file; uvicorn replaces it itself
+            assert f"/usr/bin/rm -f {socket}" in pre, unit
+        [ready] = exec_lines(text, "ExecStartPost")
+        assert ready.startswith(
+            f"%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket {socket} "
+        ), unit
+    engine = (phastform / "systemd" / "lh-engine.service").read_text()
+    assert "Environment=LH_ENGINE_SOCKET=%t/lh/engine.sock" in engine.splitlines()
+    # Every variant that starts its own vLLM serves the same socket; SGLang, which cannot, gets a proxy to its port.
+    for conf in (phastform / "variants").glob("*/lh-engine.conf"):
+        starts = exec_lines(conf.read_text(), "ExecStart")
+        if not starts:
+            continue
+        if "sglang" in starts[-1]:
+            assert "Wants=lh-engine-proxy.socket" in conf.read_text().splitlines(), conf
+        else:
+            assert "--uds ${LH_ENGINE_SOCKET} $LH_ENGINE_FLAGS" in starts[-1], conf
+    proxy = (phastform / "systemd" / "lh-engine-proxy.socket").read_text().splitlines()
+    assert "ListenStream=%t/lh/engine.sock" in proxy and "BindsTo=lh-engine.service" in proxy
+    smoke = (phastform / "smoke.sh").read_text()
+    for name in ("engine", "stt", "tts"):
+        assert f"${{lh}}/{name}.sock" in smoke or f"$lh/{name}.sock" in smoke, name
+    assert '"$(dirname "$0")/../bin/audit-listeners"' in smoke

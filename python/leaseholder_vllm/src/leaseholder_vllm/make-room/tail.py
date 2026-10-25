@@ -9,8 +9,9 @@ AGENTS (12) closed-loop agent sessions at priority 2 beside two calls at priorit
 It prints each call turn's time to first token, then their distribution, with each failed turn (an error, or no first
 token within TIMEOUT_MS) counted at TIMEOUT_MS, as E2's report censors a reply that never came: a percentile it sets
 is marked ≥. It also prints how many turns failed and how many agents stopped early. On the GPU node, with the
-engine's environment, which has aiohttp: ``~/leaseholder/venvs/engine/bin/python tail.py http://127.0.0.1:8000 240 12
-fresh``. ENGINE is the engine's address: ``http://host:port``, or ``unix:`` and its socket.
+engine's environment, which has aiohttp: ``~/leaseholder/venvs/engine/bin/python tail.py
+unix:$XDG_RUNTIME_DIR/lh/engine.sock 240 12 fresh``. ENGINE is the engine's address: ``unix:`` and its socket, or
+``http://host:port``.
 """
 
 import asyncio

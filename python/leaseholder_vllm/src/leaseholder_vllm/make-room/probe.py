@@ -13,9 +13,10 @@ longer context, unless the budget cap keeps lower-priority prefill out of the st
 The probe prints the voice turn's time to its first token and to its 16th (a reply's first sentence), and the
 engine's state before and after it. The reserve (make_room.reserve_tokens) keeps the second priority-2 request
 out of a full pool, so the KV case is run with it off. On the GPU node, with the engine's environment, which
-has aiohttp: ``~/leaseholder/venvs/engine/bin/python probe.py http://127.0.0.1:8000 CASE`` on the frozen box,
-then after ``deploy/phastform/variant.sh use make-room --additional-config.make_room.reserve_tokens 0``. ENGINE is
-the engine's address: ``http://host:port`` (the default, the GPU node's), or ``unix:`` and its socket.
+has aiohttp: ``~/leaseholder/venvs/engine/bin/python probe.py unix:$XDG_RUNTIME_DIR/lh/engine.sock CASE`` on
+the frozen box, then after ``deploy/phastform/variant.sh use make-room
+--additional-config.make_room.reserve_tokens 0``. ENGINE is the engine's address: ``unix:`` and its socket (the
+default, the GPU node's), or ``http://host:port``.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import random
 import re
 import sys
@@ -30,7 +32,8 @@ import time
 
 import aiohttp
 
-ENGINE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+RUNTIME = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+ENGINE = sys.argv[1] if len(sys.argv) > 1 else f"unix:{RUNTIME}/lh/engine.sock"
 SOCKET = ENGINE.removeprefix("unix:") if ENGINE.startswith("unix:") else None
 URL = "http://localhost" if SOCKET else ENGINE
 CASE = sys.argv[2] if len(sys.argv) > 2 else "kv"
