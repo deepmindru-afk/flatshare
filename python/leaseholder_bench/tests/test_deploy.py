@@ -8,6 +8,7 @@ import re
 import socketserver
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler
@@ -234,3 +235,142 @@ def test_wait_healthy_reaches_a_server_on_its_unix_socket() -> None:
     )
     assert done.returncode == 1
     assert f"on {socket} not healthy after 0s" in done.stderr
+
+
+FAKE_SS = """\
+#!/bin/sh
+# ss -H -lntup | -lxp: the listeners in $FAKE_SS, as ss prints them.
+case $2 in
+  -lntup) cat "$FAKE_SS/inet" ;;
+  -lxp) cat "$FAKE_SS/unix" ;;
+esac
+"""
+
+
+class Listeners:
+    """A host for audit-listeners: what ``ss`` lists, and the processes' cgroups and commands under a
+    fake /proc. Each process of ours is in an lh-*.service unit."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.runtime = root / "run"
+        (self.runtime / "lh").mkdir(parents=True)
+        (self.runtime / "lh").chmod(0o700)
+        self.ss = root / "ss"
+        self.ss.mkdir()
+        self.proc = root / "proc"
+        self.inet: list[str] = []
+        self.unix: list[str] = []
+        self.pids = 0
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "ss").write_text(FAKE_SS)
+        (bin_dir / "ss").chmod(0o755)
+        self.env = os.environ | {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "FAKE_SS": str(self.ss),
+            "LH_AUDIT_PROC": str(self.proc),
+            "XDG_RUNTIME_DIR": str(self.runtime),
+        }
+
+    def process(self, unit: str | None, command: str = "vllm serve") -> str:
+        """A process, in ``unit`` or (None) another user's session; returns ss's note of it."""
+        self.pids += 1
+        pid = str(1000 + self.pids)
+        (self.proc / pid).mkdir(parents=True)
+        cgroup = (
+            f"/user.slice/user-1007.slice/user@1007.service/app.slice/{unit}"
+            if unit
+            else "/init.scope"
+        )
+        (self.proc / pid / "cgroup").write_text(f"0::{cgroup}\n")
+        (self.proc / pid / "cmdline").write_bytes(command.replace(" ", "\0").encode())
+        return f'users:(("python3",pid={pid},fd=3))'
+
+    def tcp(self, address: str, unit: str | None, command: str = "vllm serve") -> None:
+        held = self.process(unit, command) if unit else ""  # ss shows no process of another user's
+        self.inet.append(f"tcp LISTEN 0 4096 {address} 0.0.0.0:* {held}")
+
+    def socket(self, path: str, unit: str | None) -> None:
+        held = self.process(unit) if unit else ""
+        self.unix.append(f"u_str LISTEN 0 4096 {path} 362417538 * 0 {held}")
+
+    def audit(self, *args: str) -> subprocess.CompletedProcess[str]:
+        (self.ss / "inet").write_text("".join(f"{line}\n" for line in self.inet))
+        (self.ss / "unix").write_text("".join(f"{line}\n" for line in self.unix))
+        return subprocess.run(
+            [sys.executable, str(DEPLOY / "bin" / "audit-listeners"), *args],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+
+
+def test_the_audit_passes_a_gpu_node_whose_servers_listen_on_their_sockets(tmp_path: Path) -> None:
+    host = Listeners(tmp_path)
+    lh = host.runtime / "lh"
+    for unit, name in (("lh-engine", "engine"), ("lh-stt", "stt"), ("lh-tts", "tts")):
+        host.socket(f"{lh}/{name}.sock", f"{unit}.service")
+    host.socket(f"{lh}/8c3f0b2e-0d2c-4a51-9d55-0f6a2c0b7f3e", "lh-engine.service")  # vLLM's ZMQ IPC
+    host.tcp("127.0.0.1:631", None)  # another user's
+    host.socket("/run/systemd/private", None)
+    sockets = [f"{lh}/{name}.sock" for name in ("engine", "stt", "tts")]
+    done = host.audit(*(arg for path in sockets for arg in ("--expect", path)))
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        f"audit-listeners: ok: the box's units hold 4 Unix sockets, all in {host.runtime}, "
+        "and 0 TCP or UDP listeners, all allowed\n"
+    )
+
+
+def test_the_audit_fails_on_any_listener_of_ours_outside_the_allowed_set(tmp_path: Path) -> None:
+    host = Listeners(tmp_path)
+    # Today's box: each server on a loopback port that every user of the host reaches.
+    host.tcp("127.0.0.1:8000", "lh-engine.service")
+    host.tcp("127.0.0.1:8100", "lh-stt.service")
+    host.tcp("127.0.0.1:8880", "lh-tts.service")
+    host.socket("/tmp/8c3f0b2e-0d2c-4a51-9d55-0f6a2c0b7f3e", "lh-engine.service")
+    host.socket("@lh-abstract", "lh-tts.service")
+    host.runtime.joinpath("lh").chmod(0o755)
+    done = host.audit("--expect", f"{host.runtime}/lh/engine.sock")
+    assert done.returncode == 1
+    assert done.stderr.splitlines() == [
+        f"audit-listeners: {host.runtime}/lh is mode 755, owned by uid {os.getuid()}: it must be 0700 and ours",
+        "audit-listeners: lh-engine.service listens on tcp 127.0.0.1:8000",
+        "audit-listeners: lh-stt.service listens on tcp 127.0.0.1:8100",
+        "audit-listeners: lh-tts.service listens on tcp 127.0.0.1:8880",
+        "audit-listeners: lh-engine.service listens on a socket outside "
+        f"{host.runtime}: /tmp/8c3f0b2e-0d2c-4a51-9d55-0f6a2c0b7f3e",
+        f"audit-listeners: lh-tts.service listens on an abstract socket outside {host.runtime}: @lh-abstract",
+        f"audit-listeners: nothing listens on {host.runtime}/lh/engine.sock",
+    ]
+
+
+def test_the_audit_allows_the_gateways_port_and_an_sglang_engine_on_loopback(
+    tmp_path: Path,
+) -> None:
+    host = Listeners(tmp_path)
+    host.tcp("127.0.0.1:18080", "lh-gateway.service")
+    host.tcp("127.0.0.1:8000", "lh-engine.service", "python -m sglang.launch_server")
+    host.socket(f"{host.runtime}/lh/phastform-engine.sock", "lh-tunnel@phastform.service")
+    assert host.audit().returncode == 0
+    # Beyond loopback, and under any other unit, the same addresses fail.
+    host.tcp("0.0.0.0:29500", "lh-engine.service", "python -m sglang.launch_server")
+    host.tcp("127.0.0.1:18000", "lh-tunnel-phastform.service", "ssh -N")
+    done = host.audit()
+    assert done.returncode == 1
+    assert done.stderr.splitlines() == [
+        "audit-listeners: lh-engine.service listens on tcp 0.0.0.0:29500",
+        "audit-listeners: lh-tunnel-phastform.service listens on tcp 127.0.0.1:18000",
+    ]
+
+
+def test_the_audit_fails_when_another_user_holds_the_gateways_port(tmp_path: Path) -> None:
+    host = Listeners(tmp_path)
+    host.tcp("127.0.0.1:18080", None)
+    done = host.audit()
+    assert done.returncode == 1
+    assert done.stderr == (
+        "audit-listeners: 127.0.0.1:18080 is held by a process that is not lh-gateway.service's: "
+        "another user's?\n"
+    )
