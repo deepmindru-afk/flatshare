@@ -559,6 +559,27 @@ def jit_check(node: Node, home: Path | None = None, cap: str | None = None) -> d
     return result
 
 
+def jit_current(node: Node, home: Path | None = None) -> tuple[bool, str]:
+    """Whether cache/jit-check.json's build is for the compiler the engine unit names (its CUDA_HOME) and the card's
+    compute capability, and if not, why: the gpu stage can change both (a cu129 lock and CUDA 12.9's toolkit where
+    the stage rendered cu130; the card's own capability where the stage had the profile's)."""
+    home = home or _home()
+    record = _json(home / "leaseholder" / "cache" / "jit-check.json")
+    if record is None:
+        return False, "not built"
+    wanted = unit_environment(node.dir / "systemd" / "lh-engine.service", home).get("CUDA_HOME", "")
+    try:
+        cap = arch(node)
+    except HostError as e:
+        return False, str(e)
+    stale = []
+    if (record.get("cuda_home") or "").replace("%h", str(home)) != wanted:
+        stale.append(f"built with {record.get('cuda_home')}, where the engine unit names {wanted}")
+    if record.get("arch") != cap:
+        stale.append(f"built for {record.get('arch')}, where the card is {cap}")
+    return not stale, "; ".join(stale)
+
+
 # warm
 
 
@@ -1015,6 +1036,14 @@ def preflight(
             "pending",
             "not built",
             "bootstrap.sh stage builds the sampler (host.py jit-check)",
+        )
+    elif jit.get("ok") and not (current := jit_current(node, home))[0]:
+        add(
+            "FlashInfer's JIT",
+            "refused" if gpu else "pending",
+            f"the sampler for sm{jit['arch'].replace('.', '')} with {jit.get('cuda_home')}, stale: {current[1]}",
+            "the build checked another compiler or card than the engine's first start will use: bootstrap.sh gpu "
+            "builds it again (host.py jit-check --if-stale)",
         )
     elif jit.get("ok"):
         add(
@@ -1489,6 +1518,11 @@ def main(argv: list[str] | None = None) -> int:
         "--arch",
         help="the compute capability to build for (default: the card's, else the profile's)",
     )
+    p.add_argument(
+        "--if-stale",
+        action="store_true",
+        help="build only where the last build failed or was for another compiler or card",
+    )
     p = commands.add_parser("preflight", help="check the host for the campaign")
     p.add_argument("node", type=Path)
     p.add_argument("--gpu", action="store_true", help="also run the checks that need the card")
@@ -1535,6 +1569,13 @@ def main(argv: list[str] | None = None) -> int:
             for path in write_config(node):
                 print(f"host: wrote {path}")
         elif args.command == "jit-check":
+            if args.if_stale and not args.arch:
+                recorded = _json(_home() / "leaseholder" / "cache" / "jit-check.json") or {}
+                if recorded.get("ok") and jit_current(node)[0]:
+                    print(
+                        f"host: FlashInfer's sampler is built for {recorded['arch']} with {recorded['cuda_home']}"
+                    )
+                    return 0
             result = jit_check(node, cap=args.arch)
             if not result["ok"]:
                 print(

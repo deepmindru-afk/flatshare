@@ -322,7 +322,9 @@ main() {
       compilers
       host_py units "$node" >/dev/null
       host_py config "$node"
-      [[ $(field "$root/cache/jit-check.json" ok 2>/dev/null) == True ]] || host_py jit-check "$node" || true
+      # Again where the node now names another compiler or card than the staged build's (a cu129 lock, the card's own
+      # compute capability), or where it failed.
+      host_py jit-check "$node" --if-stale || true
       log "vLLM parses the node's configs"
       host_py with-engine-env "$node" "$root/venvs/engine/bin/python" "$src/deploy/profile.py" check-vllm "$node"
       preflight --gpu

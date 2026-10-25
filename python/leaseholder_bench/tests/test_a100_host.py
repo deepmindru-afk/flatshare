@@ -264,6 +264,31 @@ def venv(tmp_path: Path) -> Path:
     return home
 
 
+def test_a_jit_check_for_another_compiler_or_card_is_built_again(
+    tmp_path: Path, venv: Path, monkeypatch
+) -> None:
+    # Staged before the card was visible: the venv's CUDA 13 compiler for the profile's sm80. The gpu stage then
+    # finds R570 and renders cu129, whose units name CUDA 12.9's toolkit: the check is stale, the preflight does not
+    # take it for ok, and jit-check --if-stale builds it again, and only then.
+    out, _ = render(tmp_path, facts(gpu=None))
+    staged = host_py.Node.load(out)
+    first = host_py.jit_check(staged, venv)
+    assert first["ok"] and first["cuda_home"] == str(venv) + profile.VENV_CUDA.removeprefix("%h")
+    assert host_py.jit_current(staged, venv) == (True, "")
+    out, _ = render(tmp_path / "card", facts(gpu=gpu(driver="570.172.08")))
+    card = host_py.Node.load(out)
+    current, why = host_py.jit_current(card, venv)
+    assert not current and f"{venv}/leaseholder/cuda-12.9" in why, why
+    monkeypatch.setenv("HOME", str(venv))
+    assert host_py.main(["jit-check", str(out), "--if-stale"]) == 0
+    second = json.loads((venv / "leaseholder" / "cache" / "jit-check.json").read_text())
+    assert second["cuda_home"] == f"{venv}/leaseholder/cuda-12.9" and second["time"] > first["time"]
+    assert host_py.main(["jit-check", str(out), "--if-stale"]) == 0  # current now: nothing built
+    assert json.loads((venv / "leaseholder" / "cache" / "jit-check.json").read_text()) == second
+    # bootstrap.sh's gpu stage asks for it so.
+    assert 'host_py jit-check "$node" --if-stale' in (DEPLOY / "a100" / "bootstrap.sh").read_text()
+
+
 def test_jit_check_builds_with_the_engine_units_environment(
     tmp_path: Path, venv: Path, monkeypatch
 ) -> None:
@@ -496,6 +521,19 @@ def test_the_preflight_passes_a_ready_host_and_labels_what_the_card_changes(
     out = host_py.write_preflight(node, checks)
     data = json.loads(out.read_text())
     assert data["counts"]["degraded"] >= 1 and len(data["checks"]) == len(checks)
+
+
+def test_the_preflight_does_not_take_a_stale_jit_check_for_ok(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts())
+    record = venv / "leaseholder" / "cache" / "jit-check.json"
+    stale = json.loads(record.read_text()) | {"cuda_home": "/usr/local/cuda-13.0"}
+    record.write_text(json.dumps(stale))
+    checks = {c.check: c for c in host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)}
+    row = checks["FlashInfer's JIT"]
+    assert row.status == "refused" and "/usr/local/cuda-13.0" in row.value, row
+    assert "bootstrap.sh gpu builds it again" in row.reason
 
 
 def test_the_preflight_refuses_an_engine_venv_without_pythons_headers(
