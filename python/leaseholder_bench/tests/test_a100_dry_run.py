@@ -688,3 +688,18 @@ def test_a_failed_point_under_a_deadline_stops_the_run_as_a_failure(
     assert done.returncode == 1, done.stdout + done.stderr
     assert "a100-r1 did not complete (campaign.sh exit status 1)" in blocks
     assert "stopped before its deadline" not in blocks
+
+
+def test_bootstrap_keeps_the_hub_cache_the_first_stage_resolved(ubuntu: dict) -> None:
+    # The first stage runs with the operator's HF_HOME on a data volume: the hub cache is resolved there once, the
+    # units and every script that sources env.sh read it there, and a later stage without HF_HOME keeps it.
+    node = ubuntu["node"]
+    for invocation, env in (("stage", {"HF_HOME": "/data/hf"}), ("gpu", {})):
+        done = bootstrap(ubuntu, "render", "shell_env", **env)
+        assert done.returncode == 0, (invocation, done.stdout + done.stderr)
+        assert json.loads((node / "host.json").read_text())["hf_hub_cache"] == "/data/hf/hub", (
+            invocation
+        )
+        assert "export HF_HUB_CACHE=/data/hf/hub\n" in (node / "env.sh").read_text(), invocation
+        engine = (node / "systemd" / "lh-engine.service").read_text().splitlines()
+        assert 'Environment="HF_HUB_CACHE=/data/hf/hub"' in engine, invocation

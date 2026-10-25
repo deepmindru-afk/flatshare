@@ -275,8 +275,12 @@ def write_env(node: Node, home: Path | None = None) -> Path:
 
 
 def _gpu_line(host: dict) -> str:
-    """env.sh's line naming the lent GPU, for the later stages (detect reads it) and the GPU sampler."""
-    return f"export LH_GPU_ID={uuid}\n" if (uuid := lent_gpu(host)) else ""
+    """env.sh's lines naming the lent GPU, for the later stages (detect reads it) and the GPU sampler, and the hub
+    cache the units read, for the later stages and every script that loads a model's files."""
+    lines = f"export LH_GPU_ID={uuid}\n" if (uuid := lent_gpu(host)) else ""
+    if cache := host.get("hf_hub_cache"):
+        lines += f"export HF_HUB_CACHE={shlex.quote(cache)}\n"
+    return lines
 
 
 def active_elsewhere(host: dict) -> tuple[str, list[str]]:
@@ -755,12 +759,14 @@ def _public_addresses() -> list[str]:
     return public
 
 
-def _hf_snapshot(home: Path, model: str, revision: str) -> bool:
-    """Whether the Hugging Face cache holds `model` at `revision`, as the units' offline load reads it."""
-    if cache := os.environ.get("HF_HUB_CACHE"):
-        hub = Path(cache)
-    else:
-        hub = Path(os.environ.get("HF_HOME") or home / ".cache" / "huggingface") / "hub"
+def hub_cache(host: dict, home: Path) -> Path:
+    """The Hugging Face hub cache the units read: the one the facts recorded (bootstrap.sh resolves it once, from the
+    operator's HF_HOME or HF_HUB_CACHE at the first stage); the default under HOME for facts from before."""
+    return Path(host.get("hf_hub_cache") or home / ".cache" / "huggingface" / "hub")
+
+
+def _hf_snapshot(hub: Path, model: str, revision: str) -> bool:
+    """Whether the hub cache holds `model` at `revision`, as the units' offline load reads it."""
     snapshot = hub / f"models--{model.replace('/', '--')}" / "snapshots" / revision
     return snapshot.is_dir() and any(snapshot.iterdir())
 
@@ -1384,13 +1390,15 @@ def preflight(
     missing = []
     for config in ("engine.yaml", "stt.yaml"):
         pinned = _yaml_model(node.dir / config)
-        if pinned is None or not _hf_snapshot(home, *pinned):
+        if pinned is None or not _hf_snapshot(hub_cache(host, home), *pinned):
             missing.append(f"{pinned[0]}@{pinned[1][:7]}" if pinned else config)
     add(
         "Models",
         "refused" if missing else "ok",
         ", ".join(missing) if missing else "the engine's and the STT's at their revisions",
-        "missing from the Hugging Face cache: bootstrap.sh stage downloads them" if missing else "",
+        f"missing from {hub_cache(host, home)}: bootstrap.sh stage downloads them"
+        if missing
+        else "",
     )
     checks.append(data_check(root, data))
     binaries = []

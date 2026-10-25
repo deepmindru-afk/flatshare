@@ -355,6 +355,17 @@ def _rtt_ms(host: str, port: int = 22, tries: int = 5) -> list[float] | None:
     return times
 
 
+def hub_cache() -> str:
+    """The Hugging Face hub cache, as huggingface_hub resolves it: HF_HUB_CACHE (or the older HUGGINGFACE_HUB_CACHE),
+    else HF_HOME/hub, else XDG_CACHE_HOME/huggingface/hub, else ~/.cache/huggingface/hub."""
+    if cache := os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE"):
+        return str(Path(cache).expanduser())
+    cache_home = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return str(
+        Path(os.environ.get("HF_HOME") or Path(cache_home) / "huggingface").expanduser() / "hub"
+    )
+
+
 def detect(peer: str | None = None) -> dict:
     """The host's facts. LH_ROOTFS, LH_SYSFS, LH_PROCFS and LH_SHM put /, /sys, /proc and /dev/shm elsewhere
     (for tests)."""
@@ -403,6 +414,8 @@ def detect(peer: str | None = None) -> dict:
             str(Path.home() / ".local/bin/uv") if (Path.home() / ".local/bin/uv").exists() else None
         ),
         "python": sys.version.split()[0],
+        # Where bootstrap.sh downloads the models and the units, offline, read them (bootstrap.sh resolves it once).
+        "hf_hub_cache": hub_cache(),
     }
     if peer:
         facts["peer"] = {"host": peer, "rtt_ms": _rtt_ms(peer)}
@@ -660,6 +673,9 @@ def resolve(profile: dict, host: dict | None) -> tuple[dict[str, str], dict | No
         if cuda == VENV_CUDA
         else "",
         "units.gpu_select": gpu_select(gpu),
+        "units.hf_hub_cache": f'Environment="HF_HUB_CACHE={host["hf_hub_cache"]}"'
+        if host.get("hf_hub_cache")
+        else "",
         "units.cuda_compat": (
             f"# Driver {gpu['driver']}: CUDA 13.0 through the forward-compatibility libraries of cuda-compat-13-0,\n"
             f"# which a data-center GPU can load.\nEnvironment=LD_LIBRARY_PATH={host['cuda_compat']}"

@@ -36,6 +36,7 @@ stt_path = "%h/leaseholder/venvs/engine/bin:/usr/local/cuda/bin:/usr/local/bin:/
 stt_cuda_home = ""
 cuda_compat = ""
 gpu_select = ""
+hf_hub_cache = ""
 cuda_ldflags = ""
 engine_cpus = "8-15"
 engine_numa = "1"

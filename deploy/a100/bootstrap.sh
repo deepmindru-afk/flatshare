@@ -48,9 +48,19 @@ choose_gpu() { # LH_GPU_ID, checked before anything is written: unset, an earlie
   [[ -z ${LH_GPU_ID:-} ]] || export LH_GPU_ID
 }
 
-choose() { # what runs the units, and on which GPU
+choose_hub_cache() { # the Hugging Face hub cache, resolved once: an earlier stage's (env.sh), else as huggingface_hub
+  # resolves it from the operator's environment (HF_HOME on a data volume is often where the room is)
+  if [[ -z ${HF_HUB_CACHE:-} && -f $node/env.sh ]]; then # (sourced: env.sh quotes a path as the shell reads it)
+    HF_HUB_CACHE=$(bash -c 'unset HF_HUB_CACHE; source "$1" && printf %s "${HF_HUB_CACHE:-}"' _ "$node/env.sh")
+  fi
+  : "${HF_HUB_CACHE:=${HUGGINGFACE_HUB_CACHE:-${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}/hub}}"
+  export HF_HUB_CACHE
+}
+
+choose() { # what runs the units, on which GPU, and where the models are
   choose_supervisor
   choose_gpu
+  choose_hub_cache
 }
 
 # uv at the version the locks were resolved with or newer (uv 0.10.8 could not resolve the engine lock's torchcodec

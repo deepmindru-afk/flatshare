@@ -564,3 +564,37 @@ def test_detect_takes_the_lent_gpu_of_several_by_index_or_uuid(tmp_path: Path, m
     monkeypatch.setenv("LH_GPU_ID", "7")
     gpu = profile.detect()["gpu"]
     assert (gpu["chosen"], gpu["wanted"]) == (False, "7")
+
+
+def test_the_hub_cache_is_resolved_as_huggingface_hub_does_and_rendered_into_the_vllm_units(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The operator's HF_HOME (a data volume, often where the room is) is where the models land; the units run
+    # offline from the same cache, so detect records it and the engine's and the STT's units name it.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    assert profile.detect()["hf_hub_cache"] == str(
+        tmp_path / "home" / ".cache" / "huggingface" / "hub"
+    )
+    monkeypatch.setenv("XDG_CACHE_HOME", "/scratch/cache")
+    assert profile.detect()["hf_hub_cache"] == "/scratch/cache/huggingface/hub"
+    monkeypatch.setenv("HF_HOME", "/data/hf")
+    assert profile.detect()["hf_hub_cache"] == "/data/hf/hub"
+    monkeypatch.setenv("HF_HUB_CACHE", "/data/hub")
+    assert profile.detect()["hf_hub_cache"] == "/data/hub"
+    out, _ = render(tmp_path, "a100-40gb", host(hf_hub_cache="/data/hf/hub"))
+    for unit in ("lh-engine", "lh-stt"):
+        lines = (out / "systemd" / f"{unit}.service").read_text().splitlines()
+        assert 'Environment="HF_HUB_CACHE=/data/hf/hub"' in lines, unit
+        assert (
+            lines.index('Environment="HF_HUB_CACHE=/data/hf/hub"')
+            == lines.index("Environment=HF_HUB_OFFLINE=1") + 1
+        )
+    out, _ = render(
+        tmp_path / "unknown", "a100-40gb", host()
+    )  # facts from before the cache was recorded
+    assert "HF_HUB_CACHE" not in (out / "systemd" / "lh-engine.service").read_text()

@@ -428,7 +428,10 @@ def ready_host(tmp_path: Path, home: Path, engine: str, monkeypatch, host: dict)
         snapshot = hub / f"models--{model.replace('/', '--')}" / "snapshots" / revision
         snapshot.mkdir(parents=True)
         (snapshot / "config.json").write_text("{}")
-    monkeypatch.setenv("HF_HUB_CACHE", str(hub))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
+    node = json.loads((out / "host.json").read_text())
+    (out / "host.json").write_text(json.dumps(node | {"hf_hub_cache": str(hub)}))
     write_data(root / "data")
     for name in ("lh-gateway", "livekit-server"):
         script(root / "bin" / name, "echo 1.0")
@@ -601,6 +604,23 @@ def test_a_mig_slice_is_refused_unless_allowed(
     assert "Environment=LH_GPU_ID=GPU-1" in engine_unit
     node.host["gpu"] = gpu(mig="Enabled", mig_devices=slice_ * 2)
     assert mig().status == "refused"
+
+
+def test_the_models_row_reads_the_hub_cache_the_facts_recorded(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # The cache the units read is the one recorded at stage, whatever the shell running the preflight says.
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts())
+
+    def models() -> host_py.Check:
+        checks = host_py.preflight(node, home=venv, gateway_url=engine)
+        return next(c for c in checks if c.check == "Models")
+
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "elsewhere"))
+    assert models().status == "ok"
+    node.host["hf_hub_cache"] = str(tmp_path / "elsewhere")
+    row = models()
+    assert row.status == "refused" and f"missing from {tmp_path / 'elsewhere'}" in row.reason
 
 
 def test_the_corpus_row_refuses_traces_that_do_not_resolve_on_this_host(
