@@ -59,8 +59,8 @@ class StreamRecord:
 
 @dataclass
 class Probe:
-    """The recovery probe: each attempt's time and outcome (``ok``, ``http STATUS CODE`` or the
-    exception's class)."""
+    """The recovery probe: each attempt's time and outcome (``ok``, ``http STATUS CODE``, such as
+    ``http 503 upstream_not_ready``, or the exception's class)."""
 
     attempts: list[tuple[float, str]] = field(default_factory=list)
     recovered: float | None = None
@@ -78,14 +78,18 @@ class DrillConfig:
 
 
 def _error_text(body: bytes) -> str:
-    """An error answer's or event's ``type`` (or ``code``) and message, in OpenAI's error shape."""
+    """An error answer's or event's name and message, in OpenAI's error shape. The gateway names its
+    own errors by their ``code`` (``upstream_unavailable``, ``upstream_not_ready``) under the type
+    ``server_error``; vLLM's error events, and the gateway's in a broken stream, by their ``type``, with
+    the HTTP status as ``code``."""
     try:
         error = orjson.loads(body).get("error")
     except (orjson.JSONDecodeError, AttributeError):
         return body[:200].decode(errors="replace")
     if not isinstance(error, Mapping):
         return str(error)[:200]
-    kind = error.get("type") or error.get("code") or "error"
+    code = error.get("code")
+    kind = code if isinstance(code, str) and code else error.get("type") or "error"
     return f"{kind}: {str(error.get('message', ''))[:200]}"
 
 

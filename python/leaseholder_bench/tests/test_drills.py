@@ -74,16 +74,22 @@ def test_a_stream_that_ends_without_done_is_broken() -> None:
 
 def test_an_error_event_ends_the_stream_with_its_type() -> None:
     event = (
-        b'data: {"error": {"type": "upstream_unavailable", "message": "the engine went away"}}\n\n'
+        b'data: {"error": {"message": "the engine went away", "type": "upstream_unavailable", '
+        b'"param": null, "code": 502}}\n\n'
     )
     record = asyncio.run(one(httpx.Response(200, stream=Body([CHUNK, event]))))
     assert (record.end, record.chunks) == (ERROR_EVENT, 1)
     assert record.error == "upstream_unavailable: the engine went away"
 
 
-def test_an_error_answer_is_an_http_error_with_its_type() -> None:
+def test_an_error_answer_is_an_http_error_with_its_code() -> None:
+    # The gateway's own errors: the type is OpenAI's class of error, the code names it.
     body = {
-        "error": {"type": "upstream_unavailable", "message": "upstream request failed: connect"}
+        "error": {
+            "message": "upstream request failed: connect",
+            "type": "server_error",
+            "code": "upstream_unavailable",
+        }
     }
     record = asyncio.run(one(httpx.Response(502, json=body)))
     assert (record.status, record.end, record.first_byte) == (502, HTTP_ERROR, None)
@@ -91,12 +97,15 @@ def test_an_error_answer_is_an_http_error_with_its_type() -> None:
 
 
 def test_the_probe_retries_until_a_request_succeeds() -> None:
+    def gateway_error(status: int, code: str) -> httpx.Response:
+        error = {"message": "down", "type": "server_error", "code": code}
+        return httpx.Response(status, json={"error": error})
+
     answers = iter(
         [
             httpx.ConnectError("refused"),
-            httpx.Response(
-                502, json={"error": {"type": "upstream_unavailable", "message": "down"}}
-            ),
+            gateway_error(502, "upstream_unavailable"),
+            gateway_error(503, "upstream_not_ready"),
             httpx.Response(200, json={"choices": []}),
         ]
     )
@@ -115,6 +124,7 @@ def test_the_probe_retries_until_a_request_succeeds() -> None:
     assert [outcome for _, outcome in found.attempts] == [
         "ConnectError",
         "http 502 upstream_unavailable",
+        "http 503 upstream_not_ready",
         "ok",
     ]
     assert found.recovered == found.attempts[-1][0]
