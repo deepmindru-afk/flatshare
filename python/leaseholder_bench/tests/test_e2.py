@@ -4,6 +4,7 @@ and stand-ins for AIPerf and the callers that run as real processes, so stopping
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import itertools
 import json
@@ -933,6 +934,58 @@ def test_a_record_leaves_a_group_that_took_its_number_since_and_lost_its_own_lea
             os.kill(member, signal.SIGKILL)
 
 
+@PROC
+def test_a_record_reads_a_process_whose_name_the_kernel_cut_inside_a_character(
+    tmp_path: Path,
+) -> None:
+    """The kernel keeps 15 bytes of a process's name, which can end inside a character, and then
+    /proc/PID/stat is not UTF-8. A file in the directory that no pid names is no record."""
+    name = ("abcdefghijklmn" + chr(0xE9)).encode()  # 16 bytes: é is two
+    program = (
+        "import ctypes, sys, time\n"
+        "ctypes.CDLL(None).prctl(15, bytes.fromhex(sys.argv[1]), 0, 0, 0)  # PR_SET_NAME\n"
+        "time.sleep(60)"
+    )
+    cut = subprocess.Popen([sys.executable, "-c", program, name.hex()], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while Path(f"/proc/{cut.pid}/comm").read_bytes() != name[:15] + b"\n":
+            assert time.monotonic() < deadline, "the process never took its name"
+            time.sleep(0.02)
+        name_group(tmp_path, cut.pid, e2._started(os.getpid()))  # another start
+        assert e2.kill_left(str(tmp_path)) == [] and cut.poll() is None
+        name_group(tmp_path, cut.pid, e2._started(cut.pid))
+        write(tmp_path / e2.TOOLS, "1.part", "")
+        assert e2.kill_left(str(tmp_path)) == [cut.pid] and cut.wait(timeout=5) == -9
+        assert [path.name for path in (tmp_path / e2.TOOLS).iterdir()] == ["1.part"]
+    finally:
+        cut.kill()
+
+
+@PROC
+@needs_waitid
+def test_a_tool_that_cannot_be_named_is_not_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing would stop a tool that no Process names: a scope that cannot hold its record starts
+    none, and a record that cannot be written (a full disk, say) ends it before the error goes on."""
+    env = os.environ | {"LH_BENCH_ARTIFACTS": str(tmp_path / "aiperf")}
+    command = [sys.executable, str(FAKES / "fake_aiperf.py")]
+    scope = write(tmp_path, "not-a-directory", "")
+    with pytest.raises(NotADirectoryError):
+        Process("AIPerf", command, tmp_path / "log", env, str(scope))
+    assert e2.kill_marked(str(scope)) == []  # nothing runs with its mark
+
+    def full(path: Path, *args: object, **kwargs: object) -> int:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(path))
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "write_text", full)
+        with pytest.raises(OSError, match="No space left on device"):
+            Process("AIPerf", command, tmp_path / "log", env, str(tmp_path))
+    assert e2.kill_marked(str(tmp_path)) == []
+
+
 def marked(mark: str) -> subprocess.Popen:
     """A process that lasts a minute, marked as a tool of e2 run with ``mark``."""
     env = os.environ | {e2.TOOL_MARK: mark}
@@ -1344,6 +1397,19 @@ def test_a_point_ends_the_group_a_killed_runs_tool_left_its_titled_processes_too
         for pid in (child, tool.popen.pid):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+
+def test_a_point_whose_leftovers_cannot_be_ended_fails_and_says_why(
+    cyan: Cyan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refused(scope: str) -> list[int]:
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), scope)
+
+    monkeypatch.setattr(e2, "kill_left", refused)
+    with pytest.raises(PermissionError):
+        run(cyan, "a1-voice", VOICE_ALONE)
+    run_json = record(cyan, "a1-voice")
+    assert run_json["status"] == "failed" and "Permission denied" in run_json["error"]
 
 
 def test_a_point_with_agents_configures_cyan_and_stops_aiperf_after_the_calls(cyan: Cyan) -> None:

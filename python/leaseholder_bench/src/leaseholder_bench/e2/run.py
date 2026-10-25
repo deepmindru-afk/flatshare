@@ -737,6 +737,9 @@ class Process:
         self.log = log
         self.scope = scope
         self.mark = f"{scope}/{os.getpid()}-{time.monotonic_ns()}"
+        # Made before the tool starts: a scope where its group cannot be named starts none.
+        tools = Path(scope) / TOOLS
+        tools.mkdir(parents=True, exist_ok=True)
         with log.open("ab") as out:
             self.popen = subprocess.Popen(
                 list(command),
@@ -748,9 +751,15 @@ class Process:
             )
         self.status: int | None = None
         pid = self.popen.pid
-        self.record = Path(scope) / TOOLS / str(pid)
-        self.record.parent.mkdir(parents=True, exist_ok=True)
-        self.record.write_text(f"{_started(pid) or ''}\n{_cgroup(pid) or ''}")
+        self.record = tools / str(pid)
+        try:
+            self.record.write_text(f"{_started(pid) or ''}\n{_cgroup(pid) or ''}")
+        except BaseException:
+            # Nothing would stop a tool that neither a Process nor a record names.
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
+            self.popen.wait()
+            raise
 
     def exited(self) -> bool:
         """Whether the tool has exited, without reaping it: its group id stays taken until stop()."""
@@ -821,11 +830,12 @@ def _started(pid: int) -> str | None:
     """Process ``pid``'s start: the boot's id and its start in clock ticks since boot (/proc/PID/stat's
     22nd field), which a pid used again does not share; None off Linux, or once it is gone."""
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
+        # Bytes: the kernel keeps 15 bytes of a name, which may end inside a character.
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
     except OSError:
         return None
     boot = _boot()
-    return f"{boot}/{stat.rsplit(') ', 1)[1].split()[19]}" if boot else None
+    return f"{boot}/{int(stat.rsplit(b') ', 1)[1].split()[19])}" if boot else None
 
 
 def _cgroup(pid: int) -> str | None:
@@ -842,7 +852,7 @@ def _members(pgid: int) -> list[int]:
     members = []
     for stat in Path("/proc").glob("[0-9]*/stat"):
         with contextlib.suppress(OSError, IndexError, ValueError):
-            if int(stat.read_text().rsplit(") ", 1)[1].split()[2]) == pgid:
+            if int(stat.read_bytes().rsplit(b") ", 1)[1].split()[2]) == pgid:
                 members.append(int(stat.parent.name))
     return members
 
@@ -867,6 +877,8 @@ def kill_left(scope: str) -> list[int]:
     killed = []
     tools, boot = Path(scope) / TOOLS, _boot()
     for record in sorted(tools.glob("[0-9]*")) if tools.is_dir() else []:
+        if not re.fullmatch("[1-9][0-9]*", record.name):
+            continue  # not a record: Process names each by its tool's pid
         pgid = int(record.name)
         started, _, cgroup = record.read_text().partition("\n")
         # A record of another boot names a number that means nothing in this one, and an empty one
@@ -947,12 +959,12 @@ def run_point(
         record["agents_seed"] = seed if arm.agents.sessions else None
         # The KV sampler's interval, null where the point did not sample (voice alone, or 0).
         record["kv_sample_s"] = kv_sample_s if arm.agents.sessions else None
-        # Under the lock no other run's tools are alive: a group named in its scope, or a process
-        # marked in it, is left from a run that was killed before it could stop them.
-        if leftovers := kill_left(tool_scope(host)):
-            record["leftovers_killed"] = leftovers
-            record.say(f"killed {len(leftovers)} processes left by an earlier run: {leftovers}")
         try:
+            # Under the lock no other run's tools are alive: a group named in its scope, or a
+            # process marked in it, is left from a run that was killed before it could stop them.
+            if leftovers := kill_left(tool_scope(host)):
+                record["leftovers_killed"] = leftovers
+                record.say(f"killed {len(leftovers)} processes left by an earlier run: {leftovers}")
             with contextlib.ExitStack() as running:
                 summary = _measure(
                     arm, out, host, systemd, record, running, save_audio, seed, kv_sample_s
