@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -70,6 +71,17 @@ def test_the_box_profile_renders_todays_files(tmp_path: Path) -> None:
     assert node["plan"] is None and node["warnings"] == []
 
 
+def test_every_file_of_the_box_has_its_place_in_a_node(tmp_path: Path) -> None:
+    # Rendered, copied or the box's own: a file another change adds to deploy/phastform, a unit or a drop-in,
+    # fails here until it has a place, rather than missing from other nodes.
+    assert profile.unplaced() == []
+    box = tmp_path / "box"
+    shutil.copytree(DEPLOY / "phastform", box, ignore=shutil.ignore_patterns("__pycache__"))
+    (box / "systemd" / "lh-engine.service.d").mkdir()
+    (box / "systemd" / "lh-engine.service.d" / "measure.conf").write_text("[Service]\n")
+    assert profile.unplaced(box) == ["systemd/lh-engine.service.d/measure.conf"]
+
+
 def test_a_value_that_differs_from_the_box_shows(tmp_path: Path) -> None:
     box = profile.load("rtx-5060-ti")
     box["engine"]["kv_cache_memory"] = 6 << 30
@@ -79,6 +91,15 @@ def test_a_value_that_differs_from_the_box_shows(tmp_path: Path) -> None:
         "systemd/lh-stt.service",
         "systemd/lh-tts.service",
     ]
+    diff = profile.differences(box, DEPLOY / "phastform")["engine.yaml"]
+    assert "\n-kv-cache-memory: 6442450944\n+kv-cache-memory: 5368709120\n" in diff
+    # A box file that changed shows the line to carry into its template.
+    copy = tmp_path / "box"
+    shutil.copytree(DEPLOY / "phastform", copy, ignore=shutil.ignore_patterns("__pycache__"))
+    unit = copy / "systemd" / "lh-engine.service"
+    text = unit.read_text()
+    assert text.count("RestartSec=5\n") == 1
+    unit.write_text(text.replace("RestartSec=5\n", "RestartSec=7\n"))
     done = subprocess.run(
         [
             sys.executable,
@@ -86,12 +107,14 @@ def test_a_value_that_differs_from_the_box_shows(tmp_path: Path) -> None:
             "check",
             "rtx-5060-ti",
             "--against",
-            str(tmp_path),
+            str(copy),
         ],
         capture_output=True,
         text=True,
     )
-    assert done.returncode != 0
+    assert done.returncode == 1
+    assert "systemd/lh-engine.service differs" in done.stderr
+    assert "\n-RestartSec=5\n+RestartSec=7\n" in done.stderr
 
 
 def test_the_a100_profile_derives_its_values_from_the_host(tmp_path: Path) -> None:

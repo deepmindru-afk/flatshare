@@ -15,8 +15,10 @@ filled from the profile (engine.yaml, stt.yaml, the units, the make-room drop-in
 variant as they are, and node.json, the profile's values resolved with the core plan and its warnings. A profile's
 "auto" values come from the host's facts by the rules below; a profile without them, as the frozen box's, needs no
 host. `check` renders a profile into a scratch directory and compares it byte for byte with its repository copy
-(the box's: deploy/phastform), and `update` writes the rendered files back into it after a template changes
-(`make profiles`). `check-vllm` parses a rendered engine.yaml and stt.yaml with vLLM's own argument
+(the box's: deploy/phastform), printing each difference, and `update` writes the rendered files back into it after
+a template changes (`make profiles`). When the box's own files change, a change to its units for one, `check` shows
+the lines to carry into deploy/templates, and a file added to the box's directory has to be rendered, copied or named
+in BOX_ONLY before the tests pass. `check-vllm` parses a rendered engine.yaml and stt.yaml with vLLM's own argument
 parser and builds their engine configs, as `vllm serve` would, without starting an engine: run it with the engine
 venv's Python on a GPU host.
 
@@ -38,6 +40,8 @@ Standard library only (Python 3.11 or newer), so that a bare host runs it before
 from __future__ import annotations
 
 import argparse
+import difflib
+import fnmatch
 import json
 import math
 import os
@@ -77,6 +81,20 @@ COPIED = (
     "variants/mps/lh-tts.conf",
 )
 """The files it takes from the box's directory as they are: they name nothing of a node's own."""
+BOX_ONLY = {
+    "bootstrap.sh": "the box's own setup; another node's is its own",
+    "requirements/*": "the engine's and TTS's locks, which a node's bootstrap installs from the source tree",
+    "variants/README.md": "the variants' documentation",
+    "smoke.sh": "the end-to-end check, which runs from the source tree beside deploy/bin's listener audit and asks "
+    "the engine for its model",
+    "systemd/lh-engine-proxy.*": "the sglang variant's socket in front of its TCP port, measured on the box only",
+    "variants/make-room-v03/*": "W5's control, measured on the box only",
+    "variants/pr54530/*": "E2 arm 7a's variant, measured on the box only",
+    "variants/sglang/*": "E2 arm 7b's variant, measured on the box only",
+}
+"""The box's files that a node's directory does not take, and why. Every file of the box's directory is
+rendered, copied or here (a test holds it), so that a file another change adds to the box, a unit or a
+drop-in, is not silently left out of other nodes: it fails the test until it is placed."""
 
 PLACEHOLDER = re.compile(r"\{\{([a-z0-9_]+\.[a-z0-9_]+)\}\}")
 ALONE = re.compile(r"\{\{([a-z0-9_]+\.[a-z0-9_]+)\}\}\n?")
@@ -578,6 +596,46 @@ def check(profile: dict, against: Path) -> list[str]:
         ]
 
 
+def differences(profile: dict, against: Path) -> dict[str, str]:
+    """Each file that differs between the profile's rendering and `against`, with its unified diff
+    (rendered, then `against`): where the box's files changed, the template line to change."""
+    with tempfile.TemporaryDirectory() as scratch:
+        out = Path(scratch)
+        render(profile, None, out)
+        diffs = {}
+        for rel in check(profile, against):
+            theirs = (
+                (against / rel).read_text().splitlines(keepends=True)
+                if (against / rel).is_file()
+                else []
+            )
+            diffs[rel] = "".join(
+                difflib.unified_diff(
+                    (out / rel).read_text().splitlines(keepends=True),
+                    theirs,
+                    f"rendered/{rel}",
+                    str(against / rel),
+                )
+            )
+        return diffs
+
+
+def unplaced(box: Path = BOX) -> list[str]:
+    """The files of the box's directory that a node's directory neither renders nor copies and that
+    BOX_ONLY does not name: each needs a place before another node runs without it."""
+    files = sorted(
+        str(path.relative_to(box))
+        for path in box.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
+    return [
+        rel
+        for rel in files
+        if rel not in RENDERED + COPIED
+        and not any(fnmatch.fnmatch(rel, pattern) for pattern in BOX_ONLY)
+    ]
+
+
 def update(profile: dict, into: Path) -> list[str]:
     """Writes the profile's rendered files into its repository copy `into`; returns those that changed."""
     with tempfile.TemporaryDirectory() as scratch:
@@ -677,9 +735,9 @@ def main(argv: list[str] | None = None) -> int:
                 for rel in update(profile, against):
                     print(f"profile: wrote {against / rel}")
                 return 0
-            differ = check(profile, against)
-            for rel in differ:
-                print(f"profile: {rel} differs from {against / rel}", file=sys.stderr)
+            differ = differences(profile, against)
+            for rel, diff in differ.items():
+                print(f"profile: {rel} differs from {against / rel}:\n{diff}", file=sys.stderr)
             if differ:
                 return 1
             print(f"profile: {args.profile} renders {against} byte for byte")
