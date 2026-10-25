@@ -712,6 +712,11 @@ def _get_json(address: str, path: str, missing: str | None = None, **kwargs: Any
 TOOL_MARK = "LH_E2_TOOL"
 """The environment variable that marks every process a tool of e2 run started, its children too:
 ``SCOPE/PID-NS``, the run's scope (:func:`tool_scope`), then its pid and the tool's start."""
+TOOLS = ".lh-bench-e2-tools"
+"""The directory beside the run lock, in the run's scope, that names each running tool's process group by its
+leader's pid, the leader's start in the file: AIPerf's services set their titles (setproctitle), which blanks
+/proc/PID/environ and the mark in it, but they stay in AIPerf's process group, so a run's start ends the groups a run
+that was killed before it could stop them left (:func:`kill_left`)."""
 NEEDS_WAITID = (
     "lh-bench e2 run needs os.waitid, to watch its tools without reaping them: Linux, or macOS "
     "from Python 3.13"
@@ -720,9 +725,10 @@ NEEDS_WAITID = (
 
 class Process:
     """A tool in its own process group, so that stopping it reaches every process it started:
-    AIPerf renames its processes, so they cannot be found by name. Each is also marked in its
-    environment, which its children inherit: AIPerf starts some services in sessions of their own,
-    out of the group's reach. Output goes to ``log``."""
+    AIPerf renames its processes, so they cannot be found by name, and its group is named beside the
+    run lock (``TOOLS``) until it is stopped. Each is also marked in its environment, which its
+    children inherit: AIPerf starts some services in sessions of their own, out of the group's reach.
+    Output goes to ``log``."""
 
     def __init__(
         self, name: str, command: Sequence[str], log: Path, env: Mapping[str, str], scope: str
@@ -741,6 +747,9 @@ class Process:
                 start_new_session=True,
             )
         self.status: int | None = None
+        self.record = Path(scope) / TOOLS / str(self.popen.pid)
+        self.record.parent.mkdir(parents=True, exist_ok=True)
+        self.record.write_text(_started(self.popen.pid) or "")
 
     def exited(self) -> bool:
         """Whether the tool has exited, without reaping it: its group id stays taken until stop()."""
@@ -764,6 +773,7 @@ class Process:
                 os.killpg(pid, signal.SIGKILL)
             kill_marked(self.scope, self.mark)
             self.status = self.popen.wait()
+            self.record.unlink(missing_ok=True)
         return self.status
 
     def failure(self, what: str) -> E2Error:
@@ -796,6 +806,40 @@ def kill_marked(scope: str, mark: str | None = None) -> list[int]:
                 os.kill(pid, signal.SIGKILL)
                 killed.append(pid)
     return killed
+
+
+def _started(pid: int) -> str | None:
+    """Process ``pid``'s start: the boot's id and its start in clock ticks since boot (/proc/PID/stat's
+    22nd field), which a pid used again does not share; None off Linux, or once it is gone."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return f"{boot}/{stat.rsplit(') ', 1)[1].split()[19]}"
+
+
+def kill_left(scope: str) -> list[int]:
+    """Kill what tools of ``scope`` left running, a run's that was killed before it could stop them, and
+    return the pids: each process group named in ``TOOLS`` whose leader is the one named there or gone
+    (its members keep the group's id taken), then each process marked in ``scope`` (:func:`kill_marked`).
+    It reads ``/proc``, so it finds none off Linux."""
+    killed = []
+    tools = Path(scope) / TOOLS
+    for record in sorted(tools.glob("[0-9]*")) if tools.is_dir() else []:
+        pgid, started = int(record.name), record.read_text()
+        leader = _started(pgid)
+        if started and (leader is None or leader == started):
+            members = []
+            for stat in Path("/proc").glob("[0-9]*/stat"):
+                with contextlib.suppress(OSError, IndexError, ValueError):
+                    if int(stat.read_text().rsplit(") ", 1)[1].split()[2]) == pgid:
+                        members.append(int(stat.parent.name))
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pgid, signal.SIGKILL)
+                killed += members
+        record.unlink(missing_ok=True)
+    return killed + [pid for pid in kill_marked(scope) if pid not in killed]
 
 
 def _until(done: Any, timeout: float, message: str) -> None:
@@ -853,9 +897,9 @@ def run_point(
         record["agents_seed"] = seed if arm.agents.sessions else None
         # The KV sampler's interval, null where the point did not sample (voice alone, or 0).
         record["kv_sample_s"] = kv_sample_s if arm.agents.sessions else None
-        # Under the lock no other run's tools are alive: a process marked in its scope is left from a
-        # run that was killed before it could stop them.
-        if leftovers := kill_marked(tool_scope(host)):
+        # Under the lock no other run's tools are alive: a group named in its scope, or a process
+        # marked in it, is left from a run that was killed before it could stop them.
+        if leftovers := kill_left(tool_scope(host)):
             record["leftovers_killed"] = leftovers
             record.say(f"killed {len(leftovers)} processes left by an earlier run: {leftovers}")
         try:

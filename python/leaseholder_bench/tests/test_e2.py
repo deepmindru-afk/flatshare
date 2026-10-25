@@ -3,6 +3,7 @@ and stand-ins for AIPerf and the callers that run as real processes, so stopping
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import itertools
 import json
@@ -772,6 +773,53 @@ def test_stopping_a_tool_kills_what_it_started_in_a_session_of_its_own(tmp_path:
     assert os.getpgid(child) != tool.popen.pid
     assert tool.stop(grace=5) == 0  # it stopped on SIGINT
     assert gone(child)
+
+
+@PROC
+@needs_waitid
+def test_a_run_ends_the_process_group_a_killed_run_left_although_its_titles_blanked_their_marks(
+    tmp_path: Path,
+) -> None:
+    """AIPerf's services set their titles (setproctitle), which blanks /proc/PID/environ and the mark in it,
+    but stay in AIPerf's process group, which is named beside the run lock until the tool is stopped: a
+    run killed before it could stop its tools leaves both running, and the next run's start ends them."""
+    pytest.importorskip("setproctitle")
+    artifacts = tmp_path / "aiperf"
+    env = os.environ | {"LH_BENCH_ARTIFACTS": str(artifacts), "FAKE_AIPERF": "titled"}
+    command = [sys.executable, str(FAKES / "fake_aiperf.py")]
+    tool = Process("AIPerf", command, tmp_path / "log", env, str(tmp_path))
+    child = int(wait_for(artifacts / "child.pid").read_text())
+    try:
+        assert os.getpgid(child) == tool.popen.pid
+        deadline = time.monotonic() + 10
+        while e2.TOOL_MARK.encode() in Path(f"/proc/{child}/environ").read_bytes():
+            assert time.monotonic() < deadline, "the child set its title"
+            time.sleep(0.05)
+        assert (tmp_path / e2.TOOLS / str(tool.popen.pid)).exists()
+        # The run is killed here, before stop(); the next run's start:
+        assert sorted(e2.kill_left(str(tmp_path))) == sorted([tool.popen.pid, child])
+        assert gone(child) and tool.popen.wait(timeout=5) == -9
+        assert list((tmp_path / e2.TOOLS).iterdir()) == []
+    finally:
+        for pid in (child, tool.popen.pid):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+@needs_waitid
+def test_a_stopped_tool_leaves_no_group_named_beside_the_lock(tmp_path: Path) -> None:
+    artifacts = tmp_path / "aiperf"
+    env = os.environ | {"LH_BENCH_ARTIFACTS": str(artifacts)}
+    tool = Process(
+        "AIPerf",
+        [sys.executable, str(FAKES / "fake_aiperf.py")],
+        tmp_path / "log",
+        env,
+        str(tmp_path),
+    )
+    wait_for(artifacts / "profile_export.jsonl")
+    assert tool.stop(grace=5) == 0
+    assert list((tmp_path / e2.TOOLS).iterdir()) == [] and e2.kill_left(str(tmp_path)) == []
 
 
 def marked(mark: str) -> subprocess.Popen:
