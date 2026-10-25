@@ -939,6 +939,79 @@ def test_a_reload_fails_while_the_old_process_is_still_the_main_one(tmp_path: Pa
     assert "main process is still" in done.stderr and "after 1 s" in done.stderr
 
 
+DRAINING = """\
+import signal, sys, time
+def drain(*_):
+    time.sleep(0.5)
+    open(sys.argv[1], "w").write("drained")
+    sys.exit(0)
+signal.signal(signal.SIGTERM, drain)
+print("up", flush=True)
+time.sleep(30)
+"""
+"""A gateway's main process to the stop helper: on SIGTERM it drains for 0.5 s, marks that in a file and exits 0."""
+needs_pidfds = pytest.mark.skipif(
+    not hasattr(os, "pidfd_open"), reason="lh-gateway-stop holds the process by a pidfd (Linux)"
+)
+
+
+def stop_gateway(
+    work: Path, unit: str
+) -> tuple[subprocess.CompletedProcess[str], subprocess.Popen[str], Path, float]:
+    """Runs deploy/bin/lh-gateway-stop UNIT PID against a main process of lh-gateway.service, as deploy/bin/lh-svc
+    runs one (LH_SVC_UNIT in its environment): what it did, the process, its mark and how long the stop took."""
+    marked = work / "drained"
+    gateway = subprocess.Popen(
+        [sys.executable, "-c", DRAINING, str(marked)],
+        stdout=subprocess.PIPE,
+        text=True,
+        env=os.environ | {"LH_SVC_UNIT": "lh-gateway.service"},
+    )
+    assert gateway.stdout is not None and gateway.stdout.readline() == "up\n"
+    started = time.monotonic()
+    done = subprocess.run(
+        [DEPLOY / "bin" / "lh-gateway-stop", unit, str(gateway.pid)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return done, gateway, marked, time.monotonic() - started
+
+
+@needs_pidfds
+def test_a_stop_returns_once_the_gateway_has_drained_and_exited(tmp_path: Path) -> None:
+    # The unit's ExecStop, which systemd waits for: after a reload systemd itself would SIGKILL the successor at once.
+    service = (DEPLOY / "cyan" / "systemd" / "lh-gateway.service").read_text()
+    assert exec_lines(service, "ExecStop") == [
+        "%h/leaseholder/src/deploy/bin/lh-gateway-stop %n $MAINPID"
+    ]
+    done, gateway, marked, took = stop_gateway(tmp_path, "lh-gateway.service")
+    assert done.returncode == 0, done.stderr
+    assert marked.read_text() == "drained" and took >= 0.5
+    assert gateway.wait(timeout=5) == 0
+
+
+@needs_pidfds
+def test_a_stop_leaves_alone_a_process_that_is_not_the_units(tmp_path: Path) -> None:
+    done, gateway, marked, _ = stop_gateway(tmp_path, "lh-smg.service")
+    try:
+        assert done.returncode == 0
+        assert "is not lh-smg.service's: nothing to stop" in done.stderr
+        assert gateway.poll() is None and not marked.exists()
+    finally:
+        gateway.kill()
+        gateway.wait()
+    # Without a main process ($MAINPID empty), or once it is gone, there is nothing to stop either.
+    for args in ((), (str(gateway.pid),)):
+        done = subprocess.run(
+            [DEPLOY / "bin" / "lh-gateway-stop", "lh-gateway.service", *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert (done.returncode, done.stderr) == (0, ""), args
+
+
 def exec_lines(text: str, key: str) -> list[str]:
     """The values of a unit's ``key=`` lines, continued lines joined."""
     lines = text.replace("\\\n", " ").splitlines()
