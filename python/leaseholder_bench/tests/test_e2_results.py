@@ -8,7 +8,7 @@ import importlib.util
 import json
 import re
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,11 +19,16 @@ from leaseholder_bench.cli import main
 from leaseholder_bench.e2.arm import Agents, Voice, flag_values
 from leaseholder_bench.e2.figures import load_sweep
 from leaseholder_bench.e2.record import (
+    DISCARDED,
+    OUTCOMES,
     PLACEMENT_LOGGER,
     RECORD,
+    REFUSED,
+    RESUBMITS,
     SESSIONS_LOGGER,
     SGLANG_ENGINE,
     TURNS_LOGGER,
+    USAGE,
     WATERFALL,
     background,
     call_turns,
@@ -53,6 +58,7 @@ from leaseholder_bench.e2.report import (
     configurations,
     figure_name,
     hardware,
+    leaseholder_counts,
     load_points,
     mark_frontier,
     read_dots,
@@ -61,11 +67,15 @@ from leaseholder_bench.e2.report import (
     write_report,
 )
 from leaseholder_bench.e2.run import SCHEDULER, SECRETS, variant_flags
+from leaseholder_stats import metric_samples
 
 T0 = 1_800_000_000.0  # the calls run from T0 to T0 + 100 s
 REPO = Path(__file__).resolve().parents[3]
 VOICE = REPO / "python" / "leaseholder_voice"
 VOICE_EVENTS = VOICE / "src" / "leaseholder_voice" / "events.py"
+GATEWAY_METRICS = REPO / "crates" / "lh-gateway" / "metrics.txt"
+"""The gateway's exposition under the lifecycle policy, every family it registers (``make metrics``
+writes it, and the gateway's tests check it is current)."""
 # The committed E2 records: W4's, then W5's re-measure.
 RESULTS = REPO / "benchmarks" / "results" / "2026-10-23-e2"
 W5_RESULTS = REPO / "benchmarks" / "results" / "2026-10-24-e2-w5"
@@ -1251,6 +1261,44 @@ def test_the_report_reads_the_lines_the_voice_worker_writes() -> None:
     # The sessions' end lines come from the module's own logger.
     assert SESSIONS_LOGGER == "leaseholder_voice.events" and "logging.getLogger(__name__)" in source
     assert '"session ended"' in source
+
+
+def test_the_record_and_the_report_read_series_the_gateway_exports() -> None:
+    # Each counter series of the gateway's exposition moves by a count of its own over the window, so
+    # that each count the record and the report take is the sum of the series they read: a family or
+    # a label the gateway renamed leaves the series below unexported, and one the record or the
+    # report reads under another name leaves its count short.
+    before = GATEWAY_METRICS.read_text()
+    moves: dict[tuple[str, frozenset[tuple[str, str]]], int] = {}
+    after = []
+    for line in before.splitlines():
+        for name, labels, _ in metric_samples(line):
+            if name.endswith("_total"):
+                moves[name, frozenset(labels.items())] = len(moves) + 1
+                line = f"{line.rsplit(' ', 1)[0]} {len(moves)}"
+        after.append(line)
+
+    def moved(name: str, labels: Mapping[str, str] | None = None) -> int:
+        """What the series of ``name`` that carry ``labels`` moved by; 0 where none is exported."""
+        wanted = (labels or {}).items()
+        return sum(n for (series, held), n in moves.items() if series == name and wanted <= held)
+
+    cell = gateway_counts(before, "\n".join(after) + "\n", 1.0, [])
+    assert cell["shed"] == moved(OUTCOMES, {"outcome": "shed"}) > 0
+    assert cell["refused"] == moved(REFUSED) > 0
+    assert cell["resubmitted"] == moved(RESUBMITS) > 0
+    assert cell["discarded_tokens"] == moved(DISCARDED) > 0
+    usage = [
+        moved(USAGE, {"class": "background", "kind": kind}) for kind in ("prompt", "completion")
+    ]
+    assert cell["background_tokens_per_s"] == sum(usage) and all(usage)
+    counts = leaseholder_counts(cell["counters"])
+    deferred = "lh_gateway_admission_deferred_total"
+    assert counts["deferred_headroom"] == moved(deferred, {"reason": "headroom"}) > 0
+    assert counts["deferred_critical"] == moved(deferred, {"reason": "critical"}) > 0
+    assert counts["degraded_replies"] == moved("lh_gateway_admission_degraded_total") > 0
+    admitted = "lh_gateway_admission_admitted_total"
+    assert counts["realtime_replies"] == moved(admitted, {"class": "realtime"}) > 0
 
 
 def placement(run_id: str, caller: int, node: str) -> str:
