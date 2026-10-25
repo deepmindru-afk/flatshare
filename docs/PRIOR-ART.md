@@ -122,12 +122,11 @@ Checked in the v0.32.0 source:
   - Latency control is left outside the engine, to prefill/decode disaggregation and load balancers.
 - **Preemption recomputes or stops.** Decode engines stop a preempted request, and a layer above resubmits it. There is no swap and no CPU tier (`scheduler.hpp:766-790`). The victim is the request with the longest output, meant as the one "occupying the most KV cache" (`sequence.hpp:56`).
 - **Steps are budgeted by measured time.** Each decode CUDA-graph size is timed at startup and the curve is cached (`model_runner.py:561-631`, `decode_perf_cache.py`). The speculative-verification scheduler picks the step size with the most expected accepted tokens per millisecond (`mtp_varlen.hpp:228-258`).
-- **Relation.** Not a baseline: it serves one model on many GPUs and has no tiers. Leaseholder takes three mechanisms and makes them class-aware:
+- **Relation.** Not a baseline: it serves one model on many GPUs and has no tiers. Leaseholder takes two of its mechanisms and makes them class-aware:
   - the critical-window throttle budgets background prefill in predicted time;
-  - the make-room patch preempts the longest lower-priority request, the one holding the most KV;
   - a KV reserve for the realtime class is the class-aware form of the 90% watermark.
 
-  DeepInfer frees a preempted request's blocks only after their copy completes. vLLM 0.32's stock preemption path already does this, and the patch reuses that path.
+  DeepInfer's victim is the request with the longest output, meant as the one holding the most KV; v0.3's make-room also took the most KV first, and since W5 it preempts in vLLM's own order instead, the lowest priority and then the latest arrival ([ARCHITECTURE.md §2](ARCHITECTURE.md#2-the-engine-change)). DeepInfer frees a preempted request's blocks only after their copy completes. vLLM 0.32's stock preemption path already does this, and the patch reuses that path.
 
 ## KV across tool calls and turns
 
