@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import math
 import os
 import re
 import socketserver
@@ -772,8 +773,10 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
 
-def gateway_metrics(n: int) -> tuple[int, str]:
+def gateway_metrics(n: int, ended: int = 0) -> tuple[int, str]:
+    """The gateway's metrics at its ``n``-th scrape, when it had ended ``ended`` requests."""
     return 200, (
+        f'lh_gateway_request_outcomes_total{{class="realtime",outcome="completed"}} {ended}\n'
         f'lh_gateway_requests_total{{class="realtime",status="200"}} {10 * n}\n'
         f'lh_gateway_first_byte_seconds_bucket{{class="realtime",le="0.1"}} {8 * n}\n'
         f'lh_gateway_first_byte_seconds_bucket{{class="realtime",le="0.5"}} {10 * n}\n'
@@ -824,13 +827,16 @@ class FakeSystemd(Systemd):
     """Records systemctl calls; the worker runs with fixed endpointing and registers at once. A unit
     in ``failing`` does not start, and its log says why. ``journals`` gives a unit's journal from
     ``since`` to ``until``; otherwise the gateway's holds the request lines of ten realtime requests
-    (GATEWAY_FIRST_BYTES) and any other unit's only the worker's registration."""
+    (GATEWAY_FIRST_BYTES) and any other unit's only the worker's registration. ``ended`` counts the
+    requests the gateway's journal reads show ending, which the fake gateway's metrics report: a point
+    reads its base before the journal and its last count before the check reads it again."""
 
     def __init__(self, env: dict[str, str] | None = None) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.running: set[str] = set()
         self.failing: set[str] = set()
         self.journals: dict[str, Callable[[float, float | None], str]] = {}
+        self.ended = 0
         self.env = env or {"LH_TURN_DETECTION": "vad", "LH_LLM_UDS": "/run/user/1/lh/gateway.sock"}
 
     def __call__(self, *args: str) -> str:
@@ -852,13 +858,32 @@ class FakeSystemd(Systemd):
         if unit in self.failing:
             return f"{unit}: starting\n{unit}: config: unknown field `upstream_priority`\n"
         if unit in self.journals:
-            return self.journals[unit](since, until)
-        if unit == "lh-gateway":
-            return "\n".join(
+            text = self.journals[unit](since, until)
+        elif unit == "lh-gateway":
+            text = "\n".join(
                 logged_request(since + n / 100, "realtime", first_byte)
                 for n, first_byte in enumerate(GATEWAY_FIRST_BYTES, 1)
             )
-        return "registered worker"
+        else:
+            return "registered worker"
+        if unit == "lh-gateway":
+            self.ended += ended_requests(text, since, until)
+        return text
+
+
+def ended_requests(journal: str, since: float, until: float | None) -> int:
+    """The requests that went upstream with a class (a ``class`` and an ``outcome``) whose lines in a
+    fake gateway journal end within ``since``..``until``."""
+    ended = 0
+    for line in journal.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("message") == "request" and "class" in record and "outcome" in record:
+            at = datetime.fromisoformat(record["timestamp"]).timestamp()
+            ended += since < at <= (until or math.inf)
+    return ended
 
 
 GATEWAY_FIRST_BYTES = (50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0)
@@ -889,16 +914,17 @@ def cyan(tmp_path: Path) -> Iterator[Cyan]:
     (config / "livekit.env").write_text("LIVEKIT_API_KEY=k\nLIVEKIT_API_SECRET=s\n")
     (home / "leaseholder" / "data" / "corpus").mkdir(parents=True)
     scheduler = dict(FROZEN_SCHEDULER)
+    systemd = FakeSystemd()
     # AIPerf's TCP listener, and the socket from which a point reads the gateway's metrics.
     gateway = Service({"/ready": lambda n: (200, "")})
-    socket = UnixService({"/metrics": gateway_metrics})
+    socket = UnixService({"/metrics": lambda n: gateway_metrics(n, systemd.ended)})
     engine = fake_engine(scheduler)
     host = FakeHost(
         home=home, gateway_url=gateway.url, gateway_socket=socket.url, engine_url=engine.url
     )
     arms = tmp_path / "arms"
     arms.mkdir()
-    yield Cyan(host, FakeSystemd(), gateway, socket, engine, scheduler, arms)
+    yield Cyan(host, systemd, gateway, socket, engine, scheduler, arms)
     for service in (gateway, socket, engine):
         service.shutdown()
 
@@ -1182,6 +1208,39 @@ def test_a_call_opens_with_its_warm_up_turns_which_nothing_measures(cyan: Cyan) 
     waterfall = summary["worker"]["waterfall"]["e2e_ms"]
     assert (summary["worker"]["turns"], waterfall["n"], waterfall["p50"]) == (6, 6, 1200.0)
     assert "calls: 2 callers, 3 turns each after 1 warm-up" in (out / "run.log").read_text()
+
+
+def test_a_point_checks_that_the_journal_kept_every_request_line(cyan: Cyan) -> None:
+    run(cyan, "a1-voice", VOICE_ALONE)
+    # Ten requests ended between the idle moments before and after the point, and the journal has their lines.
+    assert record(cyan, "a1-voice")["gateway_log"] == {"request_lines": 10, "requests_ended": 10}
+
+    # journald dropped a line: what the check reads lacks one of the requests the gateway counted.
+    reads = itertools.count()
+
+    def dropping(since: float, until: float | None) -> str:
+        n = 10 if next(reads) == 0 else 9
+        return "\n".join(
+            logged_request(since + i / 100, "realtime", 100.0) for i in range(1, n + 1)
+        )
+
+    cyan.systemd.journals["lh-gateway"] = dropping
+    with pytest.raises(E2Error, match="kept 9 request lines of the 10 requests it ended"):
+        run(cyan, "a1-voice", VOICE_ALONE, out="dropped")
+    assert record(cyan, "dropped")["status"] == "failed"
+
+
+def test_a_gateway_that_does_not_go_idle_fails_the_point(
+    cyan: Cyan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(e2, "GATEWAY_IDLE_S", 0.2)
+    cyan.gateway_socket.routes["/metrics"] = lambda n: (
+        200,
+        f'lh_gateway_request_outcomes_total{{class="background",outcome="completed"}} {n}\n'
+        'lh_gateway_streams_active{class="background"} 1\n',
+    )
+    with pytest.raises(E2Error, match="the gateway did not go idle within"):
+        run(cyan, "a1-voice", VOICE_ALONE)
 
 
 def test_a_gateway_that_logs_no_request_lines_fails_the_point(cyan: Cyan) -> None:

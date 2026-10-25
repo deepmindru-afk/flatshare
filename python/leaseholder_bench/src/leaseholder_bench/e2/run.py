@@ -64,8 +64,15 @@ from leaseholder_bench.e2.arm import (
     gpu_nodes,
     load_arm,
 )
-from leaseholder_bench.e2.record import gateway_request_lines, render, summarize_point, worker_lines
-from leaseholder_bench.kv_metrics import fetch
+from leaseholder_bench.e2.record import (
+    OUTCOMES,
+    gateway_request_lines,
+    logged_requests,
+    render,
+    summarize_point,
+    worker_lines,
+)
+from leaseholder_bench.kv_metrics import fetch, metric_samples
 from leaseholder_bench.tiers import pool_tokens
 from leaseholder_bench.transport import client, runtime_socket
 
@@ -104,6 +111,8 @@ NODES = "nodes"
 """The worker drop-in e2 run writes for a point on several GPU nodes, ``variant-nodes.conf``."""
 ENGINE_UP_S = 60.0
 """How long a node's engine may take to answer through a tunnel that was just started."""
+GATEWAY_IDLE_S = 30.0
+"""How long the gateway may take to end its requests once a point's tools have stopped."""
 
 SGLANG = "sglang"
 """The one engine variant that serves SGLang; every other variant serves vLLM."""
@@ -800,6 +809,9 @@ def _measure(
     )
     for node, url in engines.items():
         reset_prefix_cache(url, servers[node])
+    # Before the replay and the calls the gateway is idle: the base of the check that its journal kept a
+    # line for every request it ended.
+    base = (time.time(), _ended(host))
     aiperf = _start_aiperf(arm, host, out, record, running, seed) if arm.agents.sessions else None
     start = _snapshot(host, out, "start", engines)
     end = _call(arm, host, out, record, running, aiperf, save_audio)
@@ -811,6 +823,7 @@ def _measure(
         if aiperf.status:
             raise aiperf.failure("failed when stopped")
     _gateway_log(systemd, out, start, end)
+    record["gateway_log"] = _check_gateway_log(host, systemd, base)
     _worker_journal(systemd, out, start, arm.voice.callers)
     try:
         metrics = summarize_point(
@@ -923,6 +936,55 @@ def _gateway_log(systemd: Systemd, out: Path, start: float, end: float) -> None:
     first bytes exactly; none when the gateway logs text."""
     if lines := gateway_request_lines(systemd.journal(GATEWAY, start, until=end)):
         (out / "gateway.jsonl").write_text("".join(f"{line}\n" for line in lines))
+
+
+def _ended(host: Host) -> tuple[float, float]:
+    """From the gateway's metrics: the requests it has ended (``lh_gateway_request_outcomes_total``, every
+    class and outcome), and those it is relaying or holding at its admission point."""
+    exposition = fetch(host.gateway_socket)
+    ended = busy = 0.0
+    for name, _, value in metric_samples(exposition):
+        if name == OUTCOMES:
+            ended += value
+        elif name in ("lh_gateway_streams_active", "lh_gateway_admission_waiting"):
+            busy += value
+    return ended, busy
+
+
+def _check_gateway_log(
+    host: Host, systemd: Systemd, base: tuple[float, tuple[float, float]]
+) -> dict[str, int]:
+    """Check that the gateway's journal kept a request line for every request the gateway ended since
+    ``base``, the time and counters of a moment it was idle: the first bytes come from those lines, and
+    journald drops what comes faster than its rate limit, which for a user unit is journald.conf's. Waits
+    until the gateway is idle again, so that both counts end at the same moment."""
+    since, (before, _) = base
+    deadline = time.monotonic() + GATEWAY_IDLE_S
+    last = None
+    while True:
+        ended, busy = _ended(host)
+        if busy == 0 and ended == last:
+            break
+        if time.monotonic() > deadline:
+            raise E2Error(
+                f"the gateway did not go idle within {GATEWAY_IDLE_S:.0f} s after the point's tools stopped"
+            )
+        last = ended
+        time.sleep(POLL_S)
+    until = time.time()
+    # Requests that went upstream with a class, as the counter counts them.
+    lines = [
+        record
+        for at, record in logged_requests(systemd.journal(GATEWAY, since, until=until))
+        if since < at <= until and "class" in record and "outcome" in record
+    ]
+    counted = round(ended - before)
+    if len(lines) != counted:
+        raise E2Error(
+            f"the gateway's journal kept {len(lines)} request lines of the {counted} requests it ended "
+            "during the point: journald dropped some, and the first bytes would come from the rest"
+        )
+    return {"request_lines": len(lines), "requests_ended": counted}
 
 
 def _worker_journal(systemd: Systemd, out: Path, since: float, calls: int) -> None:

@@ -280,6 +280,11 @@ def gateway_request_lines(journal: str) -> list[str]:
     return [line for line in journal.splitlines() if _request(line) is not None]
 
 
+def logged_requests(journal: str) -> list[tuple[float, dict[str, Any]]]:
+    """The gateway's request lines in its journal, each with when its request ended."""
+    return [request for request in map(_request, journal.splitlines()) if request is not None]
+
+
 def gateway_requests(run_dir: Path, start: float, end: float) -> list[dict[str, Any]] | None:
     """The requests the gateway logged as ending within ``start``..``end``, from the run's
     gateway.jsonl; None without one, or with one that holds no request (the calls make some)."""
