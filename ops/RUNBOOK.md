@@ -167,12 +167,17 @@ The failure drills run from a workstation with SSH to the hosts, on the variant 
 - `free -g`, and `df -h /dev/shm`: the CPU tier occupies 20 GiB there.
 - Listener audit, as `python3 ~/leaseholder/src/deploy/bin/audit-listeners` checks it on either host (`deploy.sh` runs
   it after each install):
-  - on Phastform: `python3 ~/leaseholder/src/deploy/bin/audit-listeners --expect $XDG_RUNTIME_DIR/lh/engine.sock
-    --expect $XDG_RUNTIME_DIR/lh/stt.sock --expect $XDG_RUNTIME_DIR/lh/tts.sock` finds the three servers listening on
-    their sockets and none of the box's units on TCP, but for the SGLang variant's engine on loopback. The host's
-    `ss -Hlx` does not list those sockets: each server listens in a network namespace of its own, whose sockets the
-    audit reads from the namespace's own table (`ls -l /run/user/$UID/lh/` shows the files; the `nsenter` line under
-    [Start, stop, status](#start-stop-status) shows what listens in the engine's namespace);
+  - on Phastform, the audit with the three sockets expected finds the servers listening on them and none of the box's
+    units on TCP, but for the SGLang variant's engine on loopback:
+
+    ```sh
+    python3 ~/leaseholder/src/deploy/bin/audit-listeners --expect $XDG_RUNTIME_DIR/lh/engine.sock \
+      --expect $XDG_RUNTIME_DIR/lh/stt.sock --expect $XDG_RUNTIME_DIR/lh/tts.sock
+    ```
+
+    The host's `ss -Hlx` does not list those sockets: each server listens in a network namespace of its own, whose
+    sockets the audit reads from the namespace's own table (`ls -l /run/user/$UID/lh/` shows the files; the `nsenter`
+    line under [Start, stop, status](#start-stop-status) shows what listens in the engine's namespace);
   - on cyan: `ss -Hlntup` shows no LiveKit socket on the host network.
 
 ## Failures
