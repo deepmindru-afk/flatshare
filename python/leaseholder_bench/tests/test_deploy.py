@@ -1,5 +1,5 @@
 """The deployment: what the GPU nodes serve and the tunnels reach, cyan's install, and the script that
-authorizes cyan's tunnel key on a GPU node, run against stand-ins for ssh and systemd."""
+authorizes cyan's tunnel keys on a GPU node, run against stand-ins for ssh and systemd."""
 
 from __future__ import annotations
 
@@ -17,9 +17,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 DEPLOY = REPO / "deploy"
 SERVICES = {8000, 8100, 8880}
-"""A GPU node's services on its loopback: the engine, STT and TTS."""
-KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMa9oQ1uNw4Z5fT1n2x0bq7d1H0mGJ1s7mYcQjv8Yw5k"
-"""A tunnel key's type and blob, as ssh-keygen writes them before the comment."""
+"""The ports the GPU nodes' engine, STT and TTS served on before their sockets."""
+KEYS = {
+    "engine": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMa9oQ1uNw4Z5fT1n2x0bq7d1H0mGJ1s7mYcQjv8Yw5k",
+    "stt": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK3fW8pQ2nV7xZ1cR5tY9uB4mE6hJ0aLsD2gF8kN3qPw",
+    "tts": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHq2wE4rT6yU8iO0pA1sD3fG5hJ7kL9zX2cV4bN6mQ8w",
+}
+"""cyan's tunnel keys, by the socket each one reaches: their type and blob, as ssh-keygen writes them before the
+comment."""
+FORMER = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPz4xY6wQ8eR0tU2iO4pA6sD8fG0hJ2kL4zX6cV8bN0mQ2e"
+"""cyan's former tunnel key, which forwarded the node's ports."""
 LOGIN = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB7m2Qp9xR4tYc3vLk8wNs6fJd0aHe5uPq1zXo2iGb4M me@laptop"
 """Another key in a GPU node's authorized_keys: its user's own."""
 
@@ -30,23 +37,37 @@ host=$1
 shift
 cd "$FAKE_HOSTS/$host" && exec sh -c "$*"
 """
+OPENBSD_NC = """\
+#!/bin/sh
+# nc -h on a GPU node: OpenBSD's netcat, as Ubuntu's netcat-openbsd prints its usage.
+echo "OpenBSD netcat (Debian patchlevel 1.218-4ubuntu1)" >&2
+exit 1
+"""
 
 
 def authorize(
-    work: Path, public_key: str, authorized_keys: str = ""
+    work: Path,
+    keys: dict[str, str],
+    authorized_keys: str = "",
+    former: str | None = None,
+    nc: str = OPENBSD_NC,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
-    """Runs authorize-tunnel.sh from cyan to phastform, hosts kept under ``work``, cyan's tunnel key
-    being ``public_key`` and phastform's authorized_keys ``authorized_keys``; returns the run and the
-    file it leaves."""
+    """Runs authorize-tunnel.sh from cyan to phastform, hosts kept under ``work``: cyan's tunnel keys are
+    ``keys`` by socket (and its former key ``former``), phastform's authorized_keys ``authorized_keys``
+    and its nc ``nc``. Returns the run and the file it leaves."""
     hosts, bin_dir = work / "hosts", work / "bin"
     for host in ("cyan", "phastform"):
         (hosts / host / ".ssh").mkdir(parents=True)
-    (hosts / "cyan" / ".ssh" / "lh_tunnel_ed25519.pub").write_text(f"{public_key}\n")
+    for name, key in keys.items():
+        (hosts / "cyan" / ".ssh" / f"lh_tunnel_{name}_ed25519.pub").write_text(f"{key}\n")
+    if former is not None:
+        (hosts / "cyan" / ".ssh" / "lh_tunnel_ed25519.pub").write_text(f"{former}\n")
     authorized = hosts / "phastform" / ".ssh" / "authorized_keys"
     authorized.write_text(authorized_keys)
     bin_dir.mkdir()
-    (bin_dir / "fake-ssh").write_text(FAKE_SSH)
-    (bin_dir / "fake-ssh").chmod(0o755)
+    for tool, text in (("fake-ssh", FAKE_SSH), ("nc", nc)):
+        (bin_dir / tool).write_text(text)
+        (bin_dir / tool).chmod(0o755)
     env = os.environ | {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "FAKE_HOSTS": str(hosts),
@@ -61,14 +82,7 @@ def authorize(
     return done, authorized.read_text()
 
 
-def permitted(authorized_keys: str) -> set[int]:
-    """The loopback ports authorized_keys lets a key forward to."""
-    return {int(port) for port in re.findall(r'permitopen="127\.0\.0\.1:(\d+)"', authorized_keys)}
-
-
-def test_the_gpu_nodes_publish_no_kv_events_and_the_tunnels_reach_only_their_services(
-    tmp_path: Path,
-) -> None:
+def test_the_gpu_nodes_publish_no_kv_events_and_the_tunnels_reach_only_their_services() -> None:
     # vLLM's KV-event publisher connects to a TCP endpoint and serves a replay of the events, which carry
     # every cached block's token ids and session id: on a shared host any user could bind or ask for them,
     # and nothing of the deployment reads them.
@@ -78,26 +92,41 @@ def test_the_gpu_nodes_publish_no_kv_events_and_the_tunnels_reach_only_their_ser
         text = (DEPLOY / "cyan" / "systemd" / f"{unit}.service").read_text()
         forwarded = {int(forward.rsplit(":", 1)[1]) for forward in re.findall(r"-L (\S+)", text)}
         assert forwarded == SERVICES, unit
-    done, authorized = authorize(tmp_path, f"{KEY} lh-tunnel@cyan")
-    assert done.returncode == 0, done.stderr
-    assert permitted(authorized) == SERVICES
 
 
-def test_the_tunnel_key_may_forward_to_the_services_and_listen_nowhere(tmp_path: Path) -> None:
-    earlier = f'restrict,port-forwarding,permitopen="127.0.0.1:5558" {KEY} lh-tunnel@cyan'
-    options = (
-        'restrict,port-forwarding,permitopen="127.0.0.1:8000",permitopen="127.0.0.1:8100",'
-        'permitopen="127.0.0.1:8880",permitlisten="127.0.0.1:1",command="/bin/false"'
+def test_each_tunnel_key_may_only_bridge_its_session_to_its_socket(tmp_path: Path) -> None:
+    lh = f"/run/user/{os.getuid()}/lh"
+    earlier = (
+        f'restrict,port-forwarding,permitopen="127.0.0.1:5558" {KEYS["stt"]} lh-tunnel-stt@cyan'
     )
-    # The key as ssh-keygen writes it, and without its comment, which is optional.
-    for name, public_key in (("commented", f"{KEY} lh-tunnel@cyan"), ("bare", KEY)):
-        done, authorized = authorize(tmp_path / name, public_key, f"{LOGIN}\n{earlier}\n")
-        # The earlier entry for the key is replaced; every other key stays.
-        assert authorized.splitlines() == [LOGIN, f"{options} {public_key}"], name
-        assert done.stdout == f"authorized: {public_key.rsplit(' ', 1)[-1]} (1 entry)\n", name
-    # A client without a key changes nothing.
-    done, authorized = authorize(tmp_path / "empty", "", f"{LOGIN}\n")
-    assert done.returncode == 2 and "no public key" in done.stderr
+    former = f'restrict,port-forwarding,permitopen="127.0.0.1:8000",command="/bin/false" {FORMER} lh-tunnel@cyan'
+    # The keys as ssh-keygen writes them, and without their comments, which are optional.
+    for case, comment in (("commented", " lh-tunnel-{}@cyan"), ("bare", "")):
+        keys = {name: key + comment.format(name) for name, key in KEYS.items()}
+        done, authorized = authorize(
+            tmp_path / case, keys, f"{LOGIN}\n{earlier}\n{former}\n", former=FORMER
+        )
+        assert done.returncode == 0, done.stderr
+        # The earlier entry for a key and the former key's go; every other key stays. Each entry allows its
+        # key's sessions one command, the bridge to the node's socket of its name, and no forwarding.
+        assert authorized.splitlines() == [LOGIN] + [
+            f'restrict,command="exec nc -q0 -U {lh}/{name}.sock" {keys[name]}' for name in KEYS
+        ], case
+        assert done.stdout == f"authorized: engine, stt and tts on {lh} (3 entries)\n", case
+
+
+def test_authorizing_needs_all_three_keys_and_openbsd_netcat(tmp_path: Path) -> None:
+    # A client without one of the keys changes nothing.
+    done, authorized = authorize(tmp_path / "missing", {"engine": KEYS["engine"]}, f"{LOGIN}\n")
+    assert (
+        done.returncode == 2
+        and "no public key in cyan's .ssh/lh_tunnel_stt_ed25519.pub" in done.stderr
+    )
+    assert authorized == f"{LOGIN}\n"
+    # Nor does a node whose nc cannot bridge a session to a socket.
+    gnu = "#!/bin/sh\necho 'GNU netcat 0.7.1, a rewrite of the famous networking tool.'\n"
+    done, authorized = authorize(tmp_path / "gnu", KEYS, f"{LOGIN}\n", nc=gnu)
+    assert done.returncode == 2 and "is not OpenBSD netcat" in done.stderr
     assert authorized == f"{LOGIN}\n"
 
 
