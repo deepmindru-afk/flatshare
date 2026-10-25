@@ -11,14 +11,13 @@
 # namespace of its own, and a process cannot join a network namespace that another's made, so the unit's processes
 # land in namespaces of their own or the host's by turns.
 #
-# Where the kernel refuses unprivileged user namespaces (Ubuntu 24.04 restricts them), CMD runs in the host's
-# namespace, marked LH_PRIVATE_NET=host in its environment, by which deploy/bin/audit-listeners counts its loopback
-# listeners and abstract sockets apart; the single host's preflight reports it.
+# With LH_PRIVATE_NET=host, on a host whose kernel refuses unprivileged user namespaces (Ubuntu 24.04 restricts them;
+# the single host's preflight finds out, and deploy/a100/host.py writes the mark into the three units' drop-ins), CMD
+# runs in the host's namespace as it is, the mark in its environment, by which deploy/bin/audit-listeners judges its
+# engine cores' loopback listeners and CUDA's abstract sockets apart. Anywhere else a namespace that cannot be made
+# fails the unit, with unshare's or ip's own error in its journal, as voicenet-holder fails the voice plane's.
 set -euo pipefail
-if unshare --user --map-root-user --net -- sh -c 'ip link set lo up' 2>/dev/null; then
-  exec unshare --user --map-root-user --net -- sh -c 'ip link set lo up && exec "$@"' sh "$@"
+if [[ ${LH_PRIVATE_NET:-} == host ]]; then
+  exec "$@"
 fi
-echo "in-private-net: no network namespace of its own here (the kernel refuses unprivileged user namespaces):" \
-  "$1 runs in the host's" >&2
-export LH_PRIVATE_NET=host
-exec "$@"
+exec unshare --user --map-root-user --net -- sh -c 'ip link set lo up && exec "$@"' sh "$@"

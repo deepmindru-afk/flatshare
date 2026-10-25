@@ -887,7 +887,9 @@ def test_block_0s_smoke_test_passes_its_listener_audit_under_lh_svc(host: dict) 
     # Block 0 runs the box's smoke.sh, whose listener audit reads the host's listeners (a stand-in ss lists them,
     # held by the units' real processes) and attributes each to its unit by /proc. Under lh-svc every process is in
     # the session's cgroup and the gateway binds 127.0.0.1:18080 itself; the voice plane runs in the host's network
-    # namespace (the kernel refuses user namespaces: voicenet-holder with LH_VOICENET=host, in-voicenet).
+    # namespace (the kernel refuses user namespaces: voicenet-holder with LH_VOICENET=host, in-voicenet), and so do
+    # the GPU servers, started through in-private-net as the rendered units start them, with the mark host.py's
+    # drop-ins give them (LH_PRIVATE_NET=host): the engine core's gloo listener and CUDA's socket are accepted there.
     units, home, py = host["units"], host["home"], sys.executable
     run = Path(host["env"]["XDG_RUNTIME_DIR"])
     (run / "lh").mkdir(mode=0o700)
@@ -895,7 +897,8 @@ def test_block_0s_smoke_test_passes_its_listener_audit_under_lh_svc(host: dict) 
     for name in ("engine", "stt", "tts"):
         (units / f"lh-{name}.service").write_text(
             f"[Unit]\nPartOf=leaseholder.target\n[Service]\nEnvironment=READY=%h/lh-{name}.ready\n"
-            f"ExecStart={py} %h/smoke_server.py %t/lh/{name}.sock\n"
+            "Environment=LH_PRIVATE_NET=host\n"
+            f"ExecStart={BIN}/in-private-net {py} %h/smoke_server.py %t/lh/{name}.sock\n"
             f"ExecStartPost={py} %h/wait.py %h/lh-{name}.ready\n"
         )
     (units / "leaseholder.target").write_text(
@@ -929,12 +932,14 @@ def test_block_0s_smoke_test_passes_its_listener_audit_under_lh_svc(host: dict) 
             f"tcp LISTEN 0 4096 127.0.0.1:17880 0.0.0.0:* {held('livekit')}\n"
             f"udp UNCONN 0 0 127.0.0.1:17882 0.0.0.0:* {held('livekit')}\n"
             f"udp UNCONN 0 0 10.0.0.5:51234 0.0.0.0:* {held('voice-worker')}\n"
+            f"tcp LISTEN 0 128 127.0.1.1:36087 0.0.0.0:* {held('engine')}\n"
         )
         (listed / "unix").write_text(
             "".join(
                 f"u_str LISTEN 0 4096 {run}/lh/{name}.sock 3624 * 0 {held(name)}\n"
                 for name in ("engine", "stt", "tts")
             )
+            + f"u_str LISTEN 0 4096 @cuda-uvmfd-4026531836-1@ 3625 * 0 {held('stt')}\n"
         )
         tools = home / "tools"
         tools.mkdir()
@@ -958,7 +963,9 @@ def test_block_0s_smoke_test_passes_its_listener_audit_under_lh_svc(host: dict) 
         )
         assert (
             f"ok: the box's units hold 3 Unix sockets, all in {run}, and 1 TCP or UDP listeners, all allowed; "
-            "the voice plane runs in the host's network namespace (LH_VOICENET=host) with 3 listeners"
+            "the GPU servers run in the host's network namespace (LH_PRIVATE_NET=host) with 1 loopback TCP "
+            "listeners and 1 abstract sockets; the voice plane runs in the host's network namespace "
+            "(LH_VOICENET=host) with 3 listeners"
         ) in audit
         assert smoke.stdout.rstrip().endswith("smoke: ok")
     finally:

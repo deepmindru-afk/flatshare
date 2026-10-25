@@ -737,12 +737,12 @@ def test_the_audit_reads_the_gpu_servers_listeners_in_their_own_network_namespac
     )
 
 
-def test_the_audit_accepts_the_gpu_servers_in_the_hosts_namespace_where_in_private_net_ran_them_there(
+def test_the_audit_accepts_the_gpu_servers_in_the_hosts_namespace_where_the_host_marks_them(
     tmp_path: Path,
 ) -> None:
-    # Where the kernel refuses unprivileged user namespaces in-private-net runs a GPU server in the host's network
-    # namespace and marks its processes LH_PRIVATE_NET=host: there its engine core's loopback TCP listeners and
-    # CUDA's abstract sockets are accepted, and counted apart.
+    # Where the kernel refuses unprivileged user namespaces the host's drop-ins mark the GPU servers
+    # LH_PRIVATE_NET=host and in-private-net runs them in the host's network namespace: there their engine cores'
+    # loopback TCP listeners and CUDA's abstract sockets are accepted, and counted apart.
     host = Listeners(tmp_path)
     lh = host.runtime / "lh"
     marked = {"LH_PRIVATE_NET": "host"}
@@ -795,6 +795,7 @@ def _private_net_works() -> bool:
 
 SHOW_NET = (
     "import os; "
+    "print(os.getpid()); "
     "print(os.readlink('/proc/self/ns/net')); "
     "print(' '.join(line.split(':')[0].strip() for line in open('/proc/net/dev').readlines()[2:])); "
     "print(os.environ.get('LH_PRIVATE_NET'))"
@@ -805,38 +806,68 @@ SHOW_NET = (
     not _private_net_works(), reason="needs Linux with unprivileged user namespaces"
 )
 def test_in_private_net_runs_its_command_alone_on_a_loopback() -> None:
-    done = subprocess.run(
+    # The command keeps the wrapper's process (no fork on the way), so it stays the unit's main process: what
+    # KillSignal= reaches, wait-healthy --pid watches and the RUNBOOK's nsenter --target finds.
+    wrapper = subprocess.Popen(
         ["bash", str(DEPLOY / "bin" / "in-private-net"), sys.executable, "-c", SHOW_NET],
         env={k: v for k, v in os.environ.items() if k != "LH_PRIVATE_NET"},
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
-    assert done.returncode == 0, done.stderr
-    space, interfaces, marked = done.stdout.splitlines()
+    out, err = wrapper.communicate(timeout=30)
+    assert wrapper.returncode == 0, err
+    pid, space, interfaces, marked = out.splitlines()
+    assert int(pid) == wrapper.pid
     assert space != os.readlink("/proc/self/ns/net") and interfaces == "lo" and marked == "None"
 
 
-def test_in_private_net_runs_its_command_in_the_hosts_namespace_marked_where_it_cannot(
-    tmp_path: Path,
-) -> None:
-    # A kernel that refuses unprivileged user namespaces, as unshare finds it: the command runs as it is, in the
-    # host's namespace, marked so for the audit, and the journal says why.
+def _refusing_unshare(tmp_path: Path) -> dict[str, str]:
+    """An environment whose unshare fails as a kernel that refuses unprivileged user namespaces makes it fail."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "unshare").write_text(
         "#!/bin/sh\necho 'unshare: unshare failed: Operation not permitted' >&2\nexit 1\n"
     )
     (bin_dir / "unshare").chmod(0o755)
-    show = [sys.executable, "-c", "import os; print(os.environ.get('LH_PRIVATE_NET'))"]
+    return {k: v for k, v in os.environ.items() if k != "LH_PRIVATE_NET"} | {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+    }
+
+
+def test_in_private_net_runs_its_command_in_the_hosts_namespace_where_the_host_is_marked(
+    tmp_path: Path,
+) -> None:
+    # A host whose kernel refuses unprivileged user namespaces, which the preflight found and host.py's drop-ins
+    # mark (LH_PRIVATE_NET=host): the command runs as it is, without trying unshare, the mark in its environment for
+    # the audit, in the wrapper's own process.
+    show = [sys.executable, "-c", "import os; print(os.getpid(), os.environ.get('LH_PRIVATE_NET'))"]
+    wrapper = subprocess.Popen(
+        ["bash", str(DEPLOY / "bin" / "in-private-net"), *show],
+        env=_refusing_unshare(tmp_path) | {"LH_PRIVATE_NET": "host"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    out, err = wrapper.communicate(timeout=30)
+    assert wrapper.returncode == 0 and out.split() == [str(wrapper.pid), "host"], err
+    assert err == ""
+
+
+def test_in_private_net_fails_where_the_namespace_cannot_be_made_and_the_host_is_not_marked(
+    tmp_path: Path,
+) -> None:
+    # Unmarked, a namespace that cannot be made fails the unit with unshare's own error, and the command does not
+    # run: no server starts in the host's namespace unless the host's render says so.
+    show = [sys.executable, "-c", "print('ran')"]
     done = subprocess.run(
         ["bash", str(DEPLOY / "bin" / "in-private-net"), *show],
-        env={k: v for k, v in os.environ.items() if k != "LH_PRIVATE_NET"}
-        | {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        env=_refusing_unshare(tmp_path),
         capture_output=True,
         text=True,
     )
-    assert done.returncode == 0 and done.stdout.strip() == "host", done.stderr
-    assert "the kernel refuses unprivileged user namespaces" in done.stderr
+    assert done.returncode == 1 and done.stdout == ""
+    assert "unshare: unshare failed: Operation not permitted" in done.stderr
 
 
 def test_the_gpu_nodes_servers_run_in_network_namespaces_of_their_own() -> None:
@@ -850,8 +881,10 @@ def test_the_gpu_nodes_servers_run_in_network_namespaces_of_their_own() -> None:
         for unit in ("lh-engine", "lh-stt", "lh-tts")
     ]
     variants = [
-        *(DEPLOY / "phastform" / "variants").glob("*/lh-engine.conf"),
-        *(DEPLOY / "templates" / "variants").glob("*/lh-engine.conf"),
+        path
+        for directory in (DEPLOY / "phastform" / "variants", DEPLOY / "templates" / "variants")
+        for unit in ("lh-engine", "lh-stt", "lh-tts")
+        for path in directory.glob(f"*/{unit}.conf")
     ]
     for path in [*units, *variants]:
         starts = [start for start in exec_lines(path.read_text(), "ExecStart") if start]
