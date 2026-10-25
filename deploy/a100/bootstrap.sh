@@ -15,24 +15,24 @@
 # file of the configurations to warm (host.py warm --configs). LH_SUPERVISOR=lh-svc runs the units under
 # deploy/bin/lh-svc even where systemd's user manager could (docs/HARDWARE.md, single-host mode): env.sh keeps the
 # choice for the later stages and every script that sources it, and LH_SUPERVISOR=auto gives it back to the facts.
+# Sourced (as a test does), it defines its functions and runs nothing.
 set -euo pipefail
-stage=${1:-}
-[[ $stage == stage || $stage == gpu || $stage == warm ]] || { echo "usage: bootstrap.sh stage|gpu|warm" >&2; exit 2; }
-src=$(cd "$(dirname "$0")/../.." && pwd)
+src=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 root=$HOME/leaseholder
 node=$root/node
 profile=${LH_PROFILE:-a100-40gb}
-if [[ -z ${LH_SUPERVISOR:-} && -f $node/env.sh ]]; then # an earlier stage's choice
-  LH_SUPERVISOR=$(sed -n 's/^export LH_SUPERVISOR=//p' "$node/env.sh")
-fi
-case ${LH_SUPERVISOR:=auto} in
-  auto | lh-svc) export LH_SUPERVISOR ;;
-  *) echo "bootstrap: LH_SUPERVISOR is auto or lh-svc, not '$LH_SUPERVISOR'" >&2; exit 2 ;;
-esac
-mkdir -p "$root"/{bin,venvs,vendor,data,runs,results,cache} "$node"
-exec > >(tee -a "$node/bootstrap.log") 2>&1
+stage=""
 log() { echo "[$(date -u +%FT%TZ)] bootstrap $stage: $*"; }
-log "from $src ($(cat "$src/DEPLOYED" 2>/dev/null || echo 'no DEPLOYED'))"
+
+choose_supervisor() { # LH_SUPERVISOR, checked before anything is written: unset, an earlier stage's choice
+  if [[ -z ${LH_SUPERVISOR:-} && -f $node/env.sh ]]; then
+    LH_SUPERVISOR=$(sed -n 's/^export LH_SUPERVISOR=//p' "$node/env.sh")
+  fi
+  case ${LH_SUPERVISOR:=auto} in
+    auto | lh-svc) export LH_SUPERVISOR ;;
+    *) echo "bootstrap: LH_SUPERVISOR is auto or lh-svc, not '$LH_SUPERVISOR'" >&2; exit 2 ;;
+  esac
+}
 
 # uv at the version the locks were resolved with or newer (uv 0.10.8 could not resolve the engine lock's torchcodec
 # through --torch-backend), and its Python 3.12 for the stdlib tools below.
@@ -40,12 +40,24 @@ uv=${UV:-$HOME/.local/bin/uv}
 uv_new_enough() {
   [[ -x $1 ]] && [[ $(printf '%s\n' 0.11.27 "$("$1" --version | awk '{print $2}')" | sort -V | head -1) == 0.11.27 ]]
 }
-if ! uv_new_enough "$uv"; then
-  log "uv 0.11.27 into ~/.local/bin"
-  curl -LsSf https://astral.sh/uv/0.11.27/install.sh | env UV_INSTALL_DIR="$HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh -s -- -q
-  uv=$HOME/.local/bin/uv
-fi
-py=$("$uv" python find 3.12 2>/dev/null) || { "$uv" python install -q 3.12 && py=$("$uv" python find 3.12); }
+tools() { # uv, its Python 3.12 (py), the compilers and ss
+  if ! uv_new_enough "$uv"; then
+    log "uv 0.11.27 into ~/.local/bin"
+    curl -LsSf https://astral.sh/uv/0.11.27/install.sh | env UV_INSTALL_DIR="$HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh -s -- -q
+    uv=$HOME/.local/bin/uv
+  fi
+  py=$("$uv" python find 3.12 2>/dev/null) || { "$uv" python install -q 3.12 && py=$("$uv" python find 3.12); }
+  # Triton builds its launchers with a C compiler and nvcc needs a host C++ compiler.
+  if ! command -v cc >/dev/null || ! command -v c++ >/dev/null; then
+    log "no C or C++ compiler: build-essential"
+    apt_install build-essential || log "build-essential not installed (no sudo or apt): the preflight refuses"
+  fi
+  # smoke.sh's listener audit (deploy/bin/audit-listeners) reads the host's sockets with ss.
+  if ! command -v ss >/dev/null; then
+    log "no ss: iproute2"
+    apt_install iproute2 || log "iproute2 not installed (no sudo or apt): the preflight refuses"
+  fi
+}
 host_py() { "$py" "$src/deploy/a100/host.py" "$@"; }
 field() { # field FILE KEY...: a value of a JSON file
   "$py" -c 'import json, sys
@@ -59,18 +71,6 @@ apt_install() { # apt_install PACKAGE...: where sudo and apt work; fails otherwi
   with_sudo || return 1
   sudo -n apt-get update -q >/dev/null && sudo -n apt-get install -y -q "$@" >/dev/null
 }
-
-# Triton builds its launchers with a C compiler and nvcc needs a host C++ compiler.
-if ! command -v cc >/dev/null || ! command -v c++ >/dev/null; then
-  log "no C or C++ compiler: build-essential"
-  apt_install build-essential || log "build-essential not installed (no sudo or apt): the preflight refuses"
-fi
-
-# smoke.sh's listener audit (deploy/bin/audit-listeners) reads the host's sockets with ss.
-if ! command -v ss >/dev/null; then
-  log "no ss: iproute2"
-  apt_install iproute2 || log "iproute2 not installed (no sudo or apt): the preflight refuses"
-fi
 
 detect() { # the host's facts, as the host's own systemctl answers (not the shims, should env.sh be sourced)
   PATH=${PATH//"$src"\/deploy\/bin\/shims:/} "$py" "$src/deploy/profile.py" detect --out "$node/host.json"
@@ -212,36 +212,48 @@ preflight() { # preflight [--gpu]: the stage's status is the preflight's
   exit "$status"
 }
 
-case $stage in
-  stage)
-    render
-    shell_env
-    venvs
-    compilers
-    audio_and_models
-    control_plane
-    host_py jit-check "$node" || log "FlashInfer's sampler did not build: the preflight refuses"
-    preflight
-    ;;
-  gpu)
-    nvidia-smi -L >/dev/null 2>&1 || { log "nvidia-smi shows no GPU"; exit 2; }
-    built=$(cat "$root/venvs/engine/lh-install-path" 2>/dev/null || true)
-    render
-    shell_env
-    if [[ $(field "$node/node.json" install path) != "$built" ]]; then
+main() {
+  stage=${1:-}
+  [[ $stage == stage || $stage == gpu || $stage == warm ]] || { echo "usage: bootstrap.sh stage|gpu|warm" >&2; exit 2; }
+  choose_supervisor
+  mkdir -p "$root"/{bin,venvs,vendor,data,runs,results,cache} "$node"
+  exec > >(tee -a "$node/bootstrap.log") 2>&1
+  log "from $src ($(cat "$src/DEPLOYED" 2>/dev/null || echo 'no DEPLOYED'))"
+  tools
+  case $stage in
+    stage)
+      render
+      shell_env
       venvs
-    fi
-    compilers
-    host_py units "$node" >/dev/null
-    host_py config "$node"
-    [[ $(field "$root/cache/jit-check.json" ok 2>/dev/null) == True ]] || host_py jit-check "$node" || true
-    log "vLLM parses the node's configs"
-    host_py with-engine-env "$node" "$root/venvs/engine/bin/python" "$src/deploy/profile.py" check-vllm "$node"
-    preflight --gpu
-    ;;
-  warm)
-    shell_env
-    host_py warm "$node" ${LH_WARM:+--configs "$LH_WARM"} || log "a configuration did not start: see warm.json"
-    preflight --gpu
-    ;;
-esac
+      compilers
+      audio_and_models
+      control_plane
+      host_py jit-check "$node" || log "FlashInfer's sampler did not build: the preflight refuses"
+      preflight
+      ;;
+    gpu)
+      nvidia-smi -L >/dev/null 2>&1 || { log "nvidia-smi shows no GPU"; exit 2; }
+      local built
+      built=$(cat "$root/venvs/engine/lh-install-path" 2>/dev/null || true)
+      render
+      shell_env
+      if [[ $(field "$node/node.json" install path) != "$built" ]]; then
+        venvs
+      fi
+      compilers
+      host_py units "$node" >/dev/null
+      host_py config "$node"
+      [[ $(field "$root/cache/jit-check.json" ok 2>/dev/null) == True ]] || host_py jit-check "$node" || true
+      log "vLLM parses the node's configs"
+      host_py with-engine-env "$node" "$root/venvs/engine/bin/python" "$src/deploy/profile.py" check-vllm "$node"
+      preflight --gpu
+      ;;
+    warm)
+      shell_env
+      host_py warm "$node" ${LH_WARM:+--configs "$LH_WARM"} || log "a configuration did not start: see warm.json"
+      preflight --gpu
+      ;;
+  esac
+}
+
+[[ ${BASH_SOURCE[0]} != "$0" ]] || main "$@"

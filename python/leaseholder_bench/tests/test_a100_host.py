@@ -638,6 +638,33 @@ def test_bootstrap_refuses_an_unknown_supervisor_before_it_writes_anything(tmp_p
     assert not (tmp_path / "leaseholder").exists()
 
 
+def test_bootstrap_sourced_defines_its_stages_steps_and_runs_nothing(tmp_path: Path) -> None:
+    # As the tests of its own flow use it: sourced, bootstrap.sh defines its functions and writes nothing.
+    done = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"source {DEPLOY / 'a100' / 'bootstrap.sh'} && declare -F | awk '{{print $3}}' && echo src=$src",
+        ],
+        env=os.environ | {"HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    defined = set(done.stdout.split())
+    assert {
+        "main",
+        "choose_supervisor",
+        "tools",
+        "render",
+        "shell_env",
+        "detect",
+        "venvs",
+    } <= defined
+    assert f"src={REPO}" in done.stdout.splitlines()
+    assert not list(tmp_path.iterdir())
+
+
 def test_the_preflight_names_what_a_bare_container_lacks(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:
