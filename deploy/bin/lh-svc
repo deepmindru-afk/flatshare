@@ -22,8 +22,9 @@ service it would pass its sockets to binds its own (the gateway does without LIS
 %t, %u, %U and %% and systemd's $NAME (a word of its own, split at whitespace) and ${NAME} (in place) expansions
 apply to the command lines.
 
-Each started unit has a runner (`lh-svc run UNIT`, in a session of its own) that runs its commands, relays their
-output into the unit's journal with UTC times, restarts it as Restart says and stops it on SIGTERM. `start` returns
+Each started unit has a runner (`lh-svc run UNIT`, in a session of its own) that runs its commands, with
+LH_SVC_UNIT=UNIT in their environment where systemd would put them in the unit's cgroup, relays their output into
+the unit's journal with UTC times, restarts it as Restart says and stops it on SIGTERM. `start` returns
 once a unit's ExecStartPost commands have succeeded, as systemd's does, and fails as systemd's does when it cannot;
 `stop` returns only once every process it stops has exited: the unit's own (KillSignal, then SIGKILL after
 TimeoutStopSec), those of the units bound to it or part of it, and a target's units with the target. The state is in
@@ -202,6 +203,8 @@ def environment(unit: Unit) -> dict[str, str]:
         "PATH": DEFAULT_PATH,
         "XDG_RUNTIME_DIR": str(runtime_dir()),
         "LANG": os.environ.get("LANG", "C.UTF-8"),
+        # What a unit's cgroup says under systemd: deploy/bin/gpu-guard tells the box's own servers by it.
+        "LH_SVC_UNIT": unit.name,
     }
     for value in unit.values.get("EnvironmentFile", []):
         optional = value.startswith("-")

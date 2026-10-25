@@ -30,7 +30,7 @@ from pathlib import Path
 # A stand-in service: prints its arguments and environment, says it is ready, and runs until it is stopped; with
 # STUBBORN it ignores the stop signals.
 print("argv", sys.argv[1:], flush=True)
-print("env", os.environ.get("GREETING"), os.environ.get("FROM_FILE"), flush=True)
+print("env", os.environ.get("GREETING"), os.environ.get("FROM_FILE"), os.environ.get("LH_SVC_UNIT"), flush=True)
 if os.environ.get("STUBBORN"):
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, signal.SIG_IGN)
@@ -155,7 +155,8 @@ def test_a_target_starts_its_units_in_order_and_stops_every_process(host: dict) 
     )
     # The drop-in's command, with $FLAGS split into words and ${GREETING} in place, and the environment's files.
     assert "argv ['--x', '1', '--y', 'hello-word']" in journal.stdout
-    assert "env hello from the file" in journal.stdout
+    # LH_SVC_UNIT names the unit, where systemd's cgroup would (deploy/bin/gpu-guard reads it).
+    assert "env hello from the file svc-a.service" in journal.stdout
     assert (Path(host["env"]["XDG_RUNTIME_DIR"]) / "lh").is_dir()  # ExecStartPre, %t
     order = ctl(host, "-u", "svc-a", "-u", "svc-b", "-o", "short-unix", tool="journalctl").stdout
     assert order.index("Started svc-a.service") < order.index("Starting svc-b.service")
@@ -465,3 +466,36 @@ def test_the_voice_plane_runs_in_the_hosts_namespace_where_there_is_none_of_its_
     finally:
         holder.terminate()
         holder.wait()
+
+
+@pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="reads /proc (Linux)")
+def test_gpu_guard_tells_the_supervisors_units_from_foreign_processes(tmp_path: Path) -> None:
+    # Two processes on the GPU (a stand-in nvidia-smi lists them): one of lh-svc's units, which carries its
+    # LH_SVC_UNIT, and a foreign one. The guard passes the unit and refuses the stranger.
+    sleep = [sys.executable, "-c", "import time; time.sleep(30)"]
+    ours = subprocess.Popen(sleep, env=os.environ | {"LH_SVC_UNIT": "lh-stt.service"})
+    theirs = subprocess.Popen(
+        sleep, env={k: v for k, v in os.environ.items() if k != "LH_SVC_UNIT"}
+    )
+    try:
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        smi = bin_dir / "nvidia-smi"
+
+        def guard(*pids: int) -> subprocess.CompletedProcess[str]:
+            smi.write_text("#!/bin/sh\n" + "".join(f"echo {pid}\n" for pid in pids))
+            smi.chmod(0o755)
+            return subprocess.run(
+                ["bash", str(BIN / "gpu-guard")],
+                env=os.environ | {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+                capture_output=True,
+                text=True,
+            )
+
+        assert guard(ours.pid).returncode == 0
+        refused = guard(ours.pid, theirs.pid)
+        assert refused.returncode == 1 and f"pid {theirs.pid}" in refused.stderr
+    finally:
+        for process in (ours, theirs):
+            process.kill()
+            process.wait()
