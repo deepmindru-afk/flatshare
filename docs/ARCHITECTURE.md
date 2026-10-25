@@ -28,7 +28,7 @@ The variant `make-room` ([`python/leaseholder_vllm`](../python/leaseholder_vllm/
 
 What E2 found ([BENCHMARKS.md](BENCHMARKS.md#voice-under-agent-load-e2)): the budget cap is necessary, and either KV make-room or the reserve does the rest. The window has to cover the reply's first sentence: this voice agent's replies run 23 tokens at the median and 52 at most, and at 16 tokens full replies decode beside agent prefill again (3,094 ms at p95 in W5), where 48 tokens covers all but one of them (2,236 ms). The configuration to deploy is the two PRs' switches with a 48-token window and no reserve.
 
-**The gaps E2 measured with**, in the v0.3 variant and the PRs as first opened, fixed in W5 in the variant (main, up to dff9744) with the further defects W5's review found; the PRs follow (E2's numbers include their effect):
+**The gaps E2 measured with**, in the v0.3 variant and the PRs as first opened, fixed in W5 in the variant (main, up to dff9744) with the further defects W5's review found; the PRs follow (W4's E2 numbers include their effect; W5's ran the fixed variant):
 - the budget cap does not hold a lower-priority request that already holds its KV, such as one whose CPU-tier load has finished (vLLM's `kv_holding_waiting` queue, which it drains before `waiting`);
 - the KV shortfall counts the blocks of a request's cached prefix as needed, so the reserve and the in-flight gate can refuse a request that stock vLLM admits;
 - victims are sized before the next step's decode growth, so a turn can need a second preemption a step later.
