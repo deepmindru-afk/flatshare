@@ -366,7 +366,9 @@ def gateway_counts(
             return None
         return round(sum(v for k, v in counters[name].items() if dict(k).items() >= match.items()))
 
-    admission = REFUSED in counters  # its series exist from the gateway's start
+    # A gateway with an admission point exports its series from its start, at zero; one without has
+    # none, and its shed count, from a family every gateway has, is null rather than zero.
+    admission = REFUSED in counters
     prompt = total(USAGE, {"class": "background", "kind": "prompt"})
     completion = total(USAGE, {"class": "background", "kind": "completion"})
     return {
