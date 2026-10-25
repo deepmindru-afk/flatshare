@@ -18,8 +18,8 @@ use serde::Deserialize;
 /// A validated configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The engine's address (`host:port`), spoken to over plain HTTP/1.1; with `[nodes]`, the first node's.
-    pub upstream: Authority,
+    /// The engine, spoken to over plain HTTP/1.1; with `[nodes]`, the first node's.
+    pub upstream: UpstreamAddr,
     /// `[nodes]` and `[placement]`: several GPU nodes and how sessions are placed on them; `None` for one
     /// `upstream`.
     pub placement: Option<Placement>,
@@ -65,6 +65,23 @@ pub struct Listen {
 pub enum ListenAddr {
     Tcp(SocketAddr),
     Unix(PathBuf),
+}
+
+/// Where an engine listens: `http://host:port`, or `unix:` and the path of its socket (the engine's own, or a
+/// tunnel's on this host).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpstreamAddr {
+    Tcp(Authority),
+    Unix(PathBuf),
+}
+
+impl fmt::Display for UpstreamAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp(authority) => write!(f, "http://{authority}"),
+            Self::Unix(path) => write!(f, "unix:{}", path.display()),
+        }
+    }
 }
 
 /// A tenant: who a request belongs to, what it may ask for, and its cache namespace.
@@ -137,7 +154,7 @@ pub struct Placement {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Node {
     pub name: String,
-    pub upstream: Authority,
+    pub upstream: UpstreamAddr,
     /// Whether it serves each class, strictest first: those `classes` names under placement dedicated, and
     /// every class under the others.
     pub serves: [bool; 3],
@@ -899,20 +916,36 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn node_upstream(name: &str, raw: &str) -> Result<Authority, String> {
+fn node_upstream(name: &str, raw: &str) -> Result<UpstreamAddr, String> {
     parse_upstream(raw).map_err(|e| format!("nodes.{name}: {e}"))
 }
 
-fn parse_upstream(raw: &str) -> Result<Authority, String> {
-    let uri: Uri = raw.parse().map_err(|e| format!("upstream {raw:?}: {e}"))?;
+fn parse_upstream(raw: &str) -> Result<UpstreamAddr, String> {
+    const EXPECTED: &str =
+        "expected http://host:port with no path, or unix: and an absolute socket path";
+    if let Some(path) = raw.strip_prefix("unix:") {
+        let path = Path::new(path);
+        // One spelling: `unix://host/...` reads as a URL with an authority, which a socket has not.
+        if !path.is_absolute() || path.as_os_str().as_encoded_bytes().starts_with(b"//") {
+            return Err(format!("upstream {raw:?}: {EXPECTED}"));
+        }
+        // A path longer than a socket address holds would fail every connection; refuse it at start.
+        if std::os::unix::net::SocketAddr::from_pathname(path).is_err() {
+            return Err(format!(
+                "upstream {raw:?}: the path is too long for a Unix socket address"
+            ));
+        }
+        return Ok(UpstreamAddr::Unix(path.to_owned()));
+    }
+    let uri: Uri = raw
+        .parse()
+        .map_err(|e| format!("upstream {raw:?}: {e}; {EXPECTED}"))?;
     let path_is_root = matches!(uri.path(), "" | "/") && uri.query().is_none();
     match (uri.scheme(), uri.authority()) {
         (Some(scheme), Some(authority)) if *scheme == Scheme::HTTP && path_is_root => {
-            Ok(authority.clone())
+            Ok(UpstreamAddr::Tcp(authority.clone()))
         }
-        _ => Err(format!(
-            "upstream {raw:?}: expected http://host:port with no path"
-        )),
+        _ => Err(format!("upstream {raw:?}: {EXPECTED}")),
     }
 }
 
@@ -1017,7 +1050,7 @@ mod tests {
     #[test]
     fn defaults_follow_the_spec() {
         let config = config("", &format!("[tenants.agents]\nkeys_sha256 = [\"{KEY}\"]")).unwrap();
-        assert_eq!(config.upstream.as_str(), "127.0.0.1:18000");
+        assert_eq!(config.upstream.to_string(), "http://127.0.0.1:18000");
         assert_eq!(config.upstream_idle_timeout, Duration::from_secs(4));
         let vllm = PrioritySignals {
             vllm_header: true,
@@ -1096,6 +1129,78 @@ mod tests {
         );
         let err = Config::from_toml(&https).unwrap_err().to_string();
         assert!(err.contains("http://host:port"), "{err}");
+    }
+
+    #[test]
+    fn an_upstream_is_a_tcp_address_or_a_unix_socket() {
+        let a = format!("[tenants.a]\nkeys_sha256 = [\"{KEY}\"]");
+        let upstream = |value: &str| {
+            Config::from_toml(&format!(
+                "upstream = \"{value}\"\n{}\n[[listen]]\ntcp = \"127.0.0.1:0\"\n{a}",
+                secret_file(&SECRET_FILE)
+            ))
+            .map(|config| config.upstream)
+            .map_err(|e| e.to_string())
+        };
+        let socket = "/run/user/1007/lh/phastform-engine.sock";
+        assert_eq!(
+            upstream(&format!("unix:{socket}")).unwrap(),
+            UpstreamAddr::Unix(socket.into())
+        );
+        assert_eq!(
+            upstream("http://127.0.0.1:18000").unwrap(),
+            UpstreamAddr::Tcp("127.0.0.1:18000".parse().unwrap())
+        );
+        // The start line and the errors name it as it was written.
+        assert_eq!(
+            UpstreamAddr::Unix(socket.into()).to_string(),
+            format!("unix:{socket}")
+        );
+        let long = format!("unix:/{}", "s".repeat(200));
+        for (value, cause) in [
+            ("unix:relative.sock", "or unix: and an absolute socket path"),
+            ("unix:", "or unix: and an absolute socket path"),
+            (
+                "unix://engine/x.sock",
+                "or unix: and an absolute socket path",
+            ),
+            (&long, "the path is too long for a Unix socket address"),
+            (
+                "http+unix://%2Frun%2Fx.sock",
+                "or unix: and an absolute socket path",
+            ),
+        ] {
+            let err = upstream(value).unwrap_err();
+            assert!(
+                err.contains(&format!("upstream {value:?}: ")) && err.contains(cause),
+                "{err}"
+            );
+        }
+
+        // Nodes take either kind, and two nodes never share a socket.
+        let nodes = |gray: &str| {
+            Config::from_toml(&format!(
+                "{}\n[nodes.phastform]\nupstream = \"unix:{socket}\"\n[nodes.gray]\nupstream = \"{gray}\"\n\
+                 [[listen]]\ntcp = \"127.0.0.1:0\"\n{a}",
+                secret_file(&SECRET_FILE)
+            ))
+            .map_err(|e| e.to_string())
+        };
+        let placement = nodes("http://127.0.0.1:28000").unwrap().placement.unwrap();
+        let upstreams: Vec<_> = placement
+            .nodes
+            .iter()
+            .map(|n| n.upstream.to_string())
+            .collect();
+        assert_eq!(
+            upstreams,
+            ["http://127.0.0.1:28000", &format!("unix:{socket}")]
+        );
+        let err = nodes(&format!("unix:{socket}")).unwrap_err();
+        assert!(
+            err.contains("nodes.gray and nodes.phastform have the same upstream"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1504,16 +1609,16 @@ mod tests {
         let names: Vec<_> = placement
             .nodes
             .iter()
-            .map(|n| (n.name.as_str(), n.upstream.as_str(), n.serves))
+            .map(|n| (n.name.as_str(), n.upstream.to_string(), n.serves))
             .collect();
         assert_eq!(
             names,
             [
-                ("gray", "127.0.0.1:28000", [true; 3]),
-                ("phastform", "127.0.0.1:18000", [true; 3])
+                ("gray", "http://127.0.0.1:28000".to_owned(), [true; 3]),
+                ("phastform", "http://127.0.0.1:18000".to_owned(), [true; 3])
             ]
         );
-        assert_eq!(pool.upstream.as_str(), "127.0.0.1:28000");
+        assert_eq!(pool.upstream.to_string(), "http://127.0.0.1:28000");
 
         let dedicated = Config::from_toml(&format!(
             "{}\n[nodes.voice]\nupstream = \"http://127.0.0.1:18000\"\nclasses = [\"realtime\"]\n\

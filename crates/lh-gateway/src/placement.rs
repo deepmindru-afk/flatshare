@@ -688,6 +688,7 @@ impl Held {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UpstreamAddr;
     use SloClass::*;
 
     fn session(id: &str) -> SessionId {
@@ -914,8 +915,10 @@ mod tests {
         let nodes: Vec<Node> = names
             .iter()
             .map(|name| {
-                let upstream =
-                    Upstream::new("127.0.0.1:9".parse().unwrap(), Duration::from_secs(1));
+                let upstream = Upstream::new(
+                    UpstreamAddr::Tcp("127.0.0.1:9".parse().unwrap()),
+                    Duration::from_secs(1),
+                );
                 let own = Arc::new(metrics.on(name));
                 Node::new(Some(Arc::clone(name)), upstream, None, own, [true; 3])
             })

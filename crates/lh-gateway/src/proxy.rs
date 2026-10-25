@@ -8,6 +8,9 @@
 
 use std::convert::Infallible;
 use std::error::Error as _;
+use std::future::Future;
+use std::io;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,14 +27,16 @@ use http::{StatusCode, Version};
 use http_body::{Body as _, Frame, SizeHint};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
-use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::{TokioExecutor, TokioTimer};
+use hyper_util::client::legacy::{Client, ResponseFuture};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use prometheus_client::metrics::histogram::Histogram;
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
 use crate::admission::Ticket;
+use crate::config::UpstreamAddr;
 use crate::exchange::Exchange;
 use crate::metrics::{Outcome, Refusal, Route, UpstreamError};
 use crate::placement::{InFlight, Node};
@@ -42,28 +47,82 @@ use crate::sanitize::{
 use crate::server::{App, Shared};
 use crate::usage::Scanner;
 
-/// The pooled HTTP/1.1 client to the engine.
+/// The pooled HTTP/1.1 client to the engine, over TCP or its Unix socket.
 #[derive(Debug)]
 pub(crate) struct Upstream {
-    client: Client<HttpConnector, UpstreamBody>,
+    pool: Pool,
+    addr: UpstreamAddr,
+    /// The authority of the requests' URIs: the engine's `host:port`, or `localhost` on a socket.
     authority: Authority,
+}
+
+/// One connection pool, keyed by the requests' authority; a socket's client connects every request to it.
+#[derive(Debug)]
+enum Pool {
+    Tcp(Client<HttpConnector, UpstreamBody>),
+    Unix(Client<UnixConnector, UpstreamBody>),
+}
+
+impl Pool {
+    fn request(&self, request: http::Request<UpstreamBody>) -> ResponseFuture {
+        match self {
+            Self::Tcp(client) => client.request(request),
+            Self::Unix(client) => client.request(request),
+        }
+    }
+}
+
+/// Connects to one Unix socket whatever the URI: the engine's, or a tunnel's on this host.
+#[derive(Clone, Debug)]
+struct UnixConnector(Arc<Path>);
+
+impl tower_service::Service<Uri> for UnixConnector {
+    type Response = TokioIo<UnixStream>;
+    type Error = io::Error;
+    type Future = Pin<Box<dyn Future<Output = io::Result<TokioIo<UnixStream>>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Uri) -> Self::Future {
+        let path = Arc::clone(&self.0);
+        Box::pin(async move { UnixStream::connect(&*path).await.map(TokioIo::new) })
+    }
 }
 
 impl Upstream {
     /// A client that keeps idle connections for `idle_timeout`. The engine closes idle connections after its
     /// keep-alive, and a request sent on a connection it is closing fails, so the gateway must let go first.
-    pub fn new(authority: Authority, idle_timeout: Duration) -> Self {
-        let mut connector = HttpConnector::new();
-        connector.set_nodelay(true);
-        let client = Client::builder(TokioExecutor::new())
-            .pool_timer(TokioTimer::new())
-            .pool_idle_timeout(idle_timeout)
-            .build(connector);
-        Self { client, authority }
+    pub fn new(addr: UpstreamAddr, idle_timeout: Duration) -> Self {
+        let builder = || {
+            let mut builder = Client::builder(TokioExecutor::new());
+            builder
+                .pool_timer(TokioTimer::new())
+                .pool_idle_timeout(idle_timeout);
+            builder
+        };
+        let (pool, authority) = match &addr {
+            UpstreamAddr::Tcp(authority) => {
+                let mut connector = HttpConnector::new();
+                connector.set_nodelay(true);
+                (Pool::Tcp(builder().build(connector)), authority.clone())
+            }
+            UpstreamAddr::Unix(path) => {
+                let connector = UnixConnector(path.as_path().into());
+                let localhost = Authority::from_static("localhost");
+                (Pool::Unix(builder().build(connector)), localhost)
+            }
+        };
+        Self {
+            pool,
+            addr,
+            authority,
+        }
     }
 
-    pub fn authority(&self) -> &Authority {
-        &self.authority
+    pub fn addr(&self) -> &UpstreamAddr {
+        &self.addr
     }
 
     fn uri(&self, path_and_query: PathAndQuery) -> Uri {
@@ -81,7 +140,7 @@ impl Upstream {
             .body(UpstreamBody::empty())
             .expect("a GET with a valid URI is a valid request");
         matches!(
-            tokio::time::timeout(timeout, self.client.request(request)).await,
+            tokio::time::timeout(timeout, self.pool.request(request)).await,
             Ok(Ok(response)) if response.status().is_success()
         )
     }
@@ -365,7 +424,7 @@ async fn send(
     upstream: &Upstream,
     request: http::Request<UpstreamBody>,
 ) -> Result<http::Response<Incoming>, Failure> {
-    let response = upstream.client.request(request);
+    let response = upstream.pool.request(request);
     match tokio::time::timeout(shared.first_byte_timeout, response).await {
         Ok(response) => response.map_err(Failure::Upstream),
         Err(_) => Err(Failure::Timeout("response headers")),
@@ -415,7 +474,7 @@ async fn first_frame(
 ) -> Result<(http::Response<Incoming>, Option<Bytes>), Failure> {
     let attempt = async {
         let response = upstream
-            .client
+            .pool
             .request(request)
             .await
             .map_err(Failure::Upstream)?;

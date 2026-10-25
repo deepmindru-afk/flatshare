@@ -478,6 +478,7 @@ dependencies = [
  "subtle",
  "tokio",
  "toml",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
 ]

@@ -186,7 +186,7 @@ impl Server {
         let listeners = self.local_addrs().unwrap_or_default();
         match &shared.placement {
             None => tracing::info!(
-                upstream = %shared.nodes[0].upstream.authority(),
+                upstream = %shared.nodes[0].upstream.addr(),
                 listeners = ?listeners,
                 admission = ?admission,
                 "lh-gateway serving"
@@ -199,7 +199,7 @@ impl Server {
                         format!(
                             "{}={}",
                             node.name.as_deref().unwrap_or_default(),
-                            node.upstream.authority()
+                            node.upstream.addr()
                         )
                     })
                     .collect();

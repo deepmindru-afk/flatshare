@@ -7,3 +7,4 @@ mod leaseholder;
 mod placement;
 mod proxy;
 mod streams;
+mod upstream;

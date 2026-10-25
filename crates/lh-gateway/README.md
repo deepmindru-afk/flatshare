@@ -24,7 +24,7 @@ It is a harness, not a general-purpose router: one upstream or a few nodes, loop
 
 - Leases, prefetch or a recompute ledger: the lease design was not pursued ([ADR-0006](../../docs/adr/0006-the-engine-change-carries-the-realtime-tier.md)). Nor admission for interactive requests by predicted time to first token: policy `leaseholder` does not hold interactive requests.
 - Retries, or balancing single requests: with `[nodes]` a session is placed once and lives on the node that holds its KV. KV never moves between nodes.
-- TLS. Every listener binds loopback or a private socket, and the upstream is the loopback end of an SSH tunnel.
+- TLS. Every listener binds loopback or a private socket, and the upstream is a tunnel's socket or a loopback port.
 - The Anthropic Messages API: agentic-api translates it and calls the gateway.
 - Inferring `turn_started` and `turn_finished` from traffic. The finish reason is logged per request.
 - The Responses API's stop reasons (its usage is read).
@@ -49,7 +49,7 @@ Unknown keys are errors, so a misspelled setting fails at start instead of silen
 
 | Key | Default | Meaning |
 |---|---|---|
-| `upstream` | required without `[nodes]` | The engine, `http://host:port`. Several GPU nodes are `[nodes.<name>]` instead (below), and then `upstream` is not set |
+| `upstream` | required without `[nodes]` | The engine: `http://host:port`, or `unix:` and the absolute path of its socket, such as a tunnel's (`unix:/run/user/1007/lh/phastform-engine.sock`). Either is spoken to over HTTP/1.1 with pooled connections. Several GPU nodes are `[nodes.<name>]` instead (below), and then `upstream` is not set |
 | `upstream_idle_timeout_s` | 4 | How long an idle upstream connection is kept for reuse. Keep it below the engine's keep-alive (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, 5 s by default), or a request can go out on a connection the engine is closing |
 | `upstream_priority` | `["vllm-header"]` | Where the class's priority goes upstream: any of `"vllm-header"`, `"body"` and `"smg-header"`. The empty list sends none, as a plain client does: E2's stock arm. vLLM 0.32's FCFS scheduler ignores priorities rather than rejecting them |
 | `cache_salt_secret_file` | required | An absolute path: a file of 32 random bytes in hex that only its owner may open (mode 600), which `deploy/cyan/install.sh` writes once. It keys every tenant's `cache_salt`, so that a client which reaches the engine directly cannot compute another tenant's salt from its name. A missing or unreadable file, one other users may open, or one that holds anything else stops the gateway at start. A new secret changes every salt, which orphans every tenant's prefix cache |
@@ -98,7 +98,7 @@ Several GPU nodes take a `[nodes.<name>]` table each, two or more, in place of `
 
 | Key | Default | Meaning |
 |---|---|---|
-| `upstream` | required | The node's engine, `http://host:port`; no two nodes share one |
+| `upstream` | required | The node's engine, `http://host:port` or `unix:` and a socket path, as for one engine; no two nodes share one |
 | `classes` | required with `dedicated`, refused otherwise | The classes the node serves under placement `dedicated`, such as `["realtime"]`; every class needs a node |
 
 The `[placement]` table, which needs `[nodes]`, sets how sessions are placed on them:
@@ -216,7 +216,7 @@ Each request writes one log line at its end (target `lh_gateway::request`, level
 
 ## Design notes
 
-- **Upstream client: hyper-util's pooled client rather than reqwest.** The request is already an `http::Request` with a sanitized `HeaderMap`, so it goes upstream without conversion, and the response body is hyper's `Incoming`, read frame by frame. reqwest wraps the same client and would add a URL parse, header conversions and redirect handling per request, none of which a fixed loopback upstream needs. Idle upstream connections close after `upstream_idle_timeout_s`, before the engine's keep-alive closes them under a request. With vLLM's default of 5 s, a voice call, whose turns are often more than 4 s apart, opens a new upstream connection for most turns; on cyan the engine keeps connections for 60 s and the gateway for 55 s.
+- **Upstream client: hyper-util's pooled client rather than reqwest.** The request is already an `http::Request` with a sanitized `HeaderMap`, so it goes upstream without conversion, and the response body is hyper's `Incoming`, read frame by frame. reqwest wraps the same client and would add a URL parse, header conversions and redirect handling per request, none of which a fixed loopback upstream needs. Idle upstream connections close after `upstream_idle_timeout_s`, before the engine's keep-alive closes them under a request. With vLLM's default of 5 s, a voice call, whose turns are often more than 4 s apart, opens a new upstream connection for most turns; on cyan the engine keeps connections for 60 s and the gateway for 55 s. A `unix:` upstream is the same client with a connector that opens the socket for every new connection; the pool, its idle timeout and the first-byte timeout are the same as over TCP.
 - **Request ids** are a random 64-bit prefix chosen at start and a counter. They need to be unique, not unpredictable (a client cannot set them), and they cost no system call. Minted session ids use 128 random bits.
 - **The overhead metric starts when the request body is complete and ends at the first poll of the upstream request body,** which hyper does on a checked-out connection as it writes the request, so connection checkout is included. The body's arrival is timed separately (`lh_gateway_request_body_seconds`): a client that sends its body some time after its headers would otherwise have its own delay counted as the gateway's.
 

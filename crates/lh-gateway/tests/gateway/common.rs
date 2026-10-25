@@ -24,7 +24,7 @@ use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use lh_gateway::{AcceptedEvent, Config, EventSink, ListenAddr, LogSink, Server};
 use sha2::{Digest, Sha256};
-use tokio::net::{TcpListener, TcpStream, UnixStream};
+use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -82,9 +82,14 @@ struct MockState {
     dropped: mpsc::UnboundedSender<(Instant, Option<String>)>,
 }
 
-/// An in-process engine on 127.0.0.1.
+/// An in-process engine on 127.0.0.1, or on a Unix socket ([`Mock::start_unix`]).
 pub struct Mock {
+    /// Its TCP address; for a mock on a Unix socket, the unspecified address, which no gateway reaches.
     pub addr: SocketAddr,
+    /// The gateway's `upstream` for it: `http://` and its address, or `unix:` and its socket's path.
+    pub upstream: String,
+    /// The connections it has accepted.
+    pub connections: Arc<AtomicUsize>,
     state: Arc<MockState>,
     dropped: mpsc::UnboundedReceiver<(Instant, Option<String>)>,
 }
@@ -104,6 +109,38 @@ impl Drop for DropSignal {
 
 impl Mock {
     pub async fn start(script: Script) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::clone(&connections);
+        let listener = listener.tap_io(move |tcp| {
+            tcp.set_nodelay(true).unwrap();
+            accepted.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut mock = Self::serve(script, listener, Arc::clone(&connections));
+        (mock.addr, mock.upstream) = (addr, format!("http://{addr}"));
+        mock
+    }
+
+    /// A mock engine on a new Unix socket, as the engine serves on its GPU node or a tunnel on the control host.
+    pub async fn start_unix(script: Script) -> Self {
+        let path = socket_path();
+        let listener = UnixListener::bind(&path).unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::clone(&connections);
+        let listener = listener.tap_io(move |_| {
+            accepted.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut mock = Self::serve(script, listener, connections);
+        mock.upstream = format!("unix:{}", path.display());
+        mock
+    }
+
+    fn serve<L>(script: Script, listener: L, connections: Arc<AtomicUsize>) -> Self
+    where
+        L: axum::serve::Listener,
+        L::Addr: std::fmt::Debug,
+    {
         let (dropped_tx, dropped) = mpsc::unbounded_channel();
         let state = Arc::new(MockState {
             script,
@@ -128,12 +165,11 @@ impl Mock {
                 }),
             )
             .with_state(Arc::clone(&state));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let listener = listener.tap_io(|tcp| tcp.set_nodelay(true).unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self {
-            addr,
+            addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+            upstream: String::new(),
+            connections,
             state,
             dropped,
         }
@@ -326,10 +362,12 @@ pub fn key_digest(key: &str) -> String {
 /// The test configuration: `voice` (trusted, keyless, on the Unix socket), `agents` (trusted, default
 /// background, max interactive) and `bench` (untrusted, default interactive). `top` holds extra top-level keys.
 pub fn gateway_toml(upstream: SocketAddr, socket: &std::path::Path, top: &str) -> String {
-    format!(
-        "\nupstream = \"http://{upstream}\"\n{}",
-        harness_toml(socket, top)
-    )
+    upstream_toml(&format!("http://{upstream}"), socket, top)
+}
+
+/// The test configuration with `upstream` as written: `http://host:port`, or `unix:` and a socket path.
+pub fn upstream_toml(upstream: &str, socket: &std::path::Path, top: &str) -> String {
+    format!("\nupstream = \"{upstream}\"\n{}", harness_toml(socket, top))
 }
 
 /// The test configuration of a gateway on GPU nodes instead of one upstream: `tables` holds `[nodes.<name>]`,
@@ -381,6 +419,12 @@ impl Gateway {
     pub async fn start_with(upstream: SocketAddr, top: &str, sink: Arc<dyn EventSink>) -> Self {
         let config = Config::from_toml(&gateway_toml(upstream, &socket_path(), top)).unwrap();
         Self::from_config(config, sink).await
+    }
+
+    /// A gateway whose `upstream` is `upstream` as written, such as a mock's [`Mock::upstream`].
+    pub async fn start_upstream(upstream: &str, top: &str) -> Self {
+        let config = Config::from_toml(&upstream_toml(upstream, &socket_path(), top)).unwrap();
+        Self::from_config(config, Arc::new(LogSink)).await
     }
 
     /// A gateway on GPU nodes: `tables` holds `[nodes.<name>]`, `[placement]` and any other table.
