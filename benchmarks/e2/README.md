@@ -81,13 +81,13 @@ The `[admission]` keys are those of `lh-gateway`'s configuration ([its README](.
 
 ## Two GPU nodes: dedicate vs pool
 
-A point on two GPU nodes (PLAN §3.4) names them in its arm file's `[gateway]`, with the cyan end of each node's tunnel, and how the gateway places sessions on them ([placement](../../crates/lh-gateway/README.md#placement)). Every node runs the arm's `[engine]`.
+A point on two GPU nodes (PLAN §3.4) names them in its arm file's `[gateway]`, with the cyan end of each node's tunnel (its engine's socket, which `lh-tunnel@NODE` serves), and how the gateway places sessions on them ([placement](../../crates/lh-gateway/README.md#placement)). Every node runs the arm's `[engine]`.
 
 ```toml
 [gateway.nodes.phastform]
-upstream = "http://127.0.0.1:18000"   # lh-tunnel-phastform
+upstream = "unix:/run/user/1007/lh/phastform-engine.sock"   # lh-tunnel@phastform
 [gateway.nodes.gray]
-upstream = "http://127.0.0.1:28000"   # lh-tunnel-gray
+upstream = "unix:/run/user/1007/lh/gray-engine.sock"        # lh-tunnel@gray
 
 [gateway.placement]
 policy = "least-loaded"

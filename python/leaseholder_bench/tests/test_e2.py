@@ -1356,8 +1356,8 @@ def test_a_point_on_two_gpu_nodes_checks_resets_and_reports_each_node(cyan: Cyan
     out = cyan.host.root / "runs" / "a4-pool"
     # Each node's tunnel starts first; each engine is checked, recorded and emptied.
     assert cyan.systemd.calls == [
-        ("start", "lh-tunnel-phastform"),
-        ("start", "lh-tunnel-gray"),
+        ("start", "lh-tunnel@phastform"),
+        ("start", "lh-tunnel@gray"),
         ("daemon-reload",),
         ("restart", "lh-gateway"),
         ("restart", "lh-voice-worker"),
@@ -1403,7 +1403,7 @@ def test_a_gpu_node_that_does_not_answer_fails_the_point(
 ) -> None:
     monkeypatch.setattr(e2, "ENGINE_UP_S", 0.2)
     arm = TWO_NODES.format(phastform=cyan.engine.url, gray="unix:/nonexistent/gray-engine.sock")
-    with pytest.raises(E2Error, match=r"GPU node gray did not answer .* lh-tunnel-gray up"):
+    with pytest.raises(E2Error, match=r"GPU node gray did not answer .* lh-tunnel@gray up"):
         run(cyan, "a4-pool", arm)
     assert record(cyan, "a4-pool")["status"] == "failed"
     assert ("restart", "lh-gateway") not in cyan.systemd.calls

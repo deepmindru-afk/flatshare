@@ -16,7 +16,7 @@
 
 An arm whose ``[gateway]`` names GPU nodes (``[gateway.nodes.<name>]``, with ``[gateway.placement]``)
 is a point on several nodes, each running the arm's ``[engine]``: the run starts each node's tunnel
-(``lh-tunnel-<name>``), checks, resets and snapshots each node's engine, tells the voice worker the
+(``lh-tunnel@<name>``), checks, resets and snapshots each node's engine, tells the voice worker the
 nodes (``LH_NODES``, so that each call's STT and TTS follow its node), and reports each node and the
 total.
 
@@ -102,8 +102,8 @@ when its room is deleted, and its job's shutdown, which sends the last events, m
 SMG = "lh-smg"
 GATEWAY = "lh-gateway"
 WORKER = "lh-voice-worker"
-TUNNEL = "lh-tunnel-{}"
-"""A GPU node's tunnel unit on cyan (deploy/cyan/systemd), by the node's name."""
+TUNNEL = "lh-tunnel@{}"
+"""A GPU node's tunnel on cyan: the instance of deploy/cyan/systemd/lh-tunnel@.service named after it."""
 E2_GATEWAY = "e2-gateway"
 NO_PREEMPTIVE = "no-preemptive-generation"
 NO_EVENTS = "no-events"

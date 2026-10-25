@@ -214,7 +214,7 @@ A point runs in this order:
 5. **The window.** The gateway's and the engine's `/metrics` are saved, `lh-voice bots` runs in the voice-plane namespace on cores 24–31, and they are saved again. The calls are the window every metric covers; AIPerf must outlast them. With `--save-audio`, a run option rather than the arm's, the callers also save each call's audio for the demo video (`lh-voice bots --save-audio`), which measures nothing differently.
 6. **The end.** AIPerf gets SIGINT, cancels its requests and writes its exports. The gateway's request lines for the window go to `gateway.jsonl`, and the voice worker's journal from the start of the calls to `voice-worker.log`, once every call's session has logged its end (at most 30 s). Then `summary.json` is written.
 
-**A point on several GPU nodes.** An arm whose `[gateway]` names GPU nodes (`[gateway.nodes.<name>]`, each with the cyan end of its tunnel as `upstream`, and `[gateway.placement]`) runs on all of them, each on the arm's `[engine]`. First the run starts each node's tunnel, `lh-tunnel-<name>`, and waits up to 60 s for the node's engine to answer `/health` through it; a tunnel that runs is left alone, and none is stopped after the point. Each engine is then checked (step 1), emptied (step 3) and snapshotted (step 5). The gateway serves the nodes in place of `gateway.toml`'s `upstream`, and the voice worker gets them as `LH_NODES` from a drop-in the run writes, `variant-nodes.conf`, so that each call's STT and TTS follow its node; the next point on one node, or `lh-bench e2 reset`, removes it. A node is named after its host's first label (`phastform`, `gray`), which also names its tunnel unit, its sockets on cyan and its files in the run directory.
+**A point on several GPU nodes.** An arm whose `[gateway]` names GPU nodes (`[gateway.nodes.<name>]`, each with the cyan end of its tunnel as `upstream`, and `[gateway.placement]`) runs on all of them, each on the arm's `[engine]`. First the run starts each node's tunnel, `lh-tunnel@<name>`, and waits up to 60 s for the node's engine to answer `/health` through it; a tunnel that runs is left alone, and none is stopped after the point. Each engine is then checked (step 1), emptied (step 3) and snapshotted (step 5). The gateway serves the nodes in place of `gateway.toml`'s `upstream`, and the voice worker gets them as `LH_NODES` from a drop-in the run writes, `variant-nodes.conf`, so that each call's STT and TTS follow its node; the next point on one node, or `lh-bench e2 reset`, removes it. A node is named after its host's first label (`phastform`, `gray`), which also names its tunnel unit, its sockets on cyan and its files in the run directory.
 
 **The arm file.** Unknown keys and wrong types are errors. The point is named after the file.
 
@@ -307,7 +307,7 @@ lh-bench scale-traces cc-traces-weka-062126/traces.jsonl weka-x64 --factor 64
 # A quick-check subset; sub16.ids lists 16 short traces, one id per line (8 with subagents)
 lh-bench scale-traces cc-traces-weka-062126/traces.jsonl weka-x32-sub16 --factor 32 --ids sub16.ids
 
-# Mock on loopback (keep clear of cyan's deployed ports 18000, 18080, 18100, 18880 and 17880-17882)
+# Mock on loopback (keep clear of cyan's deployed ports, the gateway's 18080 and LiveKit's 17880-17882)
 mkdir -p ~/leaseholder/runs/w0-e2e && cd ~/leaseholder/runs/w0-e2e
 setsid nohup lh-bench mock-server --port 19180 --log $PWD/mock-aiperf.jsonl < /dev/null > mock.out 2>&1 &
 echo $! > mock.pid

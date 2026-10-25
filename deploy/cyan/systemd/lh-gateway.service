@@ -1,12 +1,12 @@
 [Unit]
 Description=Leaseholder gateway on cyan: 127.0.0.1:18080 and the voice-plane socket %t/lh/gateway.sock
 Documentation=https://github.com/StevenWang-CY/leaseholder/blob/main/ops/RUNBOOK.md
-After=lh-tunnel-phastform.service
+After=lh-tunnel@phastform.service
 
 [Service]
 Type=exec
 # The binary is built on a Linux host and copied to bin/; the configuration holds key digests (mode 600).
-ExecStartPre=/usr/bin/mkdir -p %t/lh
+ExecStartPre=/usr/bin/install -d -m 0700 %t/lh
 ExecStart=%h/leaseholder/bin/lh-gateway --config %h/.config/leaseholder/gateway.toml
 ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy http://127.0.0.1:18080/health 30
 # Cores 0-7 belong to the control plane; the voice plane has 32-47.

@@ -16,8 +16,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 DEPLOY = REPO / "deploy"
-SERVICES = {8000, 8100, 8880}
-"""The ports the GPU nodes' engine, STT and TTS served on before their sockets."""
 KEYS = {
     "engine": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMa9oQ1uNw4Z5fT1n2x0bq7d1H0mGJ1s7mYcQjv8Yw5k",
     "stt": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK3fW8pQ2nV7xZ1cR5tY9uB4mE6hJ0aLsD2gF8kN3qPw",
@@ -82,16 +80,22 @@ def authorize(
     return done, authorized.read_text()
 
 
-def test_the_gpu_nodes_publish_no_kv_events_and_the_tunnels_reach_only_their_services() -> None:
+def test_the_gpu_nodes_publish_no_kv_events_and_cyan_reaches_them_only_through_the_tunnel() -> None:
     # vLLM's KV-event publisher connects to a TCP endpoint and serves a replay of the events, which carry
     # every cached block's token ids and session id: on a shared host any user could bind or ask for them,
     # and nothing of the deployment reads them.
     engine = (DEPLOY / "phastform" / "engine.yaml").read_text()
     assert "kv-events-config" not in engine and "tcp://" not in engine
-    for unit in ("lh-tunnel-phastform", "lh-tunnel-gray"):
-        text = (DEPLOY / "cyan" / "systemd" / f"{unit}.service").read_text()
-        forwarded = {int(forward.rsplit(":", 1)[1]) for forward in re.findall(r"-L (\S+)", text)}
-        assert forwarded == SERVICES, unit
+    cyan = DEPLOY / "cyan" / "systemd"
+    tunnel = (cyan / "lh-tunnel@.service").read_text()
+    assert exec_lines(tunnel, "ExecStart") == [
+        "/usr/bin/python3 %h/leaseholder/src/deploy/bin/lh-tunnel %i"
+    ]
+    assert "EnvironmentFile=%h/.config/leaseholder/tunnel-%i.env" in tunnel.splitlines()
+    # One template for every GPU node: no unit forwards a port, or names a tunnel unit that is gone.
+    for unit in cyan.iterdir():
+        text = unit.read_text()
+        assert "ssh " not in text and "lh-tunnel-" not in text, unit.name
 
 
 def test_each_tunnel_key_may_only_bridge_its_session_to_its_socket(tmp_path: Path) -> None:

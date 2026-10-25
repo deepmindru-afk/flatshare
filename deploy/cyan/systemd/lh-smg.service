@@ -1,7 +1,7 @@
 [Unit]
 Description=Leaseholder E2 arm 8b: SMG 1.13.0's priority scheduler in front of the engine, on 127.0.0.1:18090
 Documentation=https://github.com/StevenWang-CY/leaseholder/blob/main/ops/RUNBOOK.md
-After=lh-tunnel-phastform.service
+After=lh-tunnel@phastform.service
 
 # Not enabled at boot: lh-bench e2 run starts it for an arm with router = "smg", whose [gateway] table points the
 # gateway's upstream here, and stops it for every other arm.

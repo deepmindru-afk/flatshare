@@ -2,11 +2,11 @@
 
 How to deploy, check, operate and recover the Leaseholder hosts. Every service runs as a `systemd --user` unit. Lingering is enabled on each host, so units survive logout and start at boot.
 
-| Host | Units | Ports (all loopback) |
+| Host | Units | Listeners |
 |---|---|---|
-| Phastform (GPU) | `leaseholder.target` → `lh-stt`, `lh-tts`, `lh-engine` | engine 8000, STT 8100, TTS 8880 |
+| Phastform (GPU) | `leaseholder.target` → `lh-stt`, `lh-tts`, `lh-engine` | No TCP: the engine, STT and TTS on Unix sockets in `/run/user/$UID/lh/` (`engine.sock`, `stt.sock`, `tts.sock`), a directory only the deployment's user may enter. Variant `sglang` serves 127.0.0.1:8000 too, behind `engine.sock` (`lh-engine-proxy.socket`) |
 | Gray (second GPU node, booked windows; held by another user's work since 2026-10-23) | The same units as Phastform, with Gray's drop-ins (`deploy/gray/systemd/`: the CUDA compiler from the engine venv, the engine on cores 0–7 of NUMA node 0, the GPU's, and the audio servers on cores 8–15 of node 1). `leaseholder.target` is not enabled at boot | As on Phastform |
-| cyan (control) | `lh-tunnel-phastform`, `lh-gateway`, `lh-voicenet`, `lh-livekit`, `lh-voice-worker`; `lh-smg` for E2 arm 8b only; `lh-tunnel-gray` for two-node points only | tunnel 18000 → 8000, 18100 → 8100, 18880 → 8880, and to Gray 28000, 28100, 28880; gateway 18080; Unix sockets in `/run/user/$UID/lh/` (the gateway's is `gateway.sock`). LiveKit 17880 (TCP) and 17882 (UDP), inside the voice-plane namespace only; SMG 18090, its metrics 18091 |
+| cyan (control) | `lh-tunnel@phastform`, `lh-gateway`, `lh-voicenet`, `lh-livekit`, `lh-voice-worker`; `lh-smg` for E2 arm 8b only; `lh-tunnel@gray` for two-node points only | The gateway's 127.0.0.1:18080, the only TCP listener in the host's network. Unix sockets in `/run/user/$UID/lh/` (0700): the gateway's `gateway.sock`, and each GPU node's through its tunnel, `phastform-engine.sock`, `phastform-stt.sock`, `phastform-tts.sock` and Gray's `gray-*.sock`. LiveKit 17880 (TCP) and 17882 (UDP), inside the voice-plane namespace only; SMG 18090, its metrics 18091 |
 
 **Cores on cyan** (48 threads):
 
@@ -37,8 +37,8 @@ deploy/deploy.sh gray.cis.upenn.edu            # the second GPU node
 2. Run its bootstrap:
    - Phastform: `deploy/phastform/bootstrap.sh` builds `~/leaseholder/venvs/{engine,tts}` from the lock files, plus the Kokoro checkout, the FlashInfer JIT workspace and the curand header links.
    - Gray: `deploy/gray/bootstrap.sh` runs Phastform's. It needs uv 0.11.27 or newer (set `UV`), and the models it downloads are the revisions `engine.yaml` and `stt.yaml` pin.
-   - cyan: `deploy/cyan/bootstrap.sh` installs the LiveKit server, builds `~/leaseholder/venvs/{voice,bench}` from the lock files with uv (set `UV` when uv is neither in `~/.local/bin` nor on `PATH`), checks that the worker's models load offline, and generates the LiveKit keys in `~/.config/leaseholder/livekit.env` (mode 600) and the tunnel key. Stop `lh-voice-worker` before re-running it, because the sync may change the voice venv. Write the tunnel's SSH target to `~/.config/leaseholder/tunnel-phastform.env` as `LH_TUNNEL_TARGET=<user>@<gpu node>`, and Gray's to `tunnel-gray.env` for the two-node points.
-3. Authorize the tunnel key on each GPU node: `deploy/authorize-tunnel.sh cyan.cis.upenn.edu phastform.cis.upenn.edu` (and `gray.cis.upenn.edu`). The entry may forward only to the engine, STT and TTS ports (8000, 8100, 8880), may open no listener, and has no shell. Re-running the script replaces the entry.
+   - cyan: `deploy/cyan/bootstrap.sh` installs the LiveKit server, builds `~/leaseholder/venvs/{voice,bench}` from the lock files with uv (set `UV` when uv is neither in `~/.local/bin` nor on `PATH`), checks that the worker's models load offline, and generates the LiveKit keys in `~/.config/leaseholder/livekit.env` (mode 600) and the three tunnel keys (`~/.ssh/lh_tunnel_{engine,stt,tts}_ed25519`). Stop `lh-voice-worker` before re-running it, because the sync may change the voice venv. Write the tunnel's SSH target to `~/.config/leaseholder/tunnel-phastform.env` as `LH_TUNNEL_TARGET=<user>@<gpu node>`, and Gray's to `tunnel-gray.env` for the two-node points.
+3. Authorize the tunnel keys on each GPU node: `deploy/authorize-tunnel.sh cyan.cis.upenn.edu phastform.cis.upenn.edu` (and `gray.cis.upenn.edu`). Each key's entry runs one command for every session, whatever its client asks, the bridge to the node's socket of its name (`exec nc -q0 -U /run/user/$UID/lh/engine.sock`), under `restrict`: no forwarding of any kind, no pty, no agent, no `~/.ssh/rc`. The node needs OpenBSD's netcat (Ubuntu's `netcat-openbsd`). Re-running the script replaces the entries, and removes the entry of the former single tunnel key, `~/.ssh/lh_tunnel_ed25519`, which may then be deleted on cyan.
 4. On cyan, install the gateway:
    - Build it on a Linux host (`cargo build --release -p lh-gateway`) and copy `target/release/lh-gateway` to `~/leaseholder/bin/`.
    - Write `~/.config/leaseholder/gateway.toml` (mode 600) from `deploy/cyan/gateway.example.toml`. For each keyed tenant, make a key, give it to the client, and put only its digest in the file: `printf '%s' "$key" | sha256sum`. `cache_salt_secret_file` names the secret the tenants' cache salts are keyed by, which `deploy/cyan/install.sh` writes once (32 random bytes in hex, mode 600); the gateway refuses to start without it, or if any other user may read it.
@@ -53,11 +53,13 @@ systemctl --user stop leaseholder.target
 systemctl --user restart lh-engine               # one server; returns once /health answers
 systemctl --user list-units 'lh-*'
 journalctl --user -u lh-engine -f                # logs
-bash ~/leaseholder/src/deploy/phastform/smoke.sh # end-to-end voice turn, GPU memory, port audit
+bash ~/leaseholder/src/deploy/phastform/smoke.sh # end-to-end voice turn, GPU memory, listener audit
 
 # cyan
-systemctl --user start lh-tunnel-phastform lh-voicenet lh-livekit lh-gateway
-bash ~/leaseholder/src/deploy/phastform/smoke.sh http://127.0.0.1:18000 http://127.0.0.1:18100 http://127.0.0.1:18880
+systemctl --user start lh-tunnel@phastform lh-voicenet lh-livekit lh-gateway
+lh=unix:$XDG_RUNTIME_DIR/lh                          # the tunnel's sockets
+bash ~/leaseholder/src/deploy/phastform/smoke.sh $lh/phastform-engine.sock $lh/phastform-stt.sock $lh/phastform-tts.sock
+python3 ~/leaseholder/src/deploy/bin/audit-listeners # no TCP listener of ours but the gateway's
 ~/leaseholder/src/deploy/bin/in-voicenet ss -lntup   # what listens inside the voice-plane namespace
 ```
 
@@ -88,7 +90,7 @@ With `[nodes]`, as a two-node point's `gateway-e2.toml` has, `/ready` answers 20
 | `lh-voice-worker` | `lh-voice-worker start` (LiveKit Agents) in the namespace | Agent `leaseholder-voice`. STT and TTS through `%t/lh/phastform-{stt,tts}.sock`, the LLM through `%t/lh/gateway.sock` |
 
 ```sh
-systemctl --user start lh-tunnel-phastform lh-gateway lh-voicenet lh-livekit lh-voice-worker
+systemctl --user start lh-tunnel@phastform lh-gateway lh-voicenet lh-livekit lh-voice-worker
 journalctl --user -u lh-voice-worker -f          # JSON logs; "registered worker" means it is ready
 ```
 
@@ -103,7 +105,8 @@ journalctl --user -u lh-voice-worker -f          # JSON logs; "registered worker
 **Measurement callers.** Render the corpus once with the TTS server. The callers run inside the namespace:
 
 ```sh
-~/leaseholder/venvs/voice/bin/lh-voice render-callers ~/leaseholder/data/callers --tts-url http://127.0.0.1:18880/v1
+~/leaseholder/venvs/voice/bin/lh-voice render-callers ~/leaseholder/data/callers --tts-url http://localhost/v1 \
+  --uds $XDG_RUNTIME_DIR/lh/phastform-tts.sock
 set -a; . ~/.config/leaseholder/livekit.env; set +a
 taskset -c 24-31 ~/leaseholder/src/deploy/bin/in-voicenet ~/leaseholder/venvs/voice/bin/lh-voice bots \
   --corpus ~/leaseholder/data/callers --callers 2 --turns 25 --barge-in 0.25 --out ~/leaseholder/runs/<run>/bots
@@ -126,8 +129,8 @@ An E2 point is one arm file (`benchmarks/e2/arms/`); `lh-bench e2 run ARM --out 
 - **The gateway.** An arm with a `[gateway]` table runs the gateway from `~/.config/leaseholder/gateway-e2.toml` (`gateway.toml` with the table merged in) through the `e2-gateway` drop-in.
 - **The worker.** `preemptive_generation = false` links the `no-preemptive-generation` worker drop-in, and `[voice] events = false` the `no-events` one.
 - **SMG.** An arm with `router = "smg"` starts `lh-smg`, and every other arm stops it.
-- **Two GPU nodes.** An arm with `[gateway.nodes.<name>]` runs on every node it names. `lh-bench e2 run` starts each node's tunnel (`lh-tunnel-gray` for Gray) and leaves it running, runs the gateway on the nodes in place of `gateway.toml`'s `upstream`, and writes the worker drop-in `variant-nodes.conf` (`LH_NODES=phastform,gray`), so that each call's STT and TTS go to its node. Such a campaign runs with both hosts in `LH_GPU` (`LH_GPU=phastform.cis.upenn.edu,gray.cis.upenn.edu`): `campaign.sh` switches the engine on each, samples each GPU into `gpu-<node>.csv`, and with `--pause` pauses each.
-- **Undo.** `~/leaseholder/venvs/bench/bin/lh-bench e2 reset` puts the gateway back on `gateway.toml`, preemptive generation and the events on, the worker on one node (it removes `variant-nodes.conf`), and SMG stopped. A campaign runs it at its end. After a two-node window, stop Gray's tunnel as well: `systemctl --user stop lh-tunnel-gray`.
+- **Two GPU nodes.** An arm with `[gateway.nodes.<name>]` runs on every node it names. `lh-bench e2 run` starts each node's tunnel (`lh-tunnel@gray` for Gray) and leaves it running, runs the gateway on the nodes in place of `gateway.toml`'s `upstream`, and writes the worker drop-in `variant-nodes.conf` (`LH_NODES=phastform,gray`), so that each call's STT and TTS go to its node. Such a campaign runs with both hosts in `LH_GPU` (`LH_GPU=phastform.cis.upenn.edu,gray.cis.upenn.edu`): `campaign.sh` switches the engine on each, samples each GPU into `gpu-<node>.csv`, and with `--pause` pauses each.
+- **Undo.** `~/leaseholder/venvs/bench/bin/lh-bench e2 reset` puts the gateway back on `gateway.toml`, preemptive generation and the events on, the worker on one node (it removes `variant-nodes.conf`), and SMG stopped. A campaign runs it at its end. After a two-node window, stop Gray's tunnel as well: `systemctl --user stop lh-tunnel@gray`.
 
 Beside AIPerf's and the callers' records, each point keeps the gateway's request lines (`gateway.jsonl`, the exact first bytes), the worker's journal (`voice-worker.log`: turn lines and event counts) and the GPU's clocks and temperature (`gpu.csv`, which `campaign.sh` samples over SSH once a second while the point runs). The [`leaseholder-bench` README](../python/leaseholder_bench/README.md#e2-points) lists every file. A point on two nodes keeps each engine's files by node (`engine-<node>.json`, `metrics/engine-<node>-start.prom` and `-end.prom`) and each GPU's samples in `gpu-<node>.csv`; its summary gives the totals and each node's share.
 
@@ -162,9 +165,11 @@ The failure drills run from a workstation with SSH to the hosts, on the variant 
 | A unit restarts in a loop, then stops, or will not start (`start-limit-hit`) | A fourth start within 30 min: the units' crash-loop guard (`StartLimitBurst=3`) counts deliberate starts too, such as `systemctl --user restart` by hand | A crash loop: `journalctl --user -u <unit> -n 200`, fix, `systemctl --user reset-failed <unit>`, start. Deliberate restarts: `systemctl --user reset-failed <unit>` first (`variant.sh` does so before each switch) |
 | `lh-engine` dies during a run and is back 15 s later; its journal says "systemd-oomd killed N process(es) in this unit" | A host-wide memory stall (swap full, `/proc/pressure/memory` high) held the user manager's memory pressure above its `ManagedOOMMemoryPressure=kill` limit (50% on these hosts), and `systemd-oomd` killed a cgroup under it: the engine, which holds the 20 GiB CPU tier in `/dev/shm`. Our units set no memory limit, and the host can have plenty of memory free | The unit restarts by itself (`Restart=on-failure`). A point measured across the kill fails: run its campaign again once `/proc/pressure/memory` is back near 0, and it resumes from that point |
 | The first start after an upgrade takes many minutes | FlashInfer JIT and torch.compile caches are cold | Expected once; caches persist in `~/leaseholder/cache/flashinfer` and `~/.cache/vllm` |
-| The tunnel is down (`curl 127.0.0.1:18000/health` fails on cyan) | Network blip or a restarted GPU node | `lh-tunnel-phastform` restarts itself every 5 s; check `journalctl --user -u lh-tunnel-phastform` |
+| The tunnel is down (`curl --unix-socket $XDG_RUNTIME_DIR/lh/phastform-engine.sock localhost/health` fails on cyan) | Network blip, a restarted GPU node, or the node's server is down (the connection closes at once) | `lh-tunnel@phastform` opens its SSH connections again after 1 to 30 s, and restarts itself 5 s after it exits; `journalctl --user -u lh-tunnel@phastform` says why each one ended. On the node, `ls -l /run/user/$UID/lh/` lists the servers' sockets |
+| `lh-tunnel@NODE`'s journal: "Permission denied (publickey)" | The node lacks the key's entry | `deploy/authorize-tunnel.sh cyan.cis.upenn.edu NODE_HOST` |
+| A tunnel's sessions all go through new connections (slow first bytes, sshd logs "no more sessions") | The node's sshd allows fewer sessions a connection than `LH_TUNNEL_SESSIONS` (10, sshd's default `MaxSessions`) | Set `LH_TUNNEL_SESSIONS` in `tunnel-NODE.env` to the node's `MaxSessions` |
 | LiveKit is unreachable from the worker | The voice-plane namespace was restarted | `systemctl --user restart lh-voicenet lh-livekit`. Clients must run inside the namespace (`in-voicenet`) |
-| The gateway answers 502 `upstream_unavailable` or `/ready` is 503 | The tunnel or the engine is down | `curl 127.0.0.1:18000/health`; see the tunnel row above |
+| The gateway answers 502 `upstream_unavailable` or `/ready` is 503 | The tunnel or the engine is down | `curl --unix-socket $XDG_RUNTIME_DIR/lh/phastform-engine.sock localhost/health`; see the tunnel row above |
 | The gateway answers 401 `invalid_api_key` | The client's key has no digest in `gateway.toml` | `printf '%s' "$key" \| sha256sum` must match an entry; restart the gateway after editing |
 | `lh-gateway` exits at start: "another process is accepting on this socket" | A second gateway serves `gateway.sock` | Stop the other process; a socket file left by a crash is replaced automatically |
 | Some voice turns wait about 3 s before the agent answers | LiveKit's end-of-turn model is waiting its maximum endpointing delay | Link the `vad-turns` worker variant |
@@ -177,8 +182,8 @@ The failure drills run from a workstation with SSH to the hosts, on the variant 
 | `lh-engine` fails at start with "make_room.reserve_tokens leaves no room for a request of max_model_len tokens" | The `make-room` reserve and one `max_model_len` request do not fit in the KV pool together | Lower `make_room.reserve_tokens` below the pool less `max_model_len`: about 3,600 tokens on the frozen box |
 | The voice worker logs "lifecycle events do not reach the control plane" | The gateway is down or restarting, or `LH_LLM_UDS` is not the gateway's socket | `systemctl --user status lh-gateway`. The worker logs when events reach the gateway again; those lost meanwhile are not resent, and the gateway's session states time out after `state_timeout_s` |
 | The engine's `/server_info` answers 500 | vLLM collects its environment with `uv pip list` and cannot find uv | The unit's `PATH` must include `~/.local/bin` and `VIRTUAL_ENV` must name the engine venv (as `lh-engine.service` does) |
-| `lh-bench e2 run`: "the engine of GPU node gray did not answer" | Gray's box is paused, or its tunnel cannot connect | On Gray, `systemctl --user start leaseholder.target` (in a booked window); on cyan, `journalctl --user -u lh-tunnel-gray` and `curl 127.0.0.1:28000/health` |
-| The gateway answers 503 `no_ready_node`, or `/ready` is 503 with `[nodes]` | No ready node serves the request's class: a node's probe failed three times in a row | `lh_gateway_node_ready` names the node; `curl` its tunnel's `/health` (18000 for Phastform, 28000 for Gray); see the tunnel row |
+| `lh-bench e2 run`: "the engine of GPU node gray did not answer" | Gray's box is paused, or its tunnel cannot connect | On Gray, `systemctl --user start leaseholder.target` (in a booked window); on cyan, `journalctl --user -u lh-tunnel@gray` and `curl --unix-socket $XDG_RUNTIME_DIR/lh/gray-engine.sock localhost/health` |
+| The gateway answers 503 `no_ready_node`, or `/ready` is 503 with `[nodes]` | No ready node serves the request's class: a node's probe failed three times in a row | `lh_gateway_node_ready` names the node; `curl` its tunnel's `/health` (`--unix-socket $XDG_RUNTIME_DIR/lh/NODE-engine.sock`); see the tunnel row |
 | `lh_gateway_placements_total{reason="node_down"}` grows | A node failed readiness and its sessions were placed again, their KV lost | Expected when a node is taken down; otherwise check that node's engine and tunnel |
 | The voice worker logs "the call has no node" | `POST /v1/sessions` failed: no ready node, a gateway without `[nodes]`, or a node not in `LH_NODES` | The call goes on with the default STT and TTS sockets; check `LH_NODES` against the gateway's `[nodes]` |
 
