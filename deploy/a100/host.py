@@ -1397,7 +1397,11 @@ def preflight(
     else:
         add("One supervisor", "ok", f"{supervisor(host)}, none of the units under {other}")
     if host.get("userns") is True:
-        add("User namespaces", "ok", "the voice plane in its own network namespace")
+        add(
+            "User namespaces",
+            "ok",
+            "the voice plane in a network namespace of its own, and each GPU server in one of its own",
+        )
     else:
         # The voice plane in the host's namespace, under either supervisor: smoke.sh's listener audit
         # (deploy/bin/audit-listeners) accepts what it holds there by the LH_VOICENET=host that in-voicenet marks its
@@ -1414,8 +1418,11 @@ def preflight(
                 else ""
             )
             + "; smoke.sh's listener audit accepts its UDP sockets, loopback TCP listeners and file sockets there "
-            "(LH_VOICENET=host) and nothing else of ours; allowing unprivileged user namespaces gives it its own "
-            "(Ubuntu 24.04: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0, then bootstrap.sh stage)",
+            "(LH_VOICENET=host) and nothing else of ours; the GPU servers run there too (deploy/bin/in-private-net), "
+            "where the audit accepts their engine cores' loopback TCP listeners and CUDA's abstract sockets "
+            "(LH_PRIVATE_NET=host), which any user of the host reaches; allowing unprivileged user namespaces gives "
+            "each its own (Ubuntu 24.04: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0, then "
+            "bootstrap.sh stage)",
             "none on latency; isolation differs",
         )
     # smoke.sh (block 0) audits the listening sockets with ss on the GPU node.

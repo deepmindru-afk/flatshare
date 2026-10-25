@@ -34,10 +34,13 @@ Environment=VLLM_RPC_BASE_PATH=%t/lh
 ExecStartPre=/usr/bin/install -d -m 0700 %t/lh
 ExecStartPre=/usr/bin/rm -f ${LH_ENGINE_SOCKET}
 ExecStartPre=%h/leaseholder/src/deploy/bin/gpu-guard
+# The engine runs in a network namespace of its own (deploy/bin/in-private-net), where no other user of the host
+# reaches the listeners its engine core keeps on the loopback (torch's gloo groups) or CUDA's abstract sockets; its
+# socket is a file, which every namespace reaches. A variant that replaces ExecStart keeps the wrapper.
 # Variants add engine flags in LH_ENGINE_FLAGS (deploy/phastform/variant.sh use NAME FLAG...); flags on the command
 # line beat engine.yaml.
 Environment=LH_ENGINE_FLAGS=
-ExecStart=%h/leaseholder/venvs/engine/bin/vllm serve --config %h/leaseholder/src/deploy/phastform/engine.yaml --uds ${LH_ENGINE_SOCKET} $LH_ENGINE_FLAGS
+ExecStart=%h/leaseholder/src/deploy/bin/in-private-net %h/leaseholder/venvs/engine/bin/vllm serve --config %h/leaseholder/src/deploy/phastform/engine.yaml --uds ${LH_ENGINE_SOCKET} $LH_ENGINE_FLAGS
 ExecStartPost=%h/leaseholder/src/deploy/bin/wait-healthy --unix-socket ${LH_ENGINE_SOCKET} --pid=${MAINPID} http://localhost/health 1200
 # NUMA node 1 is local to the GPU. "preferred" spills to node 0 when node 1 is short: the measured cost of a remote
 # CPU tier is under 1% of pinned bandwidth.

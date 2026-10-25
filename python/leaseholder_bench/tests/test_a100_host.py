@@ -807,6 +807,8 @@ def test_the_voice_plane_outside_its_namespace_is_degraded_and_the_audit_needs_s
         in userns.reason
     )
     assert "kernel.apparmor_restrict_unprivileged_userns=0" in userns.reason
+    # The GPU servers fall back to the host's namespace by themselves (in-private-net), and the reason says so.
+    assert "in-private-net" in userns.reason and "LH_PRIVATE_NET=host" in userns.reason
     assert (
         checks["Listener audit"].status == "refused"
         and "iproute2" in checks["Listener audit"].reason

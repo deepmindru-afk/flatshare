@@ -54,6 +54,8 @@ systemctl --user restart lh-engine               # one server; returns once /hea
 systemctl --user list-units 'lh-*'
 journalctl --user -u lh-engine -f                # logs
 bash ~/leaseholder/src/deploy/phastform/smoke.sh # end-to-end voice turn, GPU memory, listener audit
+nsenter --target "$(systemctl --user show -p MainPID --value lh-engine)" --user --net --preserve-credentials \
+  ss -lntup                                      # what listens inside the engine's own network namespace
 
 # cyan
 systemctl --user start lh-tunnel@phastform lh-voicenet lh-livekit lh-gateway
@@ -181,6 +183,7 @@ The failure drills run from a workstation with SSH to the hosts, on the variant 
 | The tunnel is down (`curl --unix-socket $XDG_RUNTIME_DIR/lh/phastform-engine.sock localhost/health` fails on cyan) | Network blip, a restarted GPU node, or the node's server is down (the connection closes at once) | `lh-tunnel@phastform` opens its SSH connections again after 1 to 30 s, and restarts itself 5 s after it exits; `journalctl --user -u lh-tunnel@phastform` says why each one ended. On the node, `ls -l /run/user/$UID/lh/` lists the servers' sockets |
 | `lh-tunnel@NODE`'s journal: "Permission denied (publickey)" | The node lacks the key's entry | `deploy/authorize-tunnel.sh cyan.cis.upenn.edu NODE_HOST` |
 | A tunnel's sessions all go through new connections (slow first bytes, sshd logs "no more sessions") | The node's sshd allows fewer sessions a connection than `LH_TUNNEL_SESSIONS` (10, sshd's default `MaxSessions`) | Set `LH_TUNNEL_SESSIONS` in `tunnel-NODE.env` to the node's `MaxSessions` |
+| A GPU server's journal: "in-private-net: no network namespace of its own here" | The kernel refuses unprivileged user namespaces (Ubuntu 24.04 restricts them): the server runs in the host's network namespace, where its engine core's loopback listeners and CUDA's abstract sockets are any local user's to reach; the audit counts them apart (`LH_PRIVATE_NET=host`) | `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, then restart the unit |
 | LiveKit is unreachable from the worker | The voice-plane namespace was restarted | `systemctl --user restart lh-voicenet lh-livekit`. Clients must run inside the namespace (`in-voicenet`) |
 | The gateway answers 502 `upstream_unavailable` or `/ready` is 503 | The tunnel or the engine is down | `curl --unix-socket $XDG_RUNTIME_DIR/lh/phastform-engine.sock localhost/health`; see the tunnel row above |
 | The gateway answers 401 `invalid_api_key` | The client's key has no digest in `gateway.toml` | `printf '%s' "$key" \| sha256sum` must match an entry; reload the gateway after editing |

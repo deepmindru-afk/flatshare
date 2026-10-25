@@ -16,6 +16,8 @@ import tomllib
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[3]
 DEPLOY = REPO / "deploy"
 KEYS = {
@@ -319,9 +321,17 @@ esac
 """
 
 
+HOST_NS = "net:[4026531840]"
+"""The host's network namespace, as /proc/PID/ns/net names it."""
+UNIX_TABLE = "Num       RefCount Protocol Flags    Type St Inode Path\n"
+TCP_TABLE = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+
+
 class Listeners:
     """A host for audit-listeners: what ``ss`` lists, and the processes' cgroups and commands under a
-    fake /proc. Each process of ours is in an lh-*.service unit."""
+    fake /proc. Each process of ours is in an lh-*.service unit. The audit's own network namespace is the
+    host's; a process in a namespace of its own (``namespaced``) holds sockets that ss, in the host's, does
+    not list, and that its namespace's tables under /proc/PID/net do."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -334,6 +344,11 @@ class Listeners:
         self.inet: list[str] = []
         self.unix: list[str] = []
         self.pids = 0
+        self.inodes = 500000
+        self.spaces: dict[str, dict[str, list[str]]] = {}  # namespace: its tables' rows
+        self.members: dict[str, list[str]] = {}  # namespace: its processes
+        (self.proc / "self" / "ns").mkdir(parents=True)
+        (self.proc / "self" / "ns" / "net").symlink_to(HOST_NS)
         bin_dir = root / "bin"
         bin_dir.mkdir()
         (bin_dir / "ss").write_text(FAKE_SS)
@@ -374,6 +389,32 @@ class Listeners:
         )
         return f'users:(("python3",pid={pid},fd=3))'
 
+    def namespaced(
+        self, unit: str, space: str, sockets: list[str], env: dict[str, str] | None = None
+    ) -> str:
+        """A process of ``unit`` in network namespace ``space`` holding ``sockets``: each a path, an @NAME
+        (an abstract socket) or a TCP port on 127.0.1.1, as an engine core's gloo listeners bind. Returns its
+        pid."""
+        [pid] = re.findall(r"pid=(\d+)", self.process(unit, env=env))
+        (self.proc / pid / "ns").mkdir()
+        (self.proc / pid / "ns" / "net").symlink_to(space)
+        (self.proc / pid / "fd").mkdir()
+        tables = self.spaces.setdefault(space, {"unix": [], "tcp": []})
+        self.members.setdefault(space, []).append(pid)
+        for fd, address in enumerate(sockets, start=3):
+            self.inodes += 1
+            (self.proc / pid / "fd" / str(fd)).symlink_to(f"socket:[{self.inodes}]")
+            if address.isdigit():
+                tables["tcp"].append(
+                    f"   0: 0101007F:{int(address):04X} 00000000:0000 0A 00000000:00000000 00:00000000 "
+                    f"00000000  1018        0 {self.inodes} 1 0000000000000000 100 0 0 10 0"
+                )
+            else:
+                tables["unix"].append(
+                    f"0000000000000000: 00000002 00000000 00010000 0001 01 {self.inodes} {address}"
+                )
+        return pid
+
     def manager(self) -> str:
         """The user manager, systemd --user, which holds socket units' sockets; returns ss's note of it."""
         self.pids += 1
@@ -402,6 +443,14 @@ class Listeners:
     def audit(self, *args: str) -> subprocess.CompletedProcess[str]:
         (self.ss / "inet").write_text("".join(f"{line}\n" for line in self.inet))
         (self.ss / "unix").write_text("".join(f"{line}\n" for line in self.unix))
+        for space, tables in self.spaces.items():
+            for pid in self.members[space]:
+                net = self.proc / pid / "net"
+                net.mkdir(exist_ok=True)
+                (net / "unix").write_text(
+                    UNIX_TABLE + "".join(f"{row}\n" for row in tables["unix"])
+                )
+                (net / "tcp").write_text(TCP_TABLE + "".join(f"{row}\n" for row in tables["tcp"]))
         return subprocess.run(
             [sys.executable, str(DEPLOY / "bin" / "audit-listeners"), *args],
             env=self.env,
@@ -587,6 +636,168 @@ def test_in_voicenet_marks_what_it_runs_in_the_hosts_namespace(tmp_path: Path) -
         text=True,
     )
     assert done.returncode == 0 and done.stdout.strip() == "host", done.stderr
+
+
+def test_the_audit_reads_the_gpu_servers_listeners_in_their_own_network_namespaces(
+    tmp_path: Path,
+) -> None:
+    # in-private-net runs each GPU server in a network namespace of its own, which ss in the host's does not list:
+    # the engine cores' gloo listeners and CUDA's abstract sockets there are no other user's to reach, and are
+    # accepted; the servers' sockets are files, which every namespace reaches, so they are judged as in the host's,
+    # and found for --expect.
+    host = Listeners(tmp_path)
+    lh = host.runtime / "lh"
+    engine = "net:[4026532864]"
+    host.namespaced("lh-engine.service", engine, [f"{lh}/engine.sock", "36087", "34265"])
+    host.namespaced("lh-engine.service", engine, ["@cuda-uvmfd-4026531836-4049952@", "41133"])
+    host.namespaced(
+        "lh-stt.service", "net:[4026532901]", [f"{lh}/stt.sock", "38043", "@cuda-uvmfd-1"]
+    )
+    host.namespaced("lh-tts.service", "net:[4026533065]", [f"{lh}/tts.sock", "@cuda-uvmfd-2"])
+    host.socket(f"{lh}/gateway.sock", "lh-gateway.service")  # in the host's namespace, as before
+    sockets = [f"{lh}/{name}.sock" for name in ("engine", "stt", "tts")]
+    done = host.audit(*(arg for path in sockets for arg in ("--expect", path)))
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        f"audit-listeners: ok: the box's units hold 4 Unix sockets, all in {host.runtime}, "
+        "and 0 TCP or UDP listeners, all allowed; lh-engine, lh-stt, lh-tts in network namespaces of their "
+        "own, with 4 TCP or UDP listeners and 3 abstract sockets there\n"
+    )
+    # A file socket outside the directory is any user's to reach from any namespace: refused, as in the host's.
+    # A socket of the namespace's table that no process of ours holds is not judged.
+    host.namespaced("lh-stt.service", "net:[4026532901]", ["/tmp/lh-stt-debug.sock"])
+    host.spaces["net:[4026532901]"]["unix"].append(
+        f"0000000000000000: 00000002 00000000 00010000 0001 01 999999 {tmp_path}/not-ours.sock"
+    )
+    done = host.audit()
+    assert done.returncode == 1
+    assert done.stderr == (
+        f"audit-listeners: lh-stt.service listens on a socket outside {host.runtime}: "
+        "/tmp/lh-stt-debug.sock\n"
+    )
+
+
+def test_the_audit_accepts_the_gpu_servers_in_the_hosts_namespace_where_in_private_net_ran_them_there(
+    tmp_path: Path,
+) -> None:
+    # Where the kernel refuses unprivileged user namespaces in-private-net runs a GPU server in the host's network
+    # namespace and marks its processes LH_PRIVATE_NET=host: there its engine core's loopback TCP listeners and
+    # CUDA's abstract sockets are accepted, and counted apart.
+    host = Listeners(tmp_path)
+    lh = host.runtime / "lh"
+    marked = {"LH_PRIVATE_NET": "host"}
+    host.tcp("127.0.1.1:36087", "lh-engine.service", env=marked)
+    host.tcp("127.0.1.1:38043", "lh-stt.service", env=marked)
+    host.socket("@cuda-uvmfd-4026531836-4049952@", "lh-engine.service", env=marked)
+    host.socket(f"{lh}/engine.sock", "lh-engine.service", env=marked)
+    done = host.audit("--expect", f"{lh}/engine.sock")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == (
+        f"audit-listeners: ok: the box's units hold 1 Unix sockets, all in {host.runtime}, "
+        "and 0 TCP or UDP listeners, all allowed; the GPU servers run in the host's network namespace "
+        "(LH_PRIVATE_NET=host) with 2 loopback TCP listeners and 1 abstract sockets\n"
+    )
+    # Unmarked, the same listeners are refused; marked, one off loopback is, and the gateway is no GPU server.
+    host = Listeners(tmp_path / "unmarked")
+    host.tcp("127.0.1.1:36087", "lh-engine.service")
+    host.socket("@cuda-uvmfd-1", "lh-stt.service")
+    host.tcp("0.0.0.0:29500", "lh-engine.service", env=marked)
+    host.tcp("127.0.0.1:9000", "lh-gateway.service", "lh-gateway", env=marked)
+    done = host.audit()
+    assert done.returncode == 1
+    assert done.stderr.splitlines() == [
+        "audit-listeners: lh-engine.service listens on tcp 127.0.1.1:36087",
+        "audit-listeners: lh-engine.service listens on tcp 0.0.0.0:29500",
+        "audit-listeners: lh-gateway.service listens on tcp 127.0.0.1:9000",
+        f"audit-listeners: lh-stt.service listens on an abstract socket outside {host.runtime}: "
+        "@cuda-uvmfd-1",
+    ]
+
+
+def _private_net_works() -> bool:
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        probe = [
+            "unshare",
+            "--user",
+            "--map-root-user",
+            "--net",
+            "--",
+            "sh",
+            "-c",
+            "ip link set lo up",
+        ]
+        return subprocess.run(probe, capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+SHOW_NET = (
+    "import os; "
+    "print(os.readlink('/proc/self/ns/net')); "
+    "print(' '.join(line.split(':')[0].strip() for line in open('/proc/net/dev').readlines()[2:])); "
+    "print(os.environ.get('LH_PRIVATE_NET'))"
+)
+
+
+@pytest.mark.skipif(
+    not _private_net_works(), reason="needs Linux with unprivileged user namespaces"
+)
+def test_in_private_net_runs_its_command_alone_on_a_loopback() -> None:
+    done = subprocess.run(
+        ["bash", str(DEPLOY / "bin" / "in-private-net"), sys.executable, "-c", SHOW_NET],
+        env={k: v for k, v in os.environ.items() if k != "LH_PRIVATE_NET"},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+    space, interfaces, marked = done.stdout.splitlines()
+    assert space != os.readlink("/proc/self/ns/net") and interfaces == "lo" and marked == "None"
+
+
+def test_in_private_net_runs_its_command_in_the_hosts_namespace_marked_where_it_cannot(
+    tmp_path: Path,
+) -> None:
+    # A kernel that refuses unprivileged user namespaces, as unshare finds it: the command runs as it is, in the
+    # host's namespace, marked so for the audit, and the journal says why.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "unshare").write_text(
+        "#!/bin/sh\necho 'unshare: unshare failed: Operation not permitted' >&2\nexit 1\n"
+    )
+    (bin_dir / "unshare").chmod(0o755)
+    show = [sys.executable, "-c", "import os; print(os.environ.get('LH_PRIVATE_NET'))"]
+    done = subprocess.run(
+        ["bash", str(DEPLOY / "bin" / "in-private-net"), *show],
+        env={k: v for k, v in os.environ.items() if k != "LH_PRIVATE_NET"}
+        | {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0 and done.stdout.strip() == "host", done.stderr
+    assert "the kernel refuses unprivileged user namespaces" in done.stderr
+
+
+def test_the_gpu_nodes_servers_run_in_network_namespaces_of_their_own() -> None:
+    # Every unit that starts a GPU server, rendered or a template, and every engine variant that replaces the
+    # engine's start, starts it through in-private-net; SGLang alone, which serves TCP to the proxy socket in the
+    # host's namespace, does not.
+    wrapper = "%h/leaseholder/src/deploy/bin/in-private-net "
+    units = [
+        directory / f"{unit}.service"
+        for directory in (DEPLOY / "phastform" / "systemd", DEPLOY / "templates" / "systemd")
+        for unit in ("lh-engine", "lh-stt", "lh-tts")
+    ]
+    variants = [
+        *(DEPLOY / "phastform" / "variants").glob("*/lh-engine.conf"),
+        *(DEPLOY / "templates" / "variants").glob("*/lh-engine.conf"),
+    ]
+    for path in [*units, *variants]:
+        starts = [start for start in exec_lines(path.read_text(), "ExecStart") if start]
+        if not starts or "sglang" in starts[-1]:
+            continue
+        assert starts[-1].startswith(wrapper), path
 
 
 def test_the_gateways_socket_unit_listens_where_gateway_toml_does() -> None:

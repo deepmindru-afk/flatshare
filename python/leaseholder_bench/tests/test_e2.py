@@ -227,10 +227,11 @@ def test_the_w5_control_is_make_room_as_v03_built_it() -> None:
     cache = "%h/leaseholder/cache/make-room-v03"
     rename = f"ExecStartPre=/bin/mv -f {cache}/lh_make_room_scheduler.py {cache}/lh_make_room_v03_scheduler.py\n"
     assert rest.count(rename) == 1
-    # Like every engine since, it serves on its socket.
+    # Like every engine since, it serves on its socket, in a network namespace of its own.
     v03 = (
         rest.replace(rename, "")
         .replace(" --uds ${LH_ENGINE_SOCKET}", "")
+        .replace("%h/leaseholder/src/deploy/bin/in-private-net ", "")
         .replace("lh_make_room_v03_scheduler", "lh_make_room_scheduler")
         .replace("make-room-v03", "make-room")
     )
