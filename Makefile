@@ -6,10 +6,11 @@ VLLM_REF := v0.32.0
 VLLM_SRC ?= $(HOME)/.cache/leaseholder/vllm-$(VLLM_REF)
 # Every Python package except the engine variants' tests (test-vllm); each one has a `test` extra.
 PY_PACKAGES := $(filter-out python/leaseholder_vllm,$(patsubst %/pyproject.toml,%,$(wildcard python/*/pyproject.toml)))
-# The Python that make lint checks: the packages, and the scripts of lh-sim, E2, the A100 run, the deployment and the
-# engine variants (not the recorded runs' own scripts under benchmarks/results).
+# The Python that make lint checks: the packages, and the scripts of lh-sim, E2, the A100 run, the deployment (the
+# single host's supervisor and forwarder among them, which have no suffix) and the engine variants (not the recorded
+# runs' own scripts under benchmarks/results).
 PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py benchmarks/a100/*.py deploy/*.py deploy/bin/*.py \
-  deploy/phastform/variants/*/*.py)
+  deploy/phastform/variants/*/*.py) deploy/bin/lh-forward deploy/bin/lh-svc
 # E2's committed records (lh-bench e2 export), one directory per point under its campaign, and where
 # reproduce-e2 writes their report.
 E2_RESULTS := benchmarks/results/2026-10-23-e2
