@@ -127,7 +127,7 @@ The preflight finds the host's facts, but these decide the plan, and some need t
 
 ## The A100 run
 
-The A100 40 GB run asks whether make-room's result carries to a datacenter card. Its core is like-for-like with the box: the box's model at its revision, its 5 GiB pool, 512/256, the 20 GiB CPU tier, 24 sessions of `weka-x32-long`, two callers, W5's three arm files and five rounds at seeds 11 to 15; only the card, its precision path and the host change. So a difference within the A100 is the engine change's, and a difference from the box is the card's. [The forecast](../benchmarks/a100/forecast.md) gives every term the run measures, modeled: the KV case's stock wait 1,636–1,688 ms, make-room's first token 134–158 ms, a running share of 13% in the core scenario against the box's 17%, 76% busy against the box's 100%.
+The A100 40 GB run asks whether make-room's result carries to a datacenter card. Its core is like-for-like with the box: the box's model at its revision, its 5 GiB pool, 512/256, the 20 GiB CPU tier, 24 sessions of `weka-x32-long`, two callers, W5's three arm files and five rounds at seeds 11 to 15; only the card, its precision path and the host change. So a difference within the A100 is the change's, and a difference from the box is the card's. [The forecast](../benchmarks/a100/forecast.md) gives every term the run measures, modeled: the KV case's stock wait 1,636–1,688 ms, make-room's first token 134–158 ms, a running share of 13% in the core scenario against the box's 17%, 76% busy against the box's 100%.
 
 ### The core, block by block
 
