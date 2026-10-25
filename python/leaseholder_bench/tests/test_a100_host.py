@@ -550,6 +550,30 @@ def test_the_preflight_takes_the_lent_gpu_of_several_and_refuses_none_chosen(
     assert row.status == "refused" and row.value == f"LH_GPU_ID=7 names none of: {'; '.join(two)}"
 
 
+def test_a_cpu_tier_other_than_the_staged_one_is_refused(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # The core runs the box's 20 GiB tier, as staged; at the gpu stage (block 0) a tier R3 bounded lower (an engine
+    # left running holds /dev/shm, or another tenant the RAM) would change it for the whole campaign: refused.
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts())
+    staged = json.loads((node.dir / "node.json").read_text())
+
+    def tier() -> host_py.Check:
+        checks = host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)
+        return next(c for c in checks if c.check == "CPU tier and /dev/shm")
+
+    (node.dir / "staged.json").write_text(json.dumps(staged))
+    assert tier().status == "ok"
+    staged["values"]["engine.cpu_bytes_to_use"] = str(25 * GIB)
+    (node.dir / "staged.json").write_text(json.dumps(staged))
+    row = tier()
+    assert row.status == "refused", row
+    assert row.value.startswith("20 GiB, 4.0 x the pool, where the stage rendered 25 GiB")
+    assert "bootstrap.sh gpu" in row.reason
+    (node.dir / "staged.json").unlink()  # a node rendered before stages kept theirs: as before
+    assert tier().status == "ok"
+
+
 def test_a_mig_slice_is_refused_unless_allowed(
     tmp_path: Path, venv: Path, engine: str, monkeypatch
 ) -> None:

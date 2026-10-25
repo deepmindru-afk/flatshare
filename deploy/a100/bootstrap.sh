@@ -125,17 +125,20 @@ render() {
   log "install path: $(field "$node/node.json" install path): $(field "$node/node.json" install reason)"
 }
 
-units=(leaseholder.target lh-engine lh-stt lh-tts lh-voice-worker lh-gateway.service lh-gateway.socket lh-livekit
-  lh-voicenet)
-stop_units() { # stop_units lh-svc|systemd: stop this host's units under that supervisor
-  if [[ $1 == lh-svc ]]; then
+gpu_units=(leaseholder.target lh-engine lh-stt lh-tts)
+units=("${gpu_units[@]}" lh-voice-worker lh-gateway.service lh-gateway.socket lh-livekit lh-voicenet)
+stop_units() { # stop_units lh-svc|systemd [UNIT...]: stop this host's units (all of them by default) under it
+  local supervisor=$1
+  shift
+  (($#)) || set -- "${units[@]}"
+  if [[ $supervisor == lh-svc ]]; then
     # With the env.sh that started them: lh-svc's shims and runtime directory.
     # shellcheck source=/dev/null
-    (source "$node/env.sh" && systemctl --user stop "${units[@]}") 2>/dev/null || true
+    (source "$node/env.sh" && systemctl --user stop "$@") 2>/dev/null || true
   else
     local manager
     manager=$(PATH=${PATH//"$src"\/deploy\/bin\/shims:/} command -v systemctl || true)
-    [[ -z $manager ]] || "$manager" --user stop "${units[@]}" 2>/dev/null || true
+    [[ -z $manager ]] || "$manager" --user stop "$@" 2>/dev/null || true
   fi
 }
 
@@ -154,6 +157,19 @@ shell_env() { # env.sh, which every command on this host sources: lh-svc's shims
   # shellcheck source=/dev/null
   source "$node/env.sh"
   previous=$chosen
+}
+
+stage_facts() { # the facts and the node, kept as staged.json, whose CPU tier the later stages' preflight holds to
+  render
+  shell_env
+  cp "$node/node.json" "$node/staged.json"
+}
+
+gpu_facts() { # the facts with the card, the GPU units stopped first: the engine that warm or a block left running
+  # holds its /dev/shm region and RAM, which R3 bounds the CPU tier by (block 0 starts the units again)
+  [[ -z $previous ]] || stop_units "$previous" "${gpu_units[@]}"
+  render
+  shell_env
 }
 
 venv() { # venv DIR: a venv of uv's own Python 3.12; one an earlier stage made from a Python without Python.h goes
@@ -277,8 +293,7 @@ main() {
   tools
   case $stage in
     stage)
-      render
-      shell_env
+      stage_facts
       venvs
       compilers
       audio_and_models
@@ -290,8 +305,7 @@ main() {
       nvidia-smi -L >/dev/null 2>&1 || { log "nvidia-smi shows no GPU"; exit 2; }
       local built
       built=$(cat "$root/venvs/engine/lh-install-path" 2>/dev/null || true)
-      render
-      shell_env
+      gpu_facts
       if [[ $(field "$node/node.json" install path) != "$built" ]]; then
         venvs
       fi

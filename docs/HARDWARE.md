@@ -58,7 +58,7 @@ The profile's "auto" values, in `deploy/profile.py`:
 | Host compilers | | no `cc` or `c++`: Triton builds its launchers with a C compiler, `nvcc` needs a C++ one |
 | Python headers | | the engine venv's Python has no `Python.h`, which Triton compiles its launcher against at the engine's first start (a system Python 3.12 without its `-dev` package, Ubuntu 24.04's): `stage` makes the venvs from uv's own Python |
 | Compile and JIT caches | cold (each compile configuration's first start compiles: 531.8 s on the box against 88.8 s warm, measured in W8's start drills), on tmpfs, or under 10 GiB free [estimate] | under 2 GiB free |
-| CPU tier and `/dev/shm` | below four times the pool: fewer restores, more recompute; the ratio is in every record | (R3 refuses at render) |
+| CPU tier and `/dev/shm` | below four times the pool: fewer restores, more recompute; the ratio is in every record | another tier than `stage` rendered (`staged.json`): at the `gpu` stage something holds `/dev/shm` or the RAM that R3 bounds it by, and the core would run that tier for the whole campaign; `gpu` stops the GPU units before it reads the facts, so an engine of its own does not (R3 refuses at render a tier below the pool) |
 | Pinned memory | `cudaHostRegister` failed: a pageable tier, slower restores | |
 | Host RAM | the GPU's NUMA node short of the tier: a remote tier (the box measured one within 1% of pinned bandwidth) | |
 | Async scheduling, block size | synchronous scheduling; another block size: make-room's token counts round to it | |
@@ -97,7 +97,7 @@ On the host, from the home directory:
 
 ```sh
 bash leaseholder/src/deploy/a100/bootstrap.sh stage   # no GPU needed: before the billed clock if the host is up earlier
-bash leaseholder/src/deploy/a100/bootstrap.sh gpu     # with the card: the driver, the install path, vLLM's parse, the preflight
+bash leaseholder/src/deploy/a100/bootstrap.sh gpu     # with the card (the GPU units stopped): the driver, the install path, vLLM's parse, the preflight
 bash leaseholder/src/deploy/a100/bootstrap.sh warm    # one start per compile configuration, so the campaign's are warm
 nohup setsid bash leaseholder/src/benchmarks/a100/run.sh --until HH:MM \
   >>leaseholder/runs/a100/run.log 2>&1 </dev/null &  # the A100 run's core, block by block

@@ -1099,11 +1099,26 @@ def preflight(
     tier = int(values.get("engine.cpu_bytes_to_use", "0") or 0)
     shm = host.get("shm") or {}
     ratio = tier / pool if pool else 0
+    staged = (
+        (_json(node.dir / "staged.json") or {}).get("values", {}).get("engine.cpu_bytes_to_use")
+    )
+    moved = staged is not None and str(staged) != str(tier)
     value = (
-        f"{tier / GIB:.0f} GiB, {ratio:.1f} x the pool; /dev/shm {shm.get('total_bytes', 0) / GIB:.0f} GiB"
+        f"{tier / GIB:.0f} GiB, {ratio:.1f} x the pool"
+        + (f", where the stage rendered {int(staged) / GIB:.0f} GiB" if moved else "")
+        + f"; /dev/shm {shm.get('total_bytes', 0) / GIB:.0f} GiB"
         + (" (a container)" if host.get("container") else "")
     )
-    if ratio >= 4:
+    if moved:
+        add(
+            "CPU tier and /dev/shm",
+            "refused",
+            value,
+            "R3 bounds the tier by /dev/shm's free space and the RAM available, which something holds now (an engine "
+            "left running, another tenant): the core runs the staged tier for the whole campaign; free them and run "
+            "bootstrap.sh gpu again (or bootstrap.sh stage, to stage this tier)",
+        )
+    elif ratio >= 4:
         add("CPU tier and /dev/shm", "ok", value)
     else:
         add(

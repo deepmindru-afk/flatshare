@@ -616,3 +616,27 @@ def test_bootstrap_keeps_the_lent_gpu_that_the_first_stage_named(ubuntu: dict) -
         assert done.returncode == 0, done.stdout + done.stderr
     bad = bootstrap(ubuntu, "true", LH_GPU_ID="all")
     assert bad.returncode == 2 and "LH_GPU_ID is a GPU's index or UUID" in bad.stderr
+
+
+def test_the_gpu_stage_stops_the_gpu_units_before_it_reads_the_facts(ubuntu: dict) -> None:
+    # In block 0 the engine that warm left running holds its /dev/shm region and RAM, which R3 bounds the CPU tier
+    # by: the gpu stage stops the GPU units (block 0 starts them again) before it detects, so that the facts are the
+    # host's own. The staged node is the one the tier is compared with.
+    node = ubuntu["node"]
+    done = bootstrap(ubuntu, "stage_facts")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert json.loads((node / "staged.json").read_text()) == json.loads(
+        (node / "node.json").read_text()
+    )
+    calls = ubuntu["state"] / "calls"
+    calls.unlink(missing_ok=True)
+    tools = Path(ubuntu["env"]["PATH"].split(os.pathsep)[0])
+    (tools / "systemctl").write_text(
+        '#!/bin/sh\necho "systemctl $*" >>"$FAKE_HOST/calls"\necho running\n'
+    )
+    done = bootstrap(ubuntu, "gpu_facts")
+    assert done.returncode == 0, done.stdout + done.stderr
+    asked = lines(calls)
+    stop = "systemctl --user stop leaseholder.target lh-engine lh-stt lh-tts"
+    assert stop in asked, asked
+    assert asked.index(stop) < asked.index("systemctl --user is-system-running"), asked
