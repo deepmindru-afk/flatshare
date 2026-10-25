@@ -441,6 +441,28 @@ def test_a_stop_cancels_a_start_it_meets_rather_than_wait_for_it(host: dict) -> 
         ctl(host, "--user", "stop", "slow.service")
 
 
+def test_a_stop_returns_once_the_main_process_group_is_gone() -> None:
+    # A stop returns once the unit's processes have exited, as systemd's waits for its cgroup to empty: an engine
+    # core still exiting holds its GPU memory and /dev/shm region from the next start. After the SIGKILL the group's
+    # last process is gone only once it is reaped (its parent, here this test, reaps it 1.5 s on).
+    lh_svc = _module("lh_svc", BIN / "lh-svc")
+    stubborn = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+    child = subprocess.Popen([sys.executable, "-c", stubborn], start_new_session=True)
+    time.sleep(0.3)
+    reaper = threading.Timer(1.5, child.wait)
+    reaper.start()
+    try:
+        begun = time.monotonic()
+        lh_svc.group_gone(child.pid, 0.2)
+        assert time.monotonic() - begun >= 1.4
+        with pytest.raises(ProcessLookupError):
+            os.killpg(child.pid, 0)
+    finally:
+        reaper.join()
+        child.kill()
+        child.wait()
+
+
 def test_the_shims_answer_what_the_scripts_ask(host: dict) -> None:
     assert ctl(host, "--user", "daemon-reload").returncode == 0
     assert ctl(host, "--user", "enable", "-q", "svc-a.service").returncode == 0

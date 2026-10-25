@@ -591,18 +591,34 @@ def kill_group(pid: int, signum: int) -> None:
         os.killpg(pid, signum)
 
 
+KILLED_GONE_S = 30.0
+"""How long a group SIGKILLed may take to be gone: a process exits only once the kernel has released what it held
+(an engine core its GPU memory and /dev/shm region), and is gone once its parent has reaped it."""
+
+
 def group_gone(pgid: int | None, timeout: float) -> None:
-    """Wait for every process of the group ``pgid`` (the main process's own) to exit, then SIGKILL what is left."""
+    """Wait for every process of the group ``pgid`` (the main process's own) to exit, SIGKILL what is left after
+    ``timeout``, and wait for that to be gone too: a stop returns once the unit's processes have exited, as systemd's
+    once the unit's cgroup is empty, so that the next start does not meet the last one's engine still exiting."""
     if not pgid:
         return
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.05)
-    kill_group(pgid, signal.SIGKILL)
+
+    def wait(seconds: float) -> bool:
+        deadline = time.time() + seconds
+        while True:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass  # macOS answers so for a group of zombies, which are still there
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    if not wait(timeout):
+        kill_group(pgid, signal.SIGKILL)
+        wait(KILLED_GONE_S)
 
 
 # systemctl.
