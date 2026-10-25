@@ -15,10 +15,14 @@ PY_SOURCES := python crates/lh-sim/scripts $(wildcard benchmarks/e2/*.py benchma
 # reproduce-e2 writes their report.
 E2_RESULTS := benchmarks/results/2026-10-23-e2
 E2_REPORT ?= build/reproduce-e2
+# W5's re-measure, whose report reads its own voice-alone runs for the SLO.
+E2_W5_RESULTS := benchmarks/results/2026-10-24-e2-w5
+E2_W5_REPORT ?= build/reproduce-e2-w5
 
 .PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-make-room-ci \
   test-python schema metrics \
-  reproduce-e1 reproduce-calibration reproduce-e2 e2-figures forecast-a100 profiles reproduce-a100 check-a100-calibration
+  reproduce-e1 reproduce-calibration reproduce-e2 reproduce-e2-w5 e2-figures e2-w5-figure forecast-a100 profiles \
+  reproduce-a100 check-a100-calibration
 
 check: lint test
 
@@ -98,10 +102,10 @@ schema:
 metrics:
 	LH_GATEWAY_WRITE_METRICS=1 cargo test -q -p lh-gateway --lib metrics::tests::the_checked_in_exposition_is_current
 
-# E1's tables in crates/lh-sim/README.md from the 32x corpus, which stays outside the repository (`lh-bench
-# scale-traces` writes it; python/leaseholder_bench/README.md): the regime map, the realistic regime over 20 seeds,
-# the other GPUs at the 32x replay and at their own scalings, and the miss ratios with the idle service. Usage: make
-# reproduce-e1 CORPUS=<its directory>.
+# E1's tables (docs/BENCHMARKS.md's E1 section, crates/lh-sim/README.md's other hardware) from the 32x corpus, which
+# stays outside the repository (`lh-bench scale-traces` writes it; python/leaseholder_bench/README.md): the regime
+# map, the realistic regime over 20 seeds, the other GPUs at the 32x replay and at their own scalings, and the miss
+# ratios with the idle service. Usage: make reproduce-e1 CORPUS=<its directory>.
 E1_REPORT ?= build/reproduce-e1
 E1_SIM = target/release/lh-sim
 reproduce-e1:
@@ -168,6 +172,10 @@ reproduce-e2:
 	@cd python/leaseholder_bench && uv run -q lh-bench e2 report \
 	  $(abspath $(dir $(wildcard $(E2_RESULTS)/*/*/run.json))) --out $(abspath $(E2_REPORT))
 
+# The same of W5's re-measure, from its own records.
+reproduce-e2-w5:
+	@$(MAKE) --no-print-directory reproduce-e2 E2_RESULTS=$(E2_W5_RESULTS) E2_REPORT=$(E2_W5_REPORT)
+
 # E2's figures in the docs, docs/figures/e2-frontier.svg and e2-waterfall.svg, from the records of the configurations an
 # operator could deploy (the ablations left out), each with all its runs. The demo GIF beside them is demo.py's.
 E2_DEPLOYABLE := a1-voice disc-frozen-s24 disc-a4-b1024-t0-s24 disc-a6-reserve2048-s24 disc-a7b-sglang-hicache-s24 \
@@ -180,6 +188,15 @@ e2-figures:
 	@mkdir -p docs/figures
 	cp build/e2-figures/frontier-weka-x32-long.svg docs/figures/e2-frontier.svg
 	cp build/e2-figures/waterfall.svg docs/figures/e2-waterfall.svg
+
+# The README's figure, docs/figures/e2-voice-p95.svg, from W5's records: the configurations figure.toml names, each run
+# in the same rounds over the same five samples of the agents' traces.
+e2-w5-figure:
+	@cd python/leaseholder_bench && uv run -q lh-bench e2 report \
+	  $(abspath $(dir $(wildcard $(E2_W5_RESULTS)/*/*/run.json))) \
+	  --dots $(abspath $(E2_W5_RESULTS)/figure.toml) --out $(abspath build/e2-w5-figure) >/dev/null
+	@mkdir -p docs/figures
+	cp build/e2-w5-figure/voice-p95.svg docs/figures/e2-voice-p95.svg
 
 # The frozen box's hardware profile against deploy/phastform (deploy/profile.py): `make profiles` checks that it
 # renders today's files byte for byte, and `make profiles UPDATE=1` writes them from deploy/templates after a

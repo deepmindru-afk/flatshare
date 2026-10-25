@@ -429,7 +429,7 @@ def _add_drill(commands: Commands) -> None:
 def _e2(args: argparse.Namespace) -> int:
     from leaseholder_bench.e2.arm import E2Error, load_arm
     from leaseholder_bench.e2.record import export_point, render
-    from leaseholder_bench.e2.report import load_points, write_report
+    from leaseholder_bench.e2.report import load_points, read_dots, write_report
     from leaseholder_bench.e2.run import Host, Systemd, gpu_sources, reset_cyan, run_point
 
     try:
@@ -480,8 +480,9 @@ def _e2(args: argparse.Namespace) -> int:
                 print("lh-bench e2: no complete point to report", file=sys.stderr)
                 return 1
             try:
-                written = write_report(rows, args.out, args.waterfall)
-            except ValueError as exc:  # a --waterfall point without turn lines
+                dots = read_dots(args.dots) if args.dots else ()
+                written = write_report(rows, args.out, args.waterfall, dots)
+            except ValueError as exc:  # a --waterfall point without turn lines, a bad --dots file
                 print(f"lh-bench e2: {exc}", file=sys.stderr)
                 return 1
             for path in written:
@@ -576,6 +577,14 @@ def _add_e2(commands: Commands) -> None:
         metavar="POINT",
         help="draw only this point's configuration in waterfall.svg (repeatable, in this order; "
         "default every one with turn lines)",
+    )
+    report.add_argument(
+        "--dots",
+        type=Path,
+        metavar="FILE",
+        help="also draw voice-p95.svg: the V2V p95 of the configurations a TOML file names, one "
+        '[[row]] each (point = "...", label = "...", change = true for the engine change\'s rows), '
+        "in its order",
     )
     export = actions.add_parser(
         "export",

@@ -7,6 +7,7 @@ import csv
 import importlib.util
 import json
 import re
+import tomllib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any
 import pytest
 
 from leaseholder_bench.cli import main
-from leaseholder_bench.e2.arm import Agents, Voice
+from leaseholder_bench.e2.arm import Agents, Voice, flag_values
 from leaseholder_bench.e2.figures import load_sweep
 from leaseholder_bench.e2.record import (
     CALLER_ROOM,
@@ -55,11 +56,12 @@ from leaseholder_bench.e2.report import (
     hardware,
     load_points,
     mark_frontier,
+    read_dots,
     stage_waterfall,
     voice_slo,
     write_report,
 )
-from leaseholder_bench.e2.run import SECRETS
+from leaseholder_bench.e2.run import SCHEDULER, SECRETS, variant_flags
 
 T0 = 1_800_000_000.0  # the calls run from T0 to T0 + 100 s
 REPO = Path(__file__).resolve().parents[3]
@@ -67,7 +69,9 @@ VOICE = REPO / "python" / "leaseholder_voice"
 VOICE_EVENTS = VOICE / "src" / "leaseholder_voice" / "events.py"
 VOICE_PLACEMENT = VOICE / "src" / "leaseholder_voice" / "placement.py"
 VOICE_BOTS = VOICE / "src" / "leaseholder_voice" / "bots.py"
+# The committed E2 records: W4's, then W5's re-measure.
 RESULTS = REPO / "benchmarks" / "results" / "2026-10-23-e2"
+W5_RESULTS = REPO / "benchmarks" / "results" / "2026-10-24-e2-w5"
 
 
 def record(end: float, *, phase: str = "profiling", ttft: float = 100.0, **extra: Any) -> str:
@@ -1145,9 +1149,12 @@ def unredacted(data: Any) -> list[str]:
     return found + [key for value in data.values() for key in unredacted(value)]
 
 
-def test_the_committed_records_give_the_report_and_hold_no_credential(tmp_path: Path) -> None:
+@pytest.mark.parametrize("results", [RESULTS, W5_RESULTS], ids=lambda p: p.name)
+def test_the_committed_records_give_the_report_and_hold_no_credential(
+    tmp_path: Path, results: Path
+) -> None:
     assert unredacted({"tenants": {"a": {"keys_sha256": ["<sha256>"]}}}) == ["keys_sha256"]
-    dirs = sorted(run.parent for run in RESULTS.glob("*/*/run.json"))  # as make reproduce-e2 does
+    dirs = sorted(run.parent for run in results.glob("*/*/run.json"))  # as make reproduce-e2 does
     assert dirs
     rows, incomplete = load_points(dirs)
     assert len(rows) == len(dirs) and not incomplete
@@ -1162,18 +1169,35 @@ def test_the_committed_records_give_the_report_and_hold_no_credential(tmp_path: 
     assert (tmp_path / "frontier.md").read_text().startswith("# E2 frontier")
 
 
-def test_a_committed_record_exports_to_itself(tmp_path: Path) -> None:
+@pytest.mark.parametrize("results", [RESULTS, W5_RESULTS], ids=lambda p: p.name)
+def test_a_committed_record_exports_to_itself(tmp_path: Path, results: Path) -> None:
     # A record leaves out the files compact() reads beside run.json and summary.json, so exporting it
     # gives it back byte for byte: lh-bench e2 report reads records and run directories alike.
-    records = sorted(run.parent for run in RESULTS.glob("*/*/run.json"))
+    records = sorted(run.parent for run in results.glob("*/*/run.json"))
     assert records
     for record in records:
         again = export_point(record, tmp_path)
-        assert again is not None and again.relative_to(tmp_path) == record.relative_to(RESULTS)
+        assert again is not None and again.relative_to(tmp_path) == record.relative_to(results)
         files = sorted(p.relative_to(record) for p in record.rglob("*") if p.is_file())
         assert sorted(p.relative_to(again) for p in again.rglob("*") if p.is_file()) == files
         for name in files:
             assert (again / name).read_bytes() == (record / name).read_bytes(), record / name
+
+
+def test_each_w5_record_ran_the_scheduler_its_variant_loads_on_the_revision_it_names() -> None:
+    # W5's harness checked the engine's scheduler class before each point, so that make-room as W5
+    # fixed it and as v0.3 built it (make-room-v03) cannot pass for one another, and each record names
+    # the revision deployed on the GPU node: the one cyan ran.
+    runs = sorted(W5_RESULTS.glob("*/*/run.json"))
+    assert len(runs) == 72
+    for path in runs:
+        run = json.loads(path.read_text())
+        variant = tomllib.loads((path.parent / "arm.toml").read_text()).get("engine", {})
+        loads = flag_values(variant_flags(variant.get("variant", "frozen"))).get(SCHEDULER)
+        engine = json.loads((path.parent / "engine.json").read_text())
+        assert engine["scheduler_config"]["scheduler_cls"] == loads, path
+        assert (SCHEDULER in run["engine"]["flags"]["checked"]) == (loads is not None), path
+        assert run["versions"]["gpu_source"] == {"phastform": run["versions"]["source"]}, path
 
 
 def test_the_report_reads_the_lines_the_voice_worker_writes() -> None:
@@ -1446,6 +1470,56 @@ def test_the_figure_draws_families_and_leaves_a_collapse_off_its_scale(tmp_path:
     assert "Off the scale: a7b-s16, 9,000 ms at 5,000 tokens/s." in figure
     assert "<!-- 7b -->" not in figure  # its only point is off the scale
     assert "The dashed line is the voice SLO, 2,010 ms" in figure
+
+
+def test_the_dot_figure_draws_the_named_configurations_in_order(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("matplotlib")
+    dirs = [
+        point(tmp_path / "r1", "w5-a1-voice", "1", None, 1760),
+        point(tmp_path / "r1", "w5-frozen", "2", 3300, 10000),
+        point(tmp_path / "r2", "w5-frozen", "2", 3400, 11000),
+        point(tmp_path / "r1", "w5-pr", "9", 3200, 2200),
+        point(tmp_path / "r2", "w5-pr", "9", 3100, 2300),
+    ]
+    for run_dir in dirs[
+        1:
+    ]:  # the agents' tokens/s over the fixed window, as W5's records have them
+        summary = json.loads((run_dir / "summary.json").read_text())
+        bg = summary["background"]
+        bg["fixed_window"] = {"tokens_per_s": bg["tokens_per_s"], "seconds": 240.0}
+        (run_dir / "summary.json").write_text(json.dumps(summary))
+    rows, _ = load_points(dirs)
+    figure_toml = tmp_path / "figure.toml"
+    figure_toml.write_text(
+        '[[row]]\npoint = "w5-frozen"\nlabel = "Tuned vLLM"\n\n'
+        '[[row]]\npoint = "w5-pr"\nlabel = "Both PRs"\nchange = true\n'
+    )
+    out = tmp_path / "report"
+    assert out / "voice-p95.svg" in write_report(rows, out, dots=read_dots(figure_toml))
+    figure = (out / "voice-p95.svg").read_text()
+    # The rows in the file's order with their runs, each one's goodput against the first row's
+    # (3,150 against 3,350 tokens/s), and the SLO that voice alone sets.
+    assert figure.index("<!-- Tuned vLLM (2 runs) -->") < figure.index("<!-- Both PRs (2 runs) -->")
+    assert "<!-- 100% -->" in figure and "<!-- 94% -->" in figure
+    assert "<!-- the SLO: voice alone (1.76 s) + 250 ms -->" in figure
+    write_report(rows, tmp_path / "again", dots=read_dots(figure_toml))
+    assert (tmp_path / "again" / "voice-p95.svg").read_bytes() == figure.encode()
+    # A point the report lacks, or a row the file gets wrong, names what is wrong.
+    figure_toml.write_text('[[row]]\npoint = "w5-gone"\nlabel = "Gone"\n')
+    with pytest.raises(ValueError, match="0 configurations of w5-gone in the report, not 1"):
+        write_report(rows, out, dots=read_dots(figure_toml))
+    for bad, error in (
+        ('[[row]]\npoint = "w5-pr"\n', "a row without a point or a label"),
+        ('[[row]]\npoint = "w5-pr"\nlabel = "PR"\ncolor = "blue"\n', "keys other than"),
+        ('[[row]]\npoint = "w5-pr"\nlabel = "PR"\nchange = "yes"\n', "not true or false"),
+        ("", "no \\[\\[row\\]\\] tables"),
+    ):
+        figure_toml.write_text(bad)
+        with pytest.raises(ValueError, match=error):
+            read_dots(figure_toml)
+    args = ["e2", "report", *map(str, dirs), "--out", str(out), "--dots", str(figure_toml)]
+    assert main(args) == 1
+    assert "no [[row]] tables" in capsys.readouterr().err
 
 
 def test_a_point_summary_reads_its_run_directory(tmp_path: Path) -> None:

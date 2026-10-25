@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import re
 import statistics
+import tomllib
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -515,15 +516,42 @@ def _pooled(runs: Iterable[Mapping[str, Any]], stage: str) -> float | None:
     return sum(n * mean for n, mean in counted) / turns if turns else None
 
 
+def read_dots(path: Path) -> list[dict[str, Any]]:
+    """The rows of voice-p95.svg from a TOML file: one ``[[row]]`` table each, with the point's name
+    (``point``), the row's label (``label``) and whether it runs the engine change (``change``,
+    false by default), in the file's order. A ValueError names what is wrong."""
+    try:
+        rows = tomllib.loads(path.read_text()).get("row")
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+    if not rows:
+        raise ValueError(f"{path}: no [[row]] tables")
+    for row in rows:
+        if not isinstance(row.get("point"), str) or not isinstance(row.get("label"), str):
+            raise ValueError(f"{path}: a row without a point or a label: {row}")
+        if set(row) - {"point", "label", "change"}:
+            raise ValueError(f"{path}: a row with keys other than point, label and change: {row}")
+        if not isinstance(row.get("change", False), bool):
+            raise ValueError(f"{path}: a row whose change is not true or false: {row}")
+    return rows
+
+
 def write_report(
-    rows: Sequence[Mapping[str, Any]], out_dir: Path, waterfall: Sequence[str] = ()
+    rows: Sequence[Mapping[str, Any]],
+    out_dir: Path,
+    waterfall: Sequence[str] = (),
+    dots: Sequence[Mapping[str, Any]] = (),
 ) -> list[Path]:
     """frontier.csv, frontier.md and, when matplotlib is installed, a frontier figure per workload
-    (:func:`figure_name`) and waterfall.svg: the stage waterfall of the points ``waterfall`` names,
-    in its order, or of every configuration with turn lines. Naming a point without turn lines in
-    the report is a ValueError."""
+    (:func:`figure_name`), waterfall.svg: the stage waterfall of the points ``waterfall`` names,
+    in its order, or of every configuration with turn lines, and with ``dots`` voice-p95.svg: the
+    V2V p95 of the configurations of the points it names (``{"point", "label", "change"}`` each,
+    in its order; see :func:`~leaseholder_bench.e2.figures.plot_dots`), against their workload's
+    SLO. Naming a point without turn lines, or a dots point the report lacks or that two
+    workloads measured, is a ValueError."""
     from leaseholder_bench.e2.figures import (  # figures.py builds on this module
         plot,
+        plot_dots,
         plot_waterfall,
     )
 
@@ -551,6 +579,21 @@ def write_report(
             written.append(figure)
     if cells and plot_waterfall(cells, out_dir / "waterfall.svg"):
         written.append(out_dir / "waterfall.svg")
+    if dots:
+        chosen = []
+        for dot in dots:
+            found = [g for g in groups if g["point"] == dot["point"]]
+            if len(found) != 1:
+                raise ValueError(
+                    f"{len(found)} configurations of {dot['point']} in the report, not 1"
+                )
+            chosen.append((found[0], dot["label"], bool(dot.get("change", False))))
+        slo = voice_slo(groups, chosen[0][0]["runs"][0]["callers"])
+        alone = None
+        if slo is not None:
+            alone = statistics.median(g["v2v_p95_ms"] for g in groups if g["point"] in slo[1])
+        if plot_dots(chosen, out_dir / "voice-p95.svg", *((slo[0], alone) if slo else ())):
+            written.append(out_dir / "voice-p95.svg")
     return written
 
 
