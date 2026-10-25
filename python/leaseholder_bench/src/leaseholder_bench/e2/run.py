@@ -491,8 +491,9 @@ switches, ``--additional-config.make_room.reserve_tokens 0``)."""
 def variant_flags(variant: str, variants: Path = VARIANTS) -> tuple[str, ...]:
     """The engine flags a variant gives its engine (frozen: none): those of the command its
     lh-engine.conf starts (the last ``ExecStart=``), from its first flag on, without ``--config`` (the
-    frozen box's engine.yaml, whose settings FROZEN has) and without ``$LH_ENGINE_FLAGS``, where
-    ``variant.sh use`` puts the arm's flags, after the variant's."""
+    frozen box's engine.yaml, whose settings FROZEN has), ``--uds`` (the engine's socket: its transport,
+    not one of its settings) and ``$LH_ENGINE_FLAGS``, where ``variant.sh use`` puts the arm's flags,
+    after the variant's."""
     if variant == "frozen":
         return ()
     if not (variants / variant).is_dir():
@@ -507,7 +508,7 @@ def variant_flags(variant: str, variants: Path = VARIANTS) -> tuple[str, ...]:
     first = next((i for i, word in enumerate(words) if word.startswith("--")), len(words))
     flags: list[str] = []
     for word in words[first:]:
-        if flags and flags[-1] == "--config":
+        if flags and flags[-1] in ("--config", "--uds"):
             flags.pop()
         elif not word.startswith("$"):
             flags.append(word)

@@ -219,8 +219,10 @@ def test_the_w5_control_is_make_room_as_v03_built_it() -> None:
     cache = "%h/leaseholder/cache/make-room-v03"
     rename = f"ExecStartPre=/bin/mv -f {cache}/lh_make_room_scheduler.py {cache}/lh_make_room_v03_scheduler.py\n"
     assert rest.count(rename) == 1
+    # Like every engine since, it serves on its socket.
     v03 = (
         rest.replace(rename, "")
+        .replace(" --uds ${LH_ENGINE_SOCKET}", "")
         .replace("lh_make_room_v03_scheduler", "lh_make_room_scheduler")
         .replace("make-room-v03", "make-room")
     )
@@ -484,7 +486,10 @@ def write_variant(variants: Path, name: str, command: str) -> Path:
     return variants
 
 
-VLLM_SERVE = "%h/leaseholder/venvs/engine/bin/vllm serve --config %h/leaseholder/src/engine.yaml"
+VLLM_SERVE = (
+    "%h/leaseholder/venvs/engine/bin/vllm serve --config %h/leaseholder/src/engine.yaml "
+    "--uds ${LH_ENGINE_SOCKET}"
+)
 MAKE_ROOM = {"max_preemptions_per_step": 2, "budget_cap": True, "reserve_tokens": 2048}
 MAKE_ROOM_CLS = "lh_make_room_scheduler.AsyncScheduler"
 
