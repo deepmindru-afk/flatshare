@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -316,6 +317,17 @@ class Listeners:
         (self.proc / pid / "cmdline").write_bytes(command.replace(" ", "\0").encode())
         return f'users:(("python3",pid={pid},fd=3))'
 
+    def manager(self) -> str:
+        """The user manager, systemd --user, which holds socket units' sockets; returns ss's note of it."""
+        self.pids += 1
+        pid = str(1000 + self.pids)
+        (self.proc / pid).mkdir(parents=True)
+        (self.proc / pid / "cgroup").write_text(
+            "0::/user.slice/user-1007.slice/user@1007.service/init.scope\n"
+        )
+        (self.proc / pid / "cmdline").write_bytes(b"/lib/systemd/systemd\0--user")
+        return f'users:(("systemd",pid={pid},fd=40))'
+
     def tcp(self, address: str, unit: str | None, command: str = "vllm serve") -> None:
         held = self.process(unit, command) if unit else ""  # ss shows no process of another user's
         self.inet.append(f"tcp LISTEN 0 4096 {address} 0.0.0.0:* {held}")
@@ -394,6 +406,25 @@ def test_the_audit_allows_the_gateways_port_and_an_sglang_engine_on_loopback(
     ]
 
 
+def test_the_audit_takes_the_user_managers_hold_on_the_gateways_port_for_lh_gateway_socket(
+    tmp_path: Path,
+) -> None:
+    host = Listeners(tmp_path)
+    # lh-gateway.socket's port, held by the user manager and the gateway that inherited it; then by the manager
+    # alone, while no gateway runs. Both are the gateway's.
+    gateway = host.process("lh-gateway.service", "lh-gateway --config gateway.toml")
+    both = f"{host.manager()[:-1]},{gateway.removeprefix('users:(')}"
+    host.inet.append(f"tcp LISTEN 0 1024 127.0.0.1:18080 0.0.0.0:* {both}")
+    host.socket(f"{host.runtime}/lh/gateway.sock", "lh-gateway.service")
+    assert host.audit().returncode == 0
+    host.inet = [f"tcp LISTEN 0 1024 127.0.0.1:18080 0.0.0.0:* {host.manager()}"]
+    done = host.audit()
+    assert done.returncode == 0, done.stderr
+    # Another socket unit of the user's, elsewhere, is not ours to judge.
+    host.inet.append(f"tcp LISTEN 0 128 127.0.0.1:9100 0.0.0.0:* {host.manager()}")
+    assert host.audit().returncode == 0
+
+
 def test_the_audit_fails_when_another_user_holds_the_gateways_port(tmp_path: Path) -> None:
     host = Listeners(tmp_path)
     host.tcp("127.0.0.1:18080", None)
@@ -403,6 +434,22 @@ def test_the_audit_fails_when_another_user_holds_the_gateways_port(tmp_path: Pat
         "audit-listeners: 127.0.0.1:18080 is held by a process that is not lh-gateway.service's: "
         "another user's?\n"
     )
+
+
+def test_the_gateways_socket_unit_listens_where_gateway_toml_does() -> None:
+    systemd = DEPLOY / "cyan" / "systemd"
+    socket = (systemd / "lh-gateway.socket").read_text()
+    listens = {
+        line.partition("=")[2] for line in socket.splitlines() if line.startswith("ListenStream=")
+    }
+    example = tomllib.loads((DEPLOY / "cyan" / "gateway.example.toml").read_text())
+    entries = {entry.get("tcp") or entry["unix"] for entry in example["listen"]}
+    # The gateway refuses an inherited socket that no [[listen]] entry names; %t is cyan's /run/user/1007.
+    assert {listen.replace("%t", "/run/user/1007") for listen in listens} == entries
+    service = (systemd / "lh-gateway.service").read_text()
+    for line in ("Type=notify", "Requires=lh-gateway.socket"):
+        assert line in service.splitlines(), line
+    assert "lh-gateway.socket" in exec_lines(service, "After")[0].split()
 
 
 def exec_lines(text: str, key: str) -> list[str]:

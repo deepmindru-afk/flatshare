@@ -5,7 +5,9 @@ A process of ours runs in a unit named lh-*.service (its cgroup, as gpu-guard te
 work). Over TCP and UDP such a process may listen only where ALLOWED says, on loopback: the gateway's port on cyan, and
 an SGLang engine (the sglang variant), which serves no Unix socket. Its Unix sockets must be under $XDG_RUNTIME_DIR,
 which only this user may enter, and $XDG_RUNTIME_DIR/lh must be 0700. A listener on an allowed address that is not
-ours holds our place for another user and fails too, and so does each SOCKET given that nobody listens on. `ss` names
+ours holds our place for another user and fails too, and so does each SOCKET given that nobody listens on. The user
+manager (systemd --user) holds the sockets of socket units, the gateway's (lh-gateway.socket) among them, also while
+no gateway runs: on an allowed address, its socket is the unit's. `ss` names
 only this user's processes, so the audit runs as the deployment's user, in the host's network namespace: the voice
 plane's namespace on cyan has no route in, and its listeners do not show. deploy/phastform/smoke.sh runs it on a GPU
 node, and deploy/deploy.sh after each install.
@@ -24,6 +26,8 @@ from pathlib import Path
 PROC = Path(os.environ.get("LH_AUDIT_PROC", "/proc"))
 """Where the processes' cgroups are read (a test sets another)."""
 UNIT = re.compile(r"/(lh-[A-Za-z0-9@._-]+\.service)$")
+MANAGER = re.compile(r"/user@\d+\.service/init\.scope$")
+"""The cgroup of the user manager itself."""
 ALLOWED = {"lh-gateway.service": {"127.0.0.1:18080"}}
 """The TCP and UDP listeners each unit may have: the gateway's, for AIPerf and the agents, with their keys."""
 LOOPBACK = re.compile(r"^(127\.\d+\.\d+\.\d+|\[::1\]|localhost)(%\w+)?:\d+$")
@@ -39,6 +43,14 @@ def unit_of(pid: str) -> str | None:
         if match := UNIT.search(line):
             return match.group(1)
     return None
+
+
+def is_manager(pid: str) -> bool:
+    try:
+        cgroup = (PROC / pid / "cgroup").read_text()
+    except OSError:
+        return False
+    return any(MANAGER.search(line) for line in cgroup.splitlines())
 
 
 def is_sglang(pid: str) -> bool:
@@ -84,6 +96,10 @@ def main(argv: list[str]) -> int:
     held: dict[str, set[str]] = {}
     for kind, address, pids in listeners("-lntup"):
         units = {unit for unit in map(unit_of, pids) if unit}
+        if any(map(is_manager, pids)):
+            # A socket unit's: the address is held for the unit it starts. Another of the user's socket units
+            # is not ours to judge.
+            units |= {unit for unit, allowed in ALLOWED.items() if address in allowed}
         held.setdefault(address, set()).update(units)
         for unit in sorted(units):
             ours["tcp"] += 1

@@ -22,7 +22,9 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
-use lh_gateway::{AcceptedEvent, Config, EventSink, ListenAddr, LogSink, MetricsReader, Server};
+use lh_gateway::{
+    AcceptedEvent, Config, EventSink, Inherited, ListenAddr, LogSink, MetricsReader, Server,
+};
 use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -469,6 +471,17 @@ pub fn upstream_toml(upstream: &str, socket: &std::path::Path, top: &str) -> Str
     format!("\nupstream = \"{upstream}\"\n{}", harness_toml(socket, top))
 }
 
+/// The test configuration with its TCP listener on `tcp` instead of a port of its own.
+pub fn listeners_toml(
+    upstream: &str,
+    tcp: SocketAddr,
+    socket: &std::path::Path,
+    top: &str,
+) -> String {
+    let toml = upstream_toml(upstream, socket, top);
+    toml.replace("tcp = \"127.0.0.1:0\"", &format!("tcp = \"{tcp}\""))
+}
+
 /// The test configuration of a gateway on GPU nodes instead of one upstream: `tables` holds `[nodes.<name>]`,
 /// `[placement]` and any other table.
 pub fn nodes_toml(socket: &std::path::Path, tables: &str) -> String {
@@ -535,7 +548,16 @@ impl Gateway {
     }
 
     pub async fn from_config(config: Config, sink: Arc<dyn EventSink>) -> Self {
-        let server = Server::bind(config, sink).await.unwrap();
+        Self::from_server(Server::bind(config, sink).await.unwrap())
+    }
+
+    /// A gateway that takes its listeners from `inherited` where it can, as from systemd's socket activation.
+    pub async fn from_inherited(config: Config, inherited: Inherited) -> Self {
+        let server = Server::bind_with(config, Arc::new(LogSink), inherited);
+        Self::from_server(server.await.unwrap())
+    }
+
+    fn from_server(server: Server) -> Self {
         let mut targets = server
             .local_addrs()
             .unwrap()

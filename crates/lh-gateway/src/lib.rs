@@ -34,8 +34,10 @@ mod proxy;
 mod realtime;
 mod sanitize;
 mod server;
+pub mod systemd;
 mod usage;
 
 pub use config::{Config, ConfigError, ListenAddr};
 pub use events::{AcceptedEvent, EventSink, LogSink};
 pub use server::{MetricsReader, Server};
+pub use systemd::Inherited;

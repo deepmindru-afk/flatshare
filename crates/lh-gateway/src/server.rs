@@ -27,6 +27,7 @@ use crate::exchange::Exchange;
 use crate::metrics::{Metrics, Route};
 use crate::placement::{self, Node, Placement};
 use crate::proxy::{self, Upstream};
+use crate::systemd::Inherited;
 
 /// `GET /ready` succeeds while the upstream's `/health` has answered within this window.
 const READY_WINDOW: Duration = Duration::from_secs(1);
@@ -132,7 +133,9 @@ pub(crate) struct App {
 pub struct Server {
     shared: Arc<Shared>,
     listeners: Vec<(Listener, Option<usize>)>,
-    /// Removed when the server stops.
+    /// How many of them it inherited.
+    inherited: usize,
+    /// The socket files it bound itself, removed when the server stops; an inherited socket's stays.
     sockets: Vec<SocketFile>,
     drain_timeout: Duration,
 }
@@ -147,21 +150,50 @@ impl Server {
     /// Binds every configured listener; nothing is served until [`Server::run`]. Accepted lifecycle events go
     /// to `sink`.
     pub async fn bind(config: Config, sink: Arc<dyn EventSink>) -> io::Result<Self> {
+        Self::bind_with(config, sink, Inherited::default()).await
+    }
+
+    /// Takes each configured listener from `inherited`, the socket of the same address, and binds the others. A
+    /// socket that no listener names is an error: nothing would accept on it.
+    pub async fn bind_with(
+        config: Config,
+        sink: Arc<dyn EventSink>,
+        mut inherited: Inherited,
+    ) -> io::Result<Self> {
         let tenants = Tenants::new(&config.tenants, &config.cache_salt_secret);
         let mut listeners = Vec::with_capacity(config.listeners.len());
         let mut sockets = Vec::new();
-        for listen in &config.listeners {
+        let given = inherited.len();
+        // Every inherited socket is matched before anything is bound, so that a start that fails changes nothing.
+        let taken: Vec<_> = config
+            .listeners
+            .iter()
+            .map(|listen| match &listen.addr {
+                ListenAddr::Tcp(addr) => (inherited.take_tcp(*addr), None),
+                ListenAddr::Unix(path) => (None, inherited.take_unix(path)),
+            })
+            .collect();
+        inherited.none_left()?;
+        for (listen, taken) in config.listeners.iter().zip(taken) {
             let tenant = listen
                 .tenant
                 .as_deref()
                 .and_then(|name| tenants.index(name));
-            let listener = match &listen.addr {
-                ListenAddr::Tcp(addr) => Listener::Tcp(
+            let listener = match (&listen.addr, taken) {
+                (ListenAddr::Tcp(_), (Some(listener), _)) => {
+                    listener.set_nonblocking(true)?;
+                    Listener::Tcp(TcpListener::from_std(listener)?)
+                }
+                (ListenAddr::Tcp(addr), _) => Listener::Tcp(
                     TcpListener::bind(addr)
                         .await
                         .map_err(|e| context(e, addr))?,
                 ),
-                ListenAddr::Unix(path) => {
+                (ListenAddr::Unix(path), (_, Some(listener))) => {
+                    listener.set_nonblocking(true)?;
+                    Listener::Unix(UnixListener::from_std(listener)?, path.clone())
+                }
+                (ListenAddr::Unix(path), _) => {
                     let (listener, file) = bind_unix(path).await?;
                     sockets.push(file);
                     Listener::Unix(listener, path.clone())
@@ -217,6 +249,7 @@ impl Server {
         Ok(Self {
             shared: Arc::new(shared),
             listeners,
+            inherited: given,
             sockets,
             drain_timeout: config.drain_timeout,
         })
@@ -240,8 +273,8 @@ impl Server {
     }
 
     /// Serves until `shutdown` completes, then stops accepting and lets in-flight requests finish for up to the
-    /// drain timeout, except background ones, which are cut `background_drain_s` into the drain. Unix socket files
-    /// are removed before it returns.
+    /// drain timeout, except background ones, which are cut `background_drain_s` into the drain. The socket files
+    /// it bound itself are removed before it returns.
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let shared = &self.shared;
         let admission = shared.nodes[0].admission.as_ref();
@@ -251,6 +284,7 @@ impl Server {
             None => tracing::info!(
                 upstream = %shared.nodes[0].upstream.addr(),
                 listeners = ?listeners,
+                inherited = self.inherited,
                 admission = ?admission,
                 "lh-gateway serving"
             ),
@@ -270,6 +304,7 @@ impl Server {
                     nodes = ?nodes,
                     placement = placement.policy().as_str(),
                     listeners = ?listeners,
+                    inherited = self.inherited,
                     admission = ?admission,
                     "lh-gateway serving"
                 );

@@ -1,5 +1,7 @@
-//! `lh-gateway --config <file>`: serve until SIGTERM or SIGINT, then drain in-flight requests and exit 0.
-//! A configuration error exits 2; a listener that cannot bind exits 1.
+//! `lh-gateway --config <file>`: serve until SIGTERM or SIGINT, then drain in-flight requests and exit 0. The
+//! listening sockets systemd passes (`LISTEN_FDS`, socket activation) are served instead of binding new ones, and
+//! `READY=1` goes to `NOTIFY_SOCKET` once the gateway is about to serve. A configuration error exits 2; a listener
+//! that cannot bind, or an inherited socket that no listener names, exits 1.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -8,7 +10,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use lh_gateway::config::{LogFormat, LogLevel};
-use lh_gateway::{Config, LogSink, Server};
+use lh_gateway::{Config, Inherited, LogSink, Server, systemd};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::filter::LevelFilter;
 
@@ -33,6 +35,14 @@ fn main() -> ExitCode {
         }
     };
     init_logging(config.log_format, config.log_level);
+    // Before the runtime's threads: reading LISTEN_FDS removes it from the environment.
+    let inherited = match Inherited::from_env() {
+        Ok(inherited) => inherited,
+        Err(err) => {
+            tracing::error!("cannot take the inherited sockets: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -52,8 +62,12 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        match Server::bind(config, Arc::new(LogSink)).await {
+        match Server::bind_with(config, Arc::new(LogSink), inherited).await {
             Ok(server) => {
+                // The listeners queue connections from here on, and run() accepts at once.
+                if let Err(err) = systemd::notify("READY=1") {
+                    tracing::warn!("cannot tell systemd the gateway is ready: {err}");
+                }
                 server.run(shutdown).await;
                 ExitCode::SUCCESS
             }

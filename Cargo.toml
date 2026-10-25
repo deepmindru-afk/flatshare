@@ -13,6 +13,7 @@ repository = "https://github.com/StevenWang-CY/leaseholder"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+command-fds = "0.3"
 futures-util = { version = "0.3", default-features = false }
 getrandom = "0.4"
 hmac = "0.13"
@@ -23,6 +24,7 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 lh-core = { path = "crates/lh-core" }
 lh-proto = { path = "crates/lh-proto" }
+listenfd = "1"
 memchr = "2"
 prometheus-client = "0.25"
 schemars = "1"
