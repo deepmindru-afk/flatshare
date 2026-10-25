@@ -100,17 +100,20 @@ test-python:
 
 # make-room's cost per step: Scheduler.schedule() on CPU with the switches off and at the PRs' values, in the 13 steady
 # states of the PRs' cost tables (tests/perf_schedule.py; 10 minutes on a 2.1 GHz Xeon, its negative control included).
-# It prints the table, writes PERF_OUT, fails a state whose on/off grew past benchmarks/perf/make-room-schedule.json's
-# tolerance (measured again first), and then runs the check's negative control. UPDATE=1 measures a new baseline in that file's place
-# (PERF_BESIDE: what else ran on the machine).
-PERF_BASELINE := benchmarks/perf/make-room-schedule.json
+# It prints the table, writes PERF_OUT, fails a state whose on/off grew past PERF_BASELINE's tolerance (measured again
+# first), and then runs the check's negative control against the same baseline. UPDATE=1 measures a new baseline into
+# PERF_BASELINE instead and needs PERF_BESIDE, what else ran on the machine. The tracked baseline is peacock's: another
+# machine's goes under build/ (PERF_BASELINE=build/perf-baseline.json), for this machine's checks.
+PERF_BASELINE ?= benchmarks/perf/make-room-schedule.json
 PERF_OUT ?= build/perf-make-room.json
 perf-make-room: $(VLLM_SRC)
-	@test -n "$(TORCH_PYTHON)" || { echo "usage: make perf-make-room TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies> [UPDATE=1]" >&2; exit 2; }
+	@test -n "$(TORCH_PYTHON)" || { echo "usage: make perf-make-room TORCH_PYTHON=<a python with CPU torch 2.13 and vLLM 0.32.0's dependencies> [PERF_BASELINE=FILE] [UPDATE=1 PERF_BESIDE=TEXT]" >&2; exit 2; }
+	@if [ "$(filter 1,$(UPDATE))" = 1 ] && [ -z "$(strip $(PERF_BESIDE))" ]; then \
+	  echo "make perf-make-room UPDATE=1 needs PERF_BESIDE=<what else ran on the machine>" >&2; exit 2; fi
 	cd python/leaseholder_vllm && VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) tests/perf_schedule.py \
-	  $(if $(UPDATE),baseline $(abspath $(PERF_BASELINE)) --beside "$(PERF_BESIDE)",check $(abspath $(PERF_BASELINE)) --out $(abspath $(PERF_OUT)))
-	cd python/leaseholder_vllm && LH_PERF=1 VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) $(TORCH_PYTHON) -m pytest -q -s -p no:cacheprovider \
-	  tests/test_perf_control.py
+	  $(if $(filter 1,$(UPDATE)),baseline $(abspath $(PERF_BASELINE)) --beside "$(PERF_BESIDE)",check $(abspath $(PERF_BASELINE)) --out $(abspath $(PERF_OUT)))
+	cd python/leaseholder_vllm && LH_PERF=1 LH_PERF_BASELINE=$(abspath $(PERF_BASELINE)) VLLM_TARGET_DEVICE=cpu PYTHONPATH=$(VLLM_SRC) \
+	  $(TORCH_PYTHON) -m pytest -q -s -p no:cacheprovider tests/test_perf_control.py
 
 # Whether #63350 and #63351 merge into vLLM's main and, with TORCH_PYTHON (an interpreter for vLLM main's scheduler and
 # tests), pass their tests there on CPU; and whether make-room's patches apply to vLLM's newest release. It keeps a

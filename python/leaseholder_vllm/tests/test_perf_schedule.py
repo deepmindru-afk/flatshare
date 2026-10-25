@@ -3,6 +3,7 @@ baseline, and, on vLLM's real scheduler, that each steady state is steady and ru
 here times anything: tests/test_perf_control.py, the check's negative control, does, under make perf-make-room."""
 
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -221,6 +222,36 @@ def test_a_python_without_torch_or_vllms_scheduler_is_told_why():
 def test_a_measuring_process_that_fails_means_it_could_not_measure(tmp_path):
     with pytest.raises(P.CannotMeasure, match="A16: its measuring process failed"):
         P.run(tmp_path / "no-such-module.py", str(tmp_path), [P.BY_KEY["A16"]], ["off"], 1)
+
+
+def test_a_baseline_without_what_ran_beside_it_is_refused_before_anything_is_written(tmp_path):
+    out = tmp_path / "baseline.json"
+    for beside in ([], ["--beside", ""], ["--beside", "  "]):
+        proc = script("baseline", str(out), *beside)
+        assert proc.returncode == 2 and "needs --beside" in proc.stderr, proc.stderr
+    assert not out.exists()
+
+
+def test_the_control_checks_against_the_baseline_make_passes_it(tmp_path):
+    code = "import test_perf_control as C; print(C.BASELINE)"
+    env = os.environ | {"LH_PERF_BASELINE": str(tmp_path / "mine.json")}
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(P.__file__).parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.stdout.strip() == str(tmp_path / "mine.json"), proc.stderr
+    env.pop("LH_PERF_BASELINE")
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(P.__file__).parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.stdout.strip() == str(BASELINE), proc.stderr
 
 
 def test_the_checked_in_baseline_is_complete_and_its_numbers_agree():

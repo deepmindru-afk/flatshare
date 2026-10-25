@@ -575,6 +575,10 @@ def command() -> int:
     if unknown:
         raise CannotMeasure(f"no state {', '.join(unknown)}; the states are {', '.join(BY_KEY)}")
     states = [BY_KEY[key] for key in args.states.split(",")]
+    if args.command == "baseline" and not args.beside.strip():
+        raise CannotMeasure(
+            "a baseline needs --beside: what else ran on the machine as it was measured"
+        )
     baseline = read_baseline(args.baseline) if args.command == "check" else None
     why = importable(["pytest", "torch", "vllm.v1.core.sched.scheduler"])
     if why:

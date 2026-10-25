@@ -20,7 +20,11 @@ pytestmark = pytest.mark.skipif(
     not os.environ.get("LH_PERF"), reason="it times the scheduler: make perf-make-room runs it"
 )
 
-BASELINE = Path(__file__).resolve().parents[3] / "benchmarks/perf/make-room-schedule.json"
+# The baseline the check ran against: make passes its PERF_BASELINE; by default, the checked-in one.
+BASELINE = Path(
+    os.environ.get("LH_PERF_BASELINE")
+    or Path(__file__).resolve().parents[3] / "benchmarks/perf/make-room-schedule.json"
+)
 SLOWER = (
     (  # give up before counting growth: never
         "            num_blocks_short > 0\n            and not self.need_mamba_block_aligned_split\n",
