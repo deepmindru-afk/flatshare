@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import itertools
 import json
 import threading
 import time
@@ -355,3 +356,26 @@ def test_an_unanswered_interruption_fails_the_turn_and_keeps_its_reply(
     assert summary["errors"] == 1
     assert (summary["v2v_ms"]["n"], summary["v2v_ms"]["censored"]) == (2, 1)
     assert summary["v2v_ms"]["p99"] == pytest.approx(500.0, abs=5)
+
+
+def test_the_callers_join_their_rooms_a_stagger_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # LiveKit's dispatcher dropped the job of a room created within milliseconds of the others' (W5's calls per GPU,
+    # six callers: "no workers with sufficient capacity", and it does not retry), so caller-1 waited for an agent
+    # that never came. The callers join one stagger apart.
+    joined: list[tuple[int, float]] = []
+
+    async def call(self: Caller, rows: list[dict[str, Any]], log: Any) -> None:
+        joined.append((self.index, time.monotonic()))
+
+    monkeypatch.setattr(bots.Caller, "call", call)
+    monkeypatch.setattr(bots, "Corpus", lambda _: SimpleNamespace(turns=[], barge_ins=[]))
+    monkeypatch.setattr(bots, "summarize", lambda *_: {})
+    monkeypatch.setattr(bots, "JOIN_STAGGER_S", 0.05, raising=False)
+    config = dataclasses.replace(BotsConfig("ws://fake", "key", "secret", tmp_path), callers=6)
+    asyncio.run(bots.run_bots(config, tmp_path / "out"))
+    order = [index for index, _ in sorted(joined, key=lambda j: j[1])]
+    assert order == list(range(6))
+    starts = [at for _, at in sorted(joined, key=lambda j: j[1])]
+    assert all(b - a >= 0.045 for a, b in itertools.pairwise(starts)), starts
