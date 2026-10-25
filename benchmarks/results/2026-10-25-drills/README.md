@@ -20,8 +20,8 @@ listings keep only this project's files (the host's other users' are cut).
 | `w6-start-box/` | `ops/drills/cold-start.sh box`: `systemctl --user restart leaseholder.target`, the STT and TTS, then the engine | `report.txt` (each unit's phases), each unit's journal |
 
 What the records do not show:
-- **A gateway restart's outage.** The drill's client runs its streams, then its probe, so the gateway-restart probe
-  started once the drain had let every stream finish, and succeeded at once. Requests sent during the drain fail, and
+- **W8's gateway restart's outage (`gateway-restart/`).** The drill's client runs its streams, then its probe, so the
+  gateway-restart probe started once the drain had let every stream finish, and succeeded at once. Requests sent during the drain fail, and
   none was. `requests-after-2s.txt` was taken 2 s after `systemctl restart` returned, which was after the drain (about
   25 s after the event).
 - **W8's box start.** W8's `cold-start.sh box` restarted the engine alone (the audio servers' stops were
