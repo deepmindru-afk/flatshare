@@ -382,6 +382,74 @@ def test_a_unit_whose_main_process_exits_leaves_no_process_of_its_group(host: di
                 os.kill(pid, signal.SIGKILL)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="a subreaper (Linux)")
+def test_a_unit_restarts_at_once_where_nothing_reaps_its_orphans(host: dict) -> None:
+    # A unit's process whose parent exits before it goes to the nearest subreaper: lh-svc's runner, as systemd's
+    # manager for its units. It went to init, which in a container may reap none (`sleep infinity`): a zombie, it
+    # stayed a member of its group, which a restart waits to be gone, so that every exit of the main process waited
+    # out TimeoutStopSec and 30 s more. Here the runners are the children of a subreaper that reaps none of them.
+    children = host["tmp"] / "children"
+    (host["units"] / "orphans.service").write_text(
+        "[Service]\n"
+        f"ExecStart=/bin/sh -c 'sleep 30 & echo $! >> {children}; sleep 0.3; exit 1'\n"
+        "Restart=on-failure\nRestartSec=0.1\nStartLimitBurst=2\nTimeoutStopSec=20\n"
+    )
+    init = (
+        "import ctypes, subprocess, sys, time\n"
+        "assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER\n"
+        "print(subprocess.run(sys.argv[1:]).returncode, flush=True)\n"
+        "time.sleep(120)  # reaping none of the orphans it adopts\n"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, "-c", init, "systemctl", "--user", "start", "orphans.service"],
+        env=os.environ | host["env"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert parent.stdout is not None and parent.stdout.readline().strip() == "0"
+        deadline = time.monotonic() + 15
+        while ctl(host, "--user", "is-failed", "orphans.service").stdout.strip() != "failed":
+            assert time.monotonic() < deadline, "a restart waited out TimeoutStopSec for a zombie"
+            time.sleep(0.1)
+        pids = [int(pid) for pid in children.read_text().split()]
+        assert len(pids) == 2, pids  # StartLimitBurst
+        assert not [pid for pid in pids if Path(f"/proc/{pid}").exists()]  # reaped, by the runner
+        # Each main process's status, which its own wait reads, untouched by the reaping (a status taken reads 0).
+        journal = ctl(host, "-u", "orphans", "-o", "cat", tool="journalctl").stdout
+        assert journal.count("Main process exited, status=1") == 2, journal
+    finally:
+        ctl(host, "--user", "stop", "orphans.service")
+        parent.kill()
+        parent.wait()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="a subreaper (Linux)")
+def test_a_runner_reaps_the_orphans_it_adopts_and_no_process_it_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The runner reaps what it adopts, by pid, and leaves what it started to its Popen, which reads its status: a
+    # status the reaping took would read 0, and a failed main process would not restart (Restart=on-failure). This
+    # test's own children stand in for both, the orphan the older, both exited when the runner reaps.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    lh_svc = _module("lh_svc", BIN / "lh-svc")
+    runner = lh_svc.Runner("reaps.service")
+    runner.subreaper = True  # as run() makes it
+    orphan = os.posix_spawn(
+        sys.executable, [sys.executable, "-c", "raise SystemExit(4)"], os.environ
+    )
+    started, _ = runner.spawn(
+        lh_svc.Unit("reaps.service", []), f"{sys.executable} -c 'raise SystemExit(3)'", {}
+    )
+    for pid in (orphan, started.pid):
+        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)  # it has exited, and is left unreaped
+    runner.reap()
+    with pytest.raises(ChildProcessError):
+        os.waitpid(orphan, os.WNOHANG)  # reaped
+    assert started.wait(timeout=5) == 3
+
+
 def test_a_start_whose_server_dies_fails_at_once_not_at_its_timeout(host: dict) -> None:
     # As the GPU units: ExecStartPost waits for the server with wait-healthy --pid=${MAINPID}, which lh-svc sets for
     # its control commands as systemd does; a server that dies in its start fails the start in seconds.

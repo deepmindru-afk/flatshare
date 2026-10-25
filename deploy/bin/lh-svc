@@ -30,7 +30,10 @@ LH_SVC_UNIT=UNIT in their environment where systemd would put them in the unit's
 the unit's journal with UTC times, restarts it as Restart says and stops it on SIGTERM. When the main process
 exits on its own, what is left of its group is ended as a stop ends it (KillSignal, then SIGKILL after
 TimeoutStopSec) before ExecStopPost and any restart, as systemd ends what is left of the unit's cgroup: an engine
-core that outlived its server would otherwise hold the GPU, and the restart's gpu-guard refuse to start beside it. `start` returns
+core that outlived its server would otherwise hold the GPU, and the restart's gpu-guard refuse to start beside it. On
+Linux the runner is the subreaper of the unit's processes, and reaps those whose parent exited before them, as systemd's
+manager does: left to init, which in a container may reap none, each would stay a member of its group as a zombie, and
+every restart and stop would wait out TimeoutStopSec and more. `start` returns
 once a unit's ExecStartPost commands have succeeded, as systemd's does, and fails as systemd's does when it cannot;
 `stop` returns only once every process it stops has exited: the unit's own (ExecStop, then KillSignal, then SIGKILL
 after TimeoutStopSec, the signals and ExecStopPost also when ExecStop fails or cannot run, the unit then ending
@@ -44,6 +47,7 @@ it before any venv exists. Linux applies CPUAffinity; elsewhere (the tests' host
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import fcntl
 import json
 import os
@@ -430,6 +434,20 @@ class Notify:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+PR_SET_CHILD_SUBREAPER = 36
+"""prctl(2)'s option (Linux): a process whose parent exits goes to its nearest subreaper ancestor, not to init."""
+
+
+def subreaper() -> bool:
+    """Make this process a subreaper, as systemd's manager is of its units' processes; whether it now is (Linux only:
+    elsewhere every orphan goes to init)."""
+    if sys.platform != "linux":
+        return False
+    with contextlib.suppress(OSError, AttributeError):
+        return ctypes.CDLL(None).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0
+    return False
+
+
 class Runner:
     def __init__(self, name: str) -> None:
         self.name = unit_name(name)
@@ -438,6 +456,10 @@ class Runner:
         self.main: subprocess.Popen | None = None
         self.stop_failed = False
         """Whether the last stop's ExecStop failed: the unit then ends failed, not inactive."""
+        self.subreaper = False
+        """Whether the unit's orphans are this runner's to reap: on Linux, once run() has made it their subreaper."""
+        self.spawned: list[subprocess.Popen] = []
+        """The processes spawn() started that their Popens have yet to reap, which reap() leaves to them."""
 
     def say(self, message: str) -> None:
         self.journal.write(os.getpid(), f"lh-svc: {message}")
@@ -473,8 +495,26 @@ class Runner:
             )
         except OSError as exc:
             raise ServiceError(f"{argv[0]}: {exc}") from None
+        # Those their Popens have reaped leave the list: an orphan may hold their pids now.
+        self.spawned = [p for p in self.spawned if p.returncode is None] + [process]
         self.journal.relay(process.stdout, process.pid)
         return process, ignore
+
+    def reap(self) -> None:
+        """Reap the unit's processes that have exited and that this runner adopted as their subreaper, as systemd's
+        manager reaps a unit's: a zombie stays a member of its group, which a restart or a stop waits to be gone.
+        Each by its pid, and never one that spawn() started: its Popen reads its status."""
+        if not self.subreaper:
+            return
+        while True:
+            try:  # the first child that has exited, left waitable
+                info = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                return  # no child at all
+            # None has exited; or the first is spawn()'s, which waitid gives again until its Popen reaps it.
+            if info is None or info.si_pid in {p.pid for p in self.spawned if p.returncode is None}:
+                return
+            os.waitpid(info.si_pid, 0)
 
     def control(self, unit: Unit, key: str, env: dict[str, str], deadline: float) -> bool:
         """Run each of a unit's KEY commands to its end; False at the first that fails or outlasts the deadline."""
@@ -497,6 +537,11 @@ class Runner:
 
     def run(self) -> int:
         signal.signal(signal.SIGTERM, lambda *_: self.stop())
+        self.subreaper = subreaper()
+        if not self.subreaper and sys.platform == "linux":
+            self.say(
+                "not the subreaper of the unit's processes (prctl failed): their orphans go to init"
+            )
         starts: list[float] = []
         while True:
             unit = load(self.name)
@@ -566,6 +611,7 @@ class Runner:
         write_state(self.name, state="active", since=time.time())
         self.say(f"Started {self.name}")
         while self.main.poll() is None and not self.stopping.is_set():
+            self.reap()  # the orphans that exit while the unit runs, which would otherwise pile up as zombies
             self.stopping.wait(0.2)
         if self.stopping.is_set():
             write_state(self.name, state="deactivating")
@@ -624,7 +670,7 @@ class Runner:
                 kill_group(self.main.pid, signal.SIGKILL)
                 self.main.wait()
             timeout = 5.0
-        group_gone(self.main.pid, timeout)
+        group_gone(self.main.pid, timeout, self)
 
     def stop(self) -> None:
         self.stopping.set()
@@ -640,16 +686,19 @@ KILLED_GONE_S = 30.0
 (an engine core its GPU memory and /dev/shm region), and is gone once its parent has reaped it."""
 
 
-def group_gone(pgid: int | None, timeout: float) -> None:
+def group_gone(pgid: int | None, timeout: float, runner: Runner | None = None) -> None:
     """Wait for every process of the group ``pgid`` (the main process's own) to exit, SIGKILL what is left after
     ``timeout``, and wait for that to be gone too: a stop returns once the unit's processes have exited, as systemd's
-    once the unit's cgroup is empty, so that the next start does not meet the last one's engine still exiting."""
+    once the unit's cgroup is empty, so that the next start does not meet the last one's engine still exiting. The
+    unit's ``runner``, where it waits, reaps the members it adopted meanwhile."""
     if not pgid:
         return
 
     def wait(seconds: float) -> bool:
         deadline = time.time() + seconds
         while True:
+            if runner:
+                runner.reap()
             try:
                 os.killpg(pgid, 0)
             except ProcessLookupError:
