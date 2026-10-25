@@ -66,6 +66,7 @@ def _module(name: str, path: Path):
 
 profile = _module("lh_profile", REPO / "deploy" / "profile.py")
 analysis = _module("lh_a100_analysis", REPO / "benchmarks" / "a100" / "analysis.py")
+host_py = _module("lh_a100_host", REPO / "deploy" / "a100" / "host.py")
 
 
 class Engine(http.server.BaseHTTPRequestHandler):
@@ -319,3 +320,67 @@ def test_the_core_runs_in_order_resumes_after_each_stop_and_reads_back(
     ) in text
     assert "## 4. E2 within the A100\n\nThe measured running share" in text
     assert "- Not measured: no point's summary.json has a running share" in text
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="push.sh copies with rsync")
+def test_push_copies_the_corpora_as_files_that_outlive_the_workstations_paths(
+    tmp_path: Path,
+) -> None:
+    # deploy/a100/push.sh into a "host", a local directory (fakes/campaign/ssh runs its commands there; rsync is
+    # the real one): the source tree and the data, whose weka-x32-long is long_traces.py's links into the
+    # workstation's weka-x32 by absolute path. With the workstation's data moved away, every trace on the host is
+    # a file it can read, which the preflight's corpus row counts, an earlier push's links included.
+    repo = tmp_path / "repo"
+    (repo / "deploy" / "a100").mkdir(parents=True)
+    shutil.copy(REPO / "deploy" / "a100" / "push.sh", repo / "deploy" / "a100" / "push.sh")
+    (repo / "README.md").write_text("the source tree\n")
+    data = tmp_path / "workstation" / "data"
+    traces = data / "weka-x32"
+    traces.mkdir(parents=True)
+    for n in range(1, 5):
+        (traces / f"trace-{n}.json").write_text(json.dumps({"requests": [{"in": 1000 * n}]}))
+    long_traces = REPO / "benchmarks" / "e2" / "long_traces.py"
+    made = subprocess.run(
+        [sys.executable, str(long_traces), str(traces), str(data / "weka-x32-long"), "2"],
+        capture_output=True,
+        text=True,
+    )
+    assert made.returncode == 0, made.stderr
+    assert all(p.is_symlink() for p in (data / "weka-x32-long").iterdir())
+    (data / "callers").mkdir()
+    (data / "callers" / "manifest.json").write_text(json.dumps({"hello": {"kind": "turn"}}))
+    (data / "callers" / "hello.wav").write_bytes(b"RIFF")
+    hosts = tmp_path / "hosts"
+    root = hosts / "a100" / "leaseholder"
+    # An earlier copy, as rsync -a makes one: the links as links.
+    (root / "data").mkdir(parents=True)
+    old = subprocess.run(
+        ["rsync", "-a", str(data / "weka-x32-long"), f"{root / 'data'}/"],
+        capture_output=True,
+        text=True,
+    )
+    assert old.returncode == 0, old.stderr
+    assert all(p.is_symlink() for p in (root / "data" / "weka-x32-long").iterdir())
+    env = {k: v for k, v in os.environ.items() if k != "LH_GATEWAY_BIN"} | {
+        "FAKE_HOSTS": str(hosts),
+        "LH_SSH": str(FAKES / "campaign" / "ssh"),
+        "LH_DATA": str(data),
+    }
+    pushed = subprocess.run(
+        ["bash", str(repo / "deploy" / "a100" / "push.sh"), "a100"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert pushed.returncode == 0, pushed.stdout + pushed.stderr
+    assert (root / "src" / "README.md").read_text() == "the source tree\n"
+    assert (root / "src" / "DEPLOYED").exists()
+    (tmp_path / "workstation").rename(tmp_path / "elsewhere")
+    long = sorted((root / "data" / "weka-x32-long").iterdir())
+    assert [p.name for p in long] == ["trace-3.json", "trace-4.json"]  # the two largest
+    for path in long:
+        assert not path.is_symlink() and json.loads(path.read_text())["requests"], path
+    check = host_py.data_check(root)
+    assert check.status == "ok", check
+    assert check.value == "weka-x32-long 2 traces, weka-x32 4 traces, callers 1 clips"

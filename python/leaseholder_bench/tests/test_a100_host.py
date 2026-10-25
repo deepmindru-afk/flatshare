@@ -11,6 +11,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import socketserver
 import stat
 import subprocess
@@ -371,6 +372,23 @@ def test_warm_starts_each_configuration_and_keeps_what_its_start_showed(
     assert host_py.configurations(configs) == [("14b", "qwen3-14b", ("--max-num-seqs", "64"))]
 
 
+def write_data(data: Path) -> None:
+    """The campaign's data as push.sh copies it: two traces of weka-x32, one of them in weka-x32-long, and the
+    callers' manifest and two clips, all files."""
+    for name, traces in (("weka-x32", (1, 2)), ("weka-x32-long", (2,))):
+        (data / name).mkdir(parents=True)
+        for n in traces:
+            (data / name / f"trace-{n}.json").write_text(
+                json.dumps({"requests": [{"in": 1000 * n}]})
+            )
+    (data / "callers").mkdir()
+    (data / "callers" / "manifest.json").write_text(
+        json.dumps({"hello": {"kind": "turn"}, "wait": {"kind": "barge_in"}})
+    )
+    for name in ("hello", "wait"):
+        (data / "callers" / f"{name}.wav").write_bytes(b"RIFF")
+
+
 def ready_host(tmp_path: Path, home: Path, engine: str, monkeypatch, host: dict) -> host_py.Node:
     """A node whose host has run every stage: warm starts, the JIT check, the models, data and binaries, the
     control plane up."""
@@ -401,8 +419,7 @@ def ready_host(tmp_path: Path, home: Path, engine: str, monkeypatch, host: dict)
         snapshot.mkdir(parents=True)
         (snapshot / "config.json").write_text("{}")
     monkeypatch.setenv("HF_HUB_CACHE", str(hub))
-    for name in ("weka-x32-long", "weka-x32", "callers"):
-        (root / "data" / name).mkdir(parents=True)
+    write_data(root / "data")
     for name in ("lh-gateway", "livekit-server"):
         script(root / "bin" / name, "echo 1.0")
     procfs = tmp_path / "proc"
@@ -459,9 +476,59 @@ def test_the_preflight_passes_a_ready_host_and_labels_what_the_card_changes(
     }
     assert {name for name, status in got.items() if status == "ok"} >= expected_ok, got
     assert "refused" not in got.values(), got
+    corpus = next(c for c in checks if c.check == "Corpus and callers")
+    assert corpus.value == "weka-x32-long 1 traces, weka-x32 2 traces, callers 2 clips"
     out = host_py.write_preflight(node, checks)
     data = json.loads(out.read_text())
     assert data["counts"]["degraded"] >= 1 and len(data["checks"]) == len(checks)
+
+
+def test_the_corpus_row_refuses_traces_that_do_not_resolve_on_this_host(
+    tmp_path: Path, venv: Path, engine: str, monkeypatch
+) -> None:
+    # weka-x32-long as long_traces.py makes it on a workstation: links to weka-x32's traces by their absolute
+    # paths. Copied as links, they dangle on the host, where AIPerf would fail on them at block 4's first agent
+    # point; the preflight refuses them, as it does an empty corpus and callers without their manifest.
+    node = ready_host(tmp_path, venv, engine, monkeypatch, facts())
+    data = venv / "leaseholder" / "data"
+    workstation = tmp_path / "workstation" / "data" / "weka-x32"
+    workstation.mkdir(parents=True)
+    for n in (1, 2):
+        (workstation / f"trace-{n}.json").write_text(json.dumps({"requests": [{"in": 1000 * n}]}))
+    long = data / "weka-x32-long"
+    (long / "trace-2.json").unlink()
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / "benchmarks" / "e2" / "long_traces.py"),
+            str(workstation),
+            str(long),
+            "2",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert done.returncode == 0, done.stderr
+
+    def corpus() -> host_py.Check:
+        checks = host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)
+        return next(c for c in checks if c.check == "Corpus and callers")
+
+    assert corpus().status == "ok"  # the workstation's paths still there
+    (tmp_path / "workstation").rename(tmp_path / "elsewhere")
+    row = corpus()
+    assert row.status == "refused", row
+    assert (
+        "weka-x32-long: 2 of 2 do not resolve to a readable file (trace-1.json, ...)" in row.value
+    )
+    assert "push.sh copies them, as files" in row.reason
+    for path in long.iterdir():
+        path.unlink()
+    (data / "callers" / "manifest.json").unlink()
+    row = corpus()
+    assert row.status == "refused"
+    assert "weka-x32-long: no traces (*.json)" in row.value
+    assert "callers: 1 of 3 do not resolve to a readable file (manifest.json)" in row.value
 
 
 def test_the_preflight_refuses_what_would_fail_the_smoke_tests_listener_audit(
@@ -604,8 +671,7 @@ def test_the_preflight_names_what_a_bare_container_lacks(
         'case "$*" in -L) printf "GPU 0: A100\\n  MIG 3g.20gb Device 0\\n  MIG 4g.20gb Device 1\\n" ;; esac',
     )
     script(Path(os.environ["PATH"].split(os.pathsep)[0]) / "systemctl", "exit 3")
-    for name in ("weka-x32",):
-        (root / "data" / name).rmdir()
+    shutil.rmtree(root / "data" / "weka-x32")
     (venv / "leaseholder" / "venvs" / "engine" / "bin" / "fail").write_text("torch")
     monkeypatch.setenv("HOME", str(venv))
     checks = host_py.preflight(node, gpu=True, home=venv, gateway_url=engine)

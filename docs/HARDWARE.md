@@ -68,7 +68,7 @@ The profile's "auto" values, in `deploy/profile.py`:
 | User namespaces | the kernel refuses them, under `lh-svc` (no user manager, or `LH_SUPERVISOR=lh-svc`): the voice plane in the host's network namespace, with the host's public addresses named (they must drop inbound UDP). The listener audit cannot attribute listeners to units under `lh-svc` (their processes' cgroups are the session's), so this path's check is the named addresses, not the audit | the kernel refuses them under systemd, where the voice plane's units would listen in the host's namespace, which `smoke.sh`'s listener audit refuses: allow unprivileged user namespaces first (Ubuntu 24.04: `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`), or, with no sudo, set `LH_SUPERVISOR=lh-svc` |
 | Listener audit | | no `ss` (iproute2), which `smoke.sh`'s audit ([`deploy/bin/audit-listeners`](../deploy/bin/audit-listeners)) reads; `bootstrap.sh` installs it where sudo and apt work |
 | Cores | below 17: the warning of R7 | |
-| Control plane, models, corpus and callers, binaries, disk | | down or missing |
+| Control plane, models, corpus and callers, binaries, disk | | down or missing; a corpus with no traces, or one that does not resolve to a file this user can read (a copy of `long_traces.py`'s links, which `push.sh` copies as files) |
 
 ## Single-host mode
 
@@ -87,7 +87,7 @@ None of these differs between the frozen engine and make-room on one host, so a 
 From the workstation, with the repository at the revision to run and the corpora and the callers' audio (`weka-x32`, `weka-x32-long`, `callers`) in `LH_DATA`:
 
 ```sh
-deploy/a100/push.sh USER@HOST            # the source tree (with DEPLOYED), the data; LH_GATEWAY_BIN to bring an lh-gateway
+deploy/a100/push.sh USER@HOST            # the source tree (with DEPLOYED), the data as files; LH_GATEWAY_BIN to bring an lh-gateway
 ```
 
 On the host, from the home directory:

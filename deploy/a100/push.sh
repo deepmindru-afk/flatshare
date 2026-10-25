@@ -18,8 +18,10 @@ rsync -a --delete -e "$ssh" --exclude .git --exclude .claude --exclude target --
   --exclude .venv --exclude .pytest_cache --exclude .ruff_cache "$repo/" "$host:leaseholder/src/"
 rev=$(git -C "$repo" describe --always --dirty 2>/dev/null || echo unknown)
 $ssh "$host" "echo $rev >leaseholder/src/DEPLOYED"
+# -L: as files, the links' targets. weka-x32-long is long_traces.py's links into this workstation's weka-x32 by
+# absolute path, which would dangle on the host; a copy that an earlier push made of the links is replaced.
 for name in weka-x32 weka-x32-long callers; do
-  rsync -a -e "$ssh" "$data/$name" "$host:leaseholder/data/"
+  rsync -aL -e "$ssh" "$data/$name" "$host:leaseholder/data/"
 done
 if [[ -n ${LH_GATEWAY_BIN:-} ]]; then
   rsync -a -e "$ssh" "$LH_GATEWAY_BIN" "$host:leaseholder/bin/lh-gateway"

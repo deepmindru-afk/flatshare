@@ -719,6 +719,50 @@ def _hf_snapshot(home: Path, model: str, revision: str) -> bool:
     return snapshot.is_dir() and any(snapshot.iterdir())
 
 
+DATA = {
+    "weka-x32-long": ("*.json", "traces"),
+    "weka-x32": ("*.json", "traces"),
+    "callers": ("*.wav", "clips"),
+}
+"""The campaign's data under ~/leaseholder/data (deploy/a100/push.sh copies them): each directory's files that the
+campaign reads, and what they are. The callers' corpus also needs its manifest.json (lh-voice bots reads it)."""
+
+
+def data_check(root: Path, data: dict[str, tuple[str, str]] | None = None) -> Check:
+    """The preflight's corpus row: every directory of ``data`` under ROOT/data holds its files, and each resolves to
+    a regular file this user can read. A copy of a workstation's links (long_traces.py links its traces by their
+    absolute paths) dangles here, and AIPerf would fail on it only at the first agent point, hours in."""
+    found, wrong = [], []
+    for name, (pattern, kind) in (DATA if data is None else data).items():
+        directory = root / "data" / name
+        if not directory.is_dir():
+            wrong.append(f"{name} missing")
+            continue
+        files = sorted(directory.glob(pattern))
+        if name == "callers":
+            files.append(directory / "manifest.json")
+        dangling = [f.name for f in files if not (f.is_file() and os.access(f, os.R_OK))]
+        if dangling:
+            wrong.append(
+                f"{name}: {len(dangling)} of {len(files)} do not resolve to a readable file ({dangling[0]}"
+                + (", ..." if len(dangling) > 1 else "")
+                + ")"
+            )
+        elif not files:
+            wrong.append(f"{name}: no {kind} ({pattern})")
+        else:
+            found.append(f"{name} {len(files) - (name == 'callers')} {kind}")
+    if wrong:
+        return Check(
+            "Corpus and callers",
+            "refused",
+            "; ".join(wrong),
+            "under ~/leaseholder/data: deploy/a100/push.sh copies them, as files (links into the workstation's paths "
+            "dangle here)",
+        )
+    return Check("Corpus and callers", "ok", ", ".join(found))
+
+
 def _yaml_model(path: Path) -> tuple[str, str] | None:
     try:
         text = path.read_text()
@@ -761,7 +805,7 @@ def preflight(
     node: Node,
     gpu: bool = False,
     home: Path | None = None,
-    data: tuple[str, ...] = ("weka-x32-long", "weka-x32", "callers"),
+    data: dict[str, tuple[str, str]] | None = None,
     gateway_url: str = GATEWAY_URL,
 ) -> list[Check]:
     """Every check, in docs/HARDWARE.md's order (the preflight)."""
@@ -1204,13 +1248,7 @@ def preflight(
         ", ".join(missing) if missing else "the engine's and the STT's at their revisions",
         "missing from the Hugging Face cache: bootstrap.sh stage downloads them" if missing else "",
     )
-    absent = [name for name in data if not (root / "data" / name).is_dir()]
-    add(
-        "Corpus and callers",
-        "refused" if absent else "ok",
-        ", ".join(absent) if absent else ", ".join(data),
-        "missing under ~/leaseholder/data: deploy/a100/push.sh copies them" if absent else "",
-    )
+    checks.append(data_check(root, data))
     binaries = []
     for name, args in (("lh-gateway", ["--version"]), ("livekit-server", ["--version"])):
         binary = root / "bin" / name
