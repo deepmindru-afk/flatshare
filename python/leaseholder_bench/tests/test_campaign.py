@@ -262,6 +262,10 @@ def test_pull_copies_a_single_hosts_results_and_runs(hosts: Hosts, tmp_path: Pat
     (home / "leaseholder" / "results" / "e2" / "core" / "campaign.log").write_text("done\n")
     (home / "leaseholder" / "runs" / "probes").mkdir(parents=True)
     (home / "leaseholder" / "runs" / "probes" / "kv.log").write_text("kv: priority-0 TTFT 140 ms\n")
+    (home / "leaseholder" / "node").mkdir()
+    (home / "leaseholder" / "node" / "preflight.json").write_text("{}\n")
+    (home / "leaseholder" / "cache").mkdir()
+    (home / "leaseholder" / "cache" / "warm.json").write_text('{"configurations": {}}\n')
     env = os.environ | {
         "PATH": f"{FAKES}{os.pathsep}{os.environ['PATH']}",
         "FAKE_HOSTS": str(hosts.root),
@@ -278,4 +282,9 @@ def test_pull_copies_a_single_hosts_results_and_runs(hosts: Hosts, tmp_path: Pat
     assert done.returncode == 0, done.stdout + done.stderr
     assert (out / "results" / "e2" / "core" / "campaign.log").read_text() == "done\n"
     assert (out / "runs" / "probes" / "kv.log").read_text().startswith("kv:")
+    # The node's records and the warm starts' come along; a cache file the host lacks is no failure.
+    assert (out / "node" / "preflight.json").read_text() == "{}\n"
+    assert (out / "cache" / "warm.json").exists() and not (
+        out / "cache" / "jit-check.json"
+    ).exists()
     assert "pull: a100 up to date" in (out / "pull.log").read_text()

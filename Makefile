@@ -17,7 +17,7 @@ E2_RESULTS := benchmarks/results/2026-10-23-e2
 E2_REPORT ?= build/reproduce-e2
 
 .PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-python schema metrics \
-  reproduce-e1 reproduce-calibration reproduce-e2 e2-figures forecast-a100 profiles
+  reproduce-e1 reproduce-calibration reproduce-e2 e2-figures forecast-a100 profiles reproduce-a100 check-a100-calibration
 
 check: lint test
 
@@ -109,6 +109,26 @@ forecast-a100:
 	@mkdir -p benchmarks/a100
 	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu a100-40gb --markdown benchmarks/a100/forecast.md >/dev/null
 	@ls benchmarks/a100/forecast.md
+
+# The A100 run's analysis (benchmarks/a100/analysis.py, DESIGN.md §6.2) from a single host's records as
+# deploy/a100/pull.sh copies them, and the 32x corpus, into build/reproduce-a100/a100.md, with the bench venv for E2's
+# report. check-a100-calibration first runs its calibration code on the box's W2 points (the calibration exports, as
+# reproduce-calibration takes them) and checks that it gives the box's rows. Usage: make reproduce-a100 RECORDS=<dir>
+# CORPUS=<dir>; make check-a100-calibration EXPORTS=<dir> CORPUS=<dir>.
+A100_REPORT ?= build/reproduce-a100
+reproduce-a100:
+	@test -n "$(RECORDS)" -a -n "$(CORPUS)" || \
+	  { echo "usage: make reproduce-a100 RECORDS=<the host's records> CORPUS=<the 32x corpus directory>" >&2; exit 2; }
+	cargo build --release --locked -p lh-sim
+	cd python/leaseholder_bench && uv run -q python ../../benchmarks/a100/analysis.py report $(abspath $(RECORDS)) \
+	  --corpus $(abspath $(CORPUS)) --lh-sim $(abspath $(E1_SIM)) --out $(abspath $(A100_REPORT)) --lh-bench lh-bench
+
+check-a100-calibration:
+	@test -n "$(EXPORTS)" -a -n "$(CORPUS)" || \
+	  { echo "usage: make check-a100-calibration EXPORTS=<the runs' exports> CORPUS=<the 32x corpus directory>" >&2; exit 2; }
+	cargo build --release --locked -p lh-sim
+	uv run -q --no-project python benchmarks/a100/analysis.py calibration-check $(EXPORTS) --corpus $(CORPUS) \
+	  --lh-sim $(E1_SIM) --out build/check-a100-calibration
 
 # The simulator's calibration and its validation against W0 (crates/lh-sim/README.md, and BENCHMARKS' table of W2's points)
 # from six measured runs' AIPerf exports and /metrics snapshots, one directory per run as `scripts/calibration.py export`
