@@ -6,7 +6,11 @@ TCP only."""
 from __future__ import annotations
 
 import contextlib
+import importlib.machinery
+import importlib.util
+import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -22,8 +26,41 @@ from pathlib import Path
 
 import pytest
 
+from leaseholder_bench.e2 import run as e2
+from leaseholder_bench.e2.arm import load_arm
+
 REPO = Path(__file__).resolve().parents[3]
 BIN = REPO / "deploy" / "bin"
+
+
+def _module(name: str, path: Path):
+    if name in sys.modules:
+        return sys.modules[name]
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+host_py = _module("lh_a100_host", REPO / "deploy" / "a100" / "host.py")
+GIB = 1 << 30
+FACTS = {
+    "hostname": "a100-single",
+    "gpu": {
+        "name": "NVIDIA A100-SXM4-40GB",
+        "memory_mib": 40960,
+        "compute_cap": "8.0",
+        "numa_node": None,
+        "driver": "580.65.06",
+    },
+    "cpus": {"0": list(range(32))},
+    "memory": {"total_bytes": 200 * GIB, "available_bytes": 190 * GIB, "nodes": {}},
+    "shm": {"path": "/dev/shm", "total_bytes": 100 * GIB, "free_bytes": 100 * GIB},
+    "cuda_toolkit": None,
+}
+"""An A100 host's facts, as host.py's detect gives them (test_a100_dry_run.py's)."""
 SERVICE = """\
 import os, signal, sys, time
 from pathlib import Path
@@ -340,6 +377,147 @@ def test_variant_sh_runs_on_the_supervisor(host: dict, tmp_path: Path) -> None:
         assert int((host["home"] / "lh-stt.ready").read_text()) == stt and not gone(stt)
     finally:
         ctl(host, "--user", "stop", "leaseholder.target")
+
+
+def single_host_node(host: dict, tmp_path: Path) -> Path:
+    """A node rendered from a100-40gb and linked as deploy/a100/host.py units links it: its GPU units beside cyan's
+    control plane, with this host's drop-ins and the worker's vad-turns variant, in one ~/.config/systemd/user.
+    Stand-ins replace the GPU servers' commands (and make-room's) so that lh-svc can run them; the control plane
+    is only linked. Returns the node's directory, whose variant.sh is the box's, as the node copies it."""
+    node = tmp_path / "node"
+    host_py.profile.render(host_py.profile.load("a100-40gb"), FACTS, node)
+    (node / "host.json").write_text(json.dumps(FACTS))
+    py = sys.executable
+    for name in ("lh-stt", "lh-tts", "lh-engine"):
+        ready = f"%h/{name}.ready"
+        (node / "systemd" / f"{name}.service").write_text(
+            f"[Unit]\nPartOf=leaseholder.target\n[Service]\nEnvironment=READY={ready}\nEnvironment=LH_ENGINE_FLAGS=\n"
+            f"ExecStart={py} %h/svc.py {name} $LH_ENGINE_FLAGS\nExecStartPost={py} %h/wait.py {ready}\n"
+        )
+    (node / "variants" / "make-room" / "lh-engine.conf").write_text(
+        f"[Service]\nExecStart=\nExecStart={py} %h/svc.py make-room $LH_ENGINE_FLAGS\n"
+    )
+    host_py.install_units(host_py.Node.load(node), host["units"], systemctl="true")
+    return node
+
+
+class ShimSystemd(e2.Systemd):
+    """lh-bench e2 run's view of the units through lh-svc's shims (what it reads: show); the restarts it asks for
+    are recorded, not run, since the control plane is only linked here."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str) -> str:
+        if args[0] == "show":
+            return super().__call__(*args)
+        self.calls.append(args)
+        return ""
+
+    def active(self, unit: str) -> bool:
+        return False
+
+    def journal(self, unit: str, since: float, until: float | None = None) -> str:
+        return "registered worker"
+
+
+def test_variant_sh_on_a_single_host_switches_only_the_gpu_units(
+    host: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # On one host the box's variant.sh shares ~/.config/systemd/user with the control plane's drop-ins: the
+    # worker's vad-turns, which every E2 point's check needs, and e2 run's own for an arm (the gateway's overlay,
+    # the worker's no-events). A switch, as campaign.sh makes one before every point, must leave them alone.
+    node = single_host_node(host, tmp_path)
+    units, home = host["units"], host["home"]
+    for name, value in host["env"].items():
+        monkeypatch.setenv(name, value)
+    (home / "leaseholder").mkdir()
+    (home / "leaseholder" / "src").symlink_to(REPO)
+    config = home / ".config" / "leaseholder"
+    config.mkdir(parents=True)
+    (config / "gateway.toml").write_text(
+        (REPO / "deploy" / "cyan" / "gateway.example.toml").read_text()
+    )
+    arms = tmp_path / "arms"
+    arms.mkdir()
+    (arms / "overlay.toml").write_text(
+        'arm = 3\nlabel = "an arm with a gateway table, events off"\n[voice]\nevents = false\n'
+        '[gateway.admission]\npolicy = "static-cap"\nbackground_max_in_flight = 2\n'
+    )
+    (arms / "voice.toml").write_text('arm = 1\nlabel = "voice alone"\n')
+    overlay, plain = load_arm(arms / "overlay.toml"), load_arm(arms / "voice.toml")
+    e2_host = e2.Host(home=home)
+    systemd = ShimSystemd()
+    first = e2.configure_cyan(overlay, e2_host, systemd)  # links e2-gateway and no-events
+    assert first["gateway"]["restarted"] and first["worker"]["restarted"]
+    control = sorted(
+        str(p.relative_to(units))
+        for p in units.glob("*.d/*")
+        if not p.parent.name.startswith(("lh-engine.", "lh-stt.", "lh-tts."))
+    )
+    assert "lh-voice-worker.service.d/variant-vad-turns.conf" in control
+    assert "lh-gateway.service.d/variant-e2-gateway.conf" in control
+    assert "lh-voice-worker.service.d/variant-no-events.conf" in control
+    env = os.environ.copy()
+    try:
+        for switch in (
+            ("measure", "on"),
+            ("use", "make-room", "--additional-config.make_room.reserve_tokens", "0"),
+            ("use", "frozen", "--max-num-batched-tokens", "2048"),
+            ("use", "frozen"),
+        ):
+            done = subprocess.run(
+                ["bash", str(node / "variant.sh"), *switch],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            assert done.returncode == 0, (switch, done.stdout + done.stderr)
+            # The control plane's drop-ins came through the switch, and e2 run's check passes the worker: the
+            # point's arm finds its drop-ins as it left them, so nothing of cyan's restarts.
+            assert control == sorted(
+                str(p.relative_to(units))
+                for p in units.glob("*.d/*")
+                if not p.parent.name.startswith(("lh-engine.", "lh-stt.", "lh-tts."))
+            ), switch
+            again = e2.configure_cyan(overlay, e2_host, systemd)
+            assert not again["gateway"]["restarted"] and not again["worker"]["restarted"], switch
+        engine = ctl(host, "-u", "lh-engine", "-o", "cat", tool="journalctl").stdout
+        assert "argv ['make-room', '--additional-config.make_room.reserve_tokens', '0']" in engine
+        assert "argv ['lh-engine', '--max-num-batched-tokens', '2048']" in engine
+        # The GPU units' variant drop-ins are the box's: none once it is frozen again; the measurement drop-in
+        # stays.
+        assert not [
+            p
+            for u in ("lh-engine", "lh-stt", "lh-tts")
+            for p in units.glob(f"{u}.service.d/variant-*")
+        ]
+        assert (units / "lh-engine.service.d" / "measure.conf").is_symlink()
+    finally:
+        ctl(host, "--user", "stop", "leaseholder.target")
+    # An arm without a gateway table or events off takes its drop-ins away, as on cyan.
+    last = e2.configure_cyan(plain, e2_host, systemd)
+    assert last["gateway"]["restarted"] and last["worker"]["restarted"]
+    assert not (units / "lh-gateway.service.d" / "variant-e2-gateway.conf").exists()
+    assert (units / "lh-voice-worker.service.d" / "variant-vad-turns.conf").is_symlink()
+
+
+def test_the_box_variants_change_only_the_units_variant_sh_switches() -> None:
+    # variant.sh's switches touch only the GPU units' variant drop-ins, so that on a single host the control
+    # plane's (cyan's variants, linked into the same directory) are not the box's to remove. That holds while every
+    # variant a node can switch to changes only those units: the box's, as the node takes them, and the node's
+    # rendered make-room. cyan's variants change none of them.
+    text = (REPO / "deploy" / "phastform" / "variant.sh").read_text()
+    gpu = re.search(r"^gpu=\(([^)]*)\)", text, re.MULTILINE)
+    assert gpu, "variant.sh names its GPU units in gpu=(...)"
+    switched = set(gpu.group(1).split())
+    box = {p.stem for p in (REPO / "deploy" / "phastform" / "variants").glob("*/*.conf")}
+    templates = {p.stem for p in (REPO / "deploy" / "templates" / "variants").glob("*/*.conf")}
+    cyan = {p.stem for p in (REPO / "deploy" / "cyan" / "variants").glob("*/*.conf")}
+    assert box and templates and cyan
+    assert box | templates <= switched == {"lh-engine", "lh-stt", "lh-tts"}
+    assert not cyan & switched
 
 
 def echo_server() -> tuple[socket.socket, int]:

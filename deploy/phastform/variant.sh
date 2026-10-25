@@ -9,6 +9,9 @@
 # ~/.config/systemd/user/UNIT.service.d/ as variant-NAME.conf. Engine flags go into a generated drop-in,
 # lh-engine.service.d/variant-flags.conf, that sets LH_ENGINE_FLAGS: they beat engine.yaml and the variant's own
 # flags. A restart takes ~2 min with warm caches (variants/README.md lists the variants).
+# The box's variant drop-ins are the GPU units' only (gpu below, every unit a variant here changes): on a single host
+# the control plane's units share the directory, and their drop-ins (cyan's variants, linked by deploy/a100/host.py
+# units and lh-bench e2 run) are not the box's to switch.
 set -euo pipefail
 action=${1:?on|off|use|measure} name=${2:?variant name}
 shift 2
@@ -16,7 +19,8 @@ shift 2
   { echo "variant: action must be on, off, use or measure" >&2; exit 2; }
 here=$(cd "$(dirname "$0")" && pwd)
 units=$HOME/.config/systemd/user
-box=(leaseholder.target lh-engine lh-stt lh-tts)
+gpu=(lh-engine lh-stt lh-tts)
+box=(leaseholder.target "${gpu[@]}")
 
 if [[ $action == measure ]]; then
   [[ $name == on || $name == off ]] || { echo "variant: measure on or measure off" >&2; exit 2; }
@@ -59,7 +63,11 @@ all_active() { local u; for u; do systemctl --user is-active -q "$u" || return 1
 
 if [[ $action != use ]]; then
   systemctl --user stop "${box[@]}"
-  if [[ $action == on ]]; then link "$name"; else rm -f "$units"/*.service.d/"variant-$name.conf"; fi
+  if [[ $action == on ]]; then
+    link "$name"
+  else
+    for u in "${gpu[@]}"; do rm -f "$units/$u.service.d/variant-$name.conf"; done
+  fi
   systemctl --user daemon-reload
   clear_start_limits
   systemctl --user start leaseholder.target
@@ -75,13 +83,15 @@ flags_line="Environment=\"LH_ENGINE_FLAGS=$*\""
 # The box's variant drop-ins, one line each (a link with its target, the generated flags with their line), as they
 # are and as NAME and FLAG... want them.
 current() {
-  local f
-  for f in "$units"/lh-*.service.d/variant-*.conf; do
-    if [[ -L $f ]]; then
-      echo "${f#"$units/"} -> $(readlink "$f")"
-    elif [[ -e $f ]]; then
-      echo "${f#"$units/"}: $(grep '^Environment=' "$f")"
-    fi
+  local u f
+  for u in "${gpu[@]}"; do
+    for f in "$units/$u.service.d"/variant-*.conf; do
+      if [[ -L $f ]]; then
+        echo "${f#"$units/"} -> $(readlink "$f")"
+      elif [[ -e $f ]]; then
+        echo "${f#"$units/"}: $(grep '^Environment=' "$f")"
+      fi
+    done
   done
 }
 wanted() {
@@ -102,7 +112,7 @@ fi
 restart=("${box[@]}")
 if [[ $changed == lh-engine ]] && all_active lh-stt lh-tts; then restart=(lh-engine); fi
 systemctl --user stop "${restart[@]}"
-rm -f "$units"/lh-*.service.d/variant-*.conf
+for u in "${gpu[@]}"; do rm -f "$units/$u.service.d"/variant-*.conf; done
 [[ $name == frozen ]] || link "$name"
 if (($#)); then
   mkdir -p "$units/lh-engine.service.d"
