@@ -9,8 +9,9 @@ A container, or a host where lingering cannot be turned on, has no systemd user 
 deploy/bin/shims first on PATH, `systemctl` and `journalctl` are this program, so that variant.sh, install.sh,
 campaign.sh and lh-bench e2 run work unchanged. It reads each unit and its drop-ins (UNIT.d/*.conf, in name order)
 from ~/.config/systemd/user, where install.sh and variant.sh link them, afresh at every command, and implements the
-directives the repository's units use: Type=exec, simple or notify (the main process's READY=1 on NOTIFY_SOCKET is
-its start, as sd_notify sends it); ExecStartPre, ExecStart, ExecStartPost, ExecStop and
+directives the repository's units use: Type=exec or simple (the main process's execution is its start, even if it
+exits at once) or notify (the main process's READY=1 on NOTIFY_SOCKET is its start, as sd_notify sends it);
+ExecStartPre, ExecStart, ExecStartPost, ExecStop and
 ExecStopPost (an empty assignment resets the list; a leading `-` ignores a command's failure); Environment and
 EnvironmentFile (`-` for an optional file); WorkingDirectory; CPUAffinity; NUMAPolicy=preferred with NUMAMask
 (through numactl, when the host has it; otherwise the journal says it was not applied); KillSignal, TimeoutStartSec
@@ -450,6 +451,11 @@ def subreaper() -> bool:
     return False
 
 
+LOOK_DELAY = "LH_SVC_LOOK_DELAY"
+"""The tests' stand-in for a loaded host: seconds a runner waits, once it has started a unit's main process, before it
+first looks at it, where a busy host can deschedule it for longer than a main process that exits at once lives."""
+
+
 class Runner:
     def __init__(self, name: str) -> None:
         self.name = unit_name(name)
@@ -590,21 +596,28 @@ class Runner:
         if len(lines) != 1:
             self.say(f"{self.name} has {len(lines)} ExecStart= lines, not one")
             return 1
-        notify = Notify() if unit.last("Type", "simple") == "notify" else None
+        kind = unit.last("Type", "simple")
+        notify = Notify() if kind == "notify" else None
         try:
             main_env = env | {"NOTIFY_SOCKET": notify.path} if notify else env
             self.main, _ = self.spawn(unit, lines[0], main_env)
             write_state(self.name, main=self.main.pid)
+            if delay := os.environ.get(LOOK_DELAY):
+                time.sleep(float(delay))
             ready = notify is None or self.ready(notify, deadline)
         finally:
             if notify is not None:
                 notify.close()
         # The control commands know the main process, as systemd's do ($MAINPID: wait-healthy --pid=${MAINPID}).
         env = env | {"MAINPID": str(self.main.pid)}
+        # A Type=simple or exec unit with no ExecStartPost has started once its main process has been executed, which
+        # spawn() returns after, as systemd's has: one that exits at once, gone before the runner first looks at it on a
+        # busy host, is a started unit's, whose exit Restart= and the start limit take, and not a failed start.
+        executed = kind in ("simple", "exec") and not unit.values.get("ExecStartPost")
         if (
             not ready
             or not self.control(unit, "ExecStartPost", env, deadline)
-            or self.main.poll() is not None
+            or (not executed and self.main.poll() is not None)
         ):
             self.say("start failed")
             self.terminate(unit)

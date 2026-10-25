@@ -324,6 +324,43 @@ def test_a_unit_that_fails_restarts_and_then_fails_its_start(host: dict) -> None
     assert ctl(host, "is-active", "broken").stdout.strip() == "inactive"
 
 
+@pytest.mark.parametrize("kind", ["simple", "exec", "notify"])
+def test_a_unit_has_started_though_its_main_process_exits_before_the_runner_looks(
+    host: dict, kind: str
+) -> None:
+    # As under systemd, a Type=simple or exec unit has started once its main process has been executed, though that
+    # exits before the runner first looks at it, as on a busy host (LH_SVC_LOOK_DELAY makes it so every time): the start
+    # succeeds, and the exit takes the unit's Restart= and start limit. lh-svc failed such a start, so that
+    # broken.service above, whose main process exits at once, failed its start now and then on a loaded host. A notify
+    # unit starts at its READY=1, which this one never sends.
+    (host["units"] / "quick.service").write_text(
+        f"[Service]\nType={kind}\nExecStart=/bin/sh -c 'exit 3'\n"
+        "Restart=on-failure\nRestartSec=0.05\nStartLimitBurst=2\n"
+    )
+    started = kind != "notify"
+    try:
+        done = subprocess.run(
+            ["systemctl", "--user", "start", "quick.service"],
+            env=os.environ | host["env"] | {"LH_SVC_LOOK_DELAY": "1"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == (0 if started else 1), done.stderr
+        deadline = time.monotonic() + 30
+        while ctl(host, "--user", "is-failed", "quick.service").stdout.strip() != "failed":
+            assert time.monotonic() < deadline, "the unit did not fail after its restarts"
+            time.sleep(0.1)
+        # The start limit's two starts: each a started unit's exit, which Restart= took, or a failed start.
+        journal = ctl(host, "-u", "quick", "-o", "cat", tool="journalctl").stdout
+        assert journal.count("lh-svc: Started quick.service") == (2 if started else 0), journal
+        assert journal.count("Main process exited, status=3") == (2 if started else 0), journal
+        assert journal.count("lh-svc: start failed") == (0 if started else 2), journal
+        assert "start-limit-hit" in journal, journal
+    finally:
+        ctl(host, "--user", "stop", "quick.service")
+
+
 def system_pythons() -> list[str]:
     """The host's own interpreters from 3.10 on, which the shims run before any venv exists (the tests' own
     Python is the venv's)."""
