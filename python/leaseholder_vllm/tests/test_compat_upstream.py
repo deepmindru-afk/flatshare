@@ -242,15 +242,54 @@ def test_an_interpreter_that_cannot_run_mains_tests_runs_nothing(tmp_path, upstr
     assert "No module named 'not_installed_here'" in proc.stdout
 
 
-def test_a_pr_main_has_merged_is_reported(tmp_path, upstream, python):
+def test_a_pr_main_squash_merged_is_reported_and_not_merged_again(tmp_path, upstream):
+    """vLLM squash-merges: main holds #63350 as a commit of its own whose subject ends with (#63350), and the PR's
+    head is no ancestor of main. Main edits the same file afterwards, so merging the stale head would conflict, and
+    so would #63351's head, which carries #63350's commits: its own changes, on #63350's head, merge."""
+    base = upstream.commit(None, BASE | scheduler_files(real=False))
+    kv = upstream.commit(base, {"vllm/kv.py": "k = 1\n"}, "Make room under KV pressure")
+    cap = upstream.commit(kv, {"vllm/cap.py": "c = 1\n"}, "Cap prefill")
+    squashed = upstream.commit(
+        base, {"vllm/kv.py": "k = 1\n"}, "[Core] Make room under KV pressure (#63350)"
+    )
+    main = upstream.commit(squashed, {"vllm/kv.py": "k = 2\n"}, "Tune it (#70001)")
+    proc = run(tmp_path, upstream.serve(main, {63350: kv, 63351: cap}, {"v0.40.0": base}))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    short = git(upstream.work, "rev-parse", "--short=10", squashed)
+    assert f"#63350: squash-merged into main as {short}\n" in proc.stdout
+    assert (
+        "#63351: its own changes merge into main cleanly, on #63350 as main holds it\n"
+        in proc.stdout
+    )
+    assert "CONFLICTS" not in proc.stdout
+
+
+def test_a_stacked_prs_own_conflict_with_main_is_reported(tmp_path, upstream):
+    base = upstream.commit(None, BASE | scheduler_files(real=False))
+    kv = upstream.commit(base, {"vllm/kv.py": "k = 1\n"}, "Make room")
+    cap = upstream.commit(kv, {"vllm/other.py": "a = 2\n"}, "Cap prefill")
+    squashed = upstream.commit(base, {"vllm/kv.py": "k = 1\n"}, "Make room (#63350)")
+    main = upstream.commit(squashed, {"vllm/other.py": "a = 3\n"}, "Other (#70002)")
+    proc = run(tmp_path, upstream.serve(main, {63350: kv, 63351: cap}, {"v0.40.0": base}))
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    expected = (
+        "#63351: its own changes CONFLICT with main in vllm/other.py, on #63350 as main holds it\n"
+    )
+    assert expected in proc.stdout
+
+
+def test_a_pr_merged_into_main_or_whose_changes_main_has_is_reported(tmp_path, upstream):
     base = upstream.commit(None, BASE | scheduler_files(real=False))
     kv = upstream.commit(base, {"vllm/kv.py": "k = 1\n"})
-    main = upstream.commit(kv, {"vllm/main_only.py": "m = 1\n"})
-    cap = upstream.commit(kv, {"vllm/cap.py": "c = 1\n"})
+    main = upstream.commit(
+        kv, {"vllm/main_only.py": "m = 1\n"}
+    )  # a true merge: kv is main's ancestor
+    # #63351's change, made on main under a subject that does not name it.
+    cap = upstream.commit(base, {"vllm/main_only.py": "m = 1\n"})
     proc = run(tmp_path, upstream.serve(main, {63350: kv, 63351: cap}, {"v0.40.0": base}))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "#63350: merged into main\n" in proc.stdout
-    assert "#63351: merges into main cleanly" in proc.stdout
+    assert "#63351: its changes are in main already\n" in proc.stdout
 
 
 def test_offline_it_fails_saying_it_needs_the_network(tmp_path, upstream):

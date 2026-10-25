@@ -7,8 +7,11 @@ It keeps a bare blobless clone of vLLM in DIR (``~/.cache/leaseholder/vllm-upstr
 checkout) and its sparse worktrees in DIR.work, fetches vLLM's main, the PRs' heads (``refs/pull/N/head``) and the
 release tags into it, and reports:
 
-- for each PR, whether it merges into main cleanly (``git merge-tree --write-tree``, git 2.38 or newer), or the files
-  that conflict;
+- for each PR, whether main holds it already: vLLM squash-merges, so a commit of main whose subject ends with the
+  PR's number, "(#N)", or a true merge, or a merge that would change nothing; and if not, whether it merges into main
+  cleanly (``git merge-tree --write-tree``, git 2.38 or newer), or the files that conflict. A PR stacked on one that
+  main holds carries that one's commits, so only its own changes are merged, from that PR's head (``--merge-base``,
+  git 2.40);
 - with ``--python``, an interpreter with CPU torch and the Python dependencies of vLLM's main: on each clean merge, the
   test files the PR adds or changes (``tests/**/test_*.py`` in its diff), run on CPU from the merge's source; a test
   that fails on main too is main's, not the PR's. An interpreter that cannot import main's scheduler is reported as
@@ -97,16 +100,18 @@ def fetch(git: Git, remote: str) -> None:
         raise CannotCheck(f"{offline} ({last_line(proc.stderr)})")
 
 
-def merge(git: Git, pr: int) -> tuple[str | None, list[str]]:
-    """The tree of the PR merged into main, or None and the files that conflict."""
-    proc = git.run(
-        "merge-tree",
-        "--write-tree",
-        "--name-only",
-        "--no-messages",
-        "origin/main",
-        f"origin/pull/{pr}",
-    )
+def merge(git: Git, pr: int, base: str | None = None) -> tuple[str | None, list[str]]:
+    """The tree of the PR merged into main, or None and the files that conflict. With ``base``, the head of a PR it is
+    stacked on that main holds, only the PR's own changes, from that head on, are merged (git 2.40's --merge-base)."""
+    args = ["merge-tree", "--write-tree", "--name-only", "--no-messages"]
+    if base:
+        if git_version(git.git) < (2, 40):
+            raise CannotCheck(
+                f"#{pr} is stacked on a PR main holds, and merging its own changes needs git merge-tree "
+                f"--merge-base, git 2.40 or newer"
+            )
+        args.append(f"--merge-base={base}")
+    proc = git.run(*args, "origin/main", f"origin/pull/{pr}")
     lines = proc.stdout.splitlines()
     if proc.returncode == 0:
         return lines[0], []
@@ -115,9 +120,24 @@ def merge(git: Git, pr: int) -> tuple[str | None, list[str]]:
     raise CannotCheck(f"git merge-tree failed for #{pr}: {last_line(proc.stderr)}")
 
 
-def changed_tests(git: Git, pr: int) -> list[str]:
-    """The test files the PR adds or changes, against where it leaves main."""
-    base = git("merge-base", "origin/main", f"origin/pull/{pr}").strip()
+def landed(git: Git, pr: int) -> str | None:
+    """How main holds the PR, if it does. vLLM squash-merges a PR into one commit whose subject ends with its number,
+    "(#N)", so its head never becomes main's ancestor; a true merge, which makes it one, is told too. None if main
+    holds neither."""
+    head = f"origin/pull/{pr}"
+    if git.run("merge-base", "--is-ancestor", head, "origin/main").returncode == 0:
+        return "merged into main"
+    base = git("merge-base", "origin/main", head).strip()
+    for line in git("log", "--format=%h %s", "--abbrev=10", f"{base}..origin/main").splitlines():
+        sha, _, subject = line.partition(" ")
+        if subject.rstrip().endswith(f"(#{pr})"):
+            return f"squash-merged into main as {sha}"
+    return None
+
+
+def changed_tests(git: Git, pr: int, base: str | None = None) -> list[str]:
+    """The test files the PR adds or changes, against where it leaves main, or ``base``."""
+    base = base or git("merge-base", "origin/main", f"origin/pull/{pr}").strip()
     out = git(
         "diff", "--name-only", "--diff-filter=AM", base, f"origin/pull/{pr}", "--",
         ":(glob)tests/**/test_*.py",
@@ -271,27 +291,44 @@ def check(clone: Path, python: str | None, git_cmd: str, remote: str) -> int:
 
     failed = False
     merges = {}
+    main_tree_id = git("rev-parse", "origin/main^{tree}").strip()
+    held: dict[int, str] = {}  # the PRs main holds, by their heads
     for pr in PRS:
-        if (
-            git.run("merge-base", "--is-ancestor", f"origin/pull/{pr}", "origin/main").returncode
-            == 0
-        ):
-            print(f"#{pr}: merged into main")
+        head = git("rev-parse", f"origin/pull/{pr}").strip()
+        how = landed(git, pr)
+        if how:
+            print(f"#{pr}: {how}")
+            held[pr] = head
             continue
-        tree, conflicts = merge(git, pr)
+        # A PR stacked on one main holds carries that one's commits: merge only its own changes.
+        on = next(
+            (
+                n
+                for n, h in held.items()
+                if git.run("merge-base", "--is-ancestor", h, head).returncode == 0
+            ),
+            None,
+        )
+        tree, conflicts = merge(git, pr, held.get(on))
+        subject, suffix = (
+            (f"#{pr}: its own changes", f", on #{on} as main holds it") if on else (f"#{pr}:", "")
+        )
         if tree is None:
             failed = True
-            print(f"#{pr}: CONFLICTS with main in " + ", ".join(conflicts))
+            verb = "CONFLICT" if on else "CONFLICTS"
+            print(f"{subject} {verb} with main in {', '.join(conflicts)}{suffix}")
+        elif tree == main_tree_id:
+            print(f"#{pr}: its changes are in main already")
         else:
-            merges[pr] = tree
-            print(f"#{pr}: merges into main cleanly")
+            merges[pr] = (tree, held.get(on))
+            print(f"{subject} {'merge' if on else 'merges'} into main cleanly{suffix}")
 
     cannot = None
     if not python and merges:
         print("the PRs' tests: not run (TORCH_PYTHON=<an interpreter for vLLM main> runs them)")
     if python and merges:
         main_tree = worktree(git, "main", "origin/main", ["vllm", "tests"])
-        tests = {pr: changed_tests(git, pr) for pr in merges}
+        tests = {pr: changed_tests(git, pr, base) for pr, (_, base) in merges.items()}
         dirs = {str(Path(f).parent) for files in tests.values() for f in files}
         dirs = sorted(d for d in dirs if (main_tree / d).is_dir())
         why = can_import(python, main_tree)
@@ -302,7 +339,7 @@ def check(clone: Path, python: str | None, git_cmd: str, remote: str) -> int:
                 f"{python} cannot run vLLM main's tests in {', '.join(dirs)} ({why}): no test ran"
             )
         print(cannot or f"the PRs' tests on their merges into main, on CPU ({python}):")
-        for pr, tree_id in ({} if cannot else merges).items():
+        for pr, (tree_id, _) in ({} if cannot else merges).items():
             files = tests[pr]
             if not files:
                 print(f"  #{pr}: no test file added or changed")
