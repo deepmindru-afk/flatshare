@@ -67,19 +67,23 @@ A unit counts as started only once its server answers its health endpoint (`wait
 
 ## The gateway
 
-`lh-gateway` serves the OpenAI routes and `/v1/events` on 127.0.0.1:18080, with an API key, and on `/run/user/$UID/lh/gateway.sock`, the voice plane's way in, without one. Its own `/health`, `/ready` and `/metrics` need no key. Its configuration reference and metrics list are in the [`lh-gateway` README](../crates/lh-gateway/README.md), including the E2 settings: `upstream_priority` (where each class's priority goes upstream: `X-Vllm-Priority`, the body's `priority`, or `X-SMG-Priority`), the `[admission]` policies, and `[nodes]` and `[placement]` for the points on two GPU nodes. Configuration changes take a restart.
+`lh-gateway` serves the OpenAI routes and `/v1/events` on 127.0.0.1:18080, with an API key, and on `/run/user/$UID/lh/gateway.sock`, the voice plane's way in, without one. Its own `/health` and `/ready` need no key; `/metrics` and `/metrics/engine` (the engine's own, relayed) need the metrics key on the TCP listener and nothing on the socket. Its configuration reference and metrics list are in the [`lh-gateway` README](../crates/lh-gateway/README.md), including the E2 settings: `upstream_priority` (where each class's priority goes upstream: `X-Vllm-Priority`, the body's `priority`, or `X-SMG-Priority`), the `[admission]` policies, and `[nodes]` and `[placement]` for the points on two GPU nodes. Configuration changes take a restart.
 
 ```sh
 curl -s 127.0.0.1:18080/health                    # the process is up
 curl -s 127.0.0.1:18080/ready                     # 200 while the engine's /health answers (through the tunnel)
-curl -s 127.0.0.1:18080/metrics | grep -E 'lh_gateway_(request_outcomes|upstream_errors)_total'
+curl -s --unix-socket $XDG_RUNTIME_DIR/lh/gateway.sock localhost/metrics | grep -E 'lh_gateway_(request_outcomes|upstream_errors)_total'
 journalctl --user -u lh-gateway -f                # one JSON line per request and per lifecycle event
 systemctl --user restart lh-gateway               # rereads gateway.toml; drains in-flight requests for up to 30 s
 ```
 
 E2 reads each point's request lines from this journal, so `gateway.toml` keeps `log_format = "json"`, as the example does.
 
-With `[nodes]`, as a two-node point's `gateway-e2.toml` has, `/ready` answers 200 while any node takes sessions; the start line (`"lh-gateway serving"`) names each node with its upstream, and the placement policy; and `curl -s 127.0.0.1:18080/metrics | grep -E 'lh_gateway_(node_ready|sessions|placements_total)'` shows which nodes take sessions, the sessions on each, and the placements by reason.
+With `[nodes]`, as a two-node point's `gateway-e2.toml` has, `/ready` answers 200 while any node takes sessions; the start line (`"lh-gateway serving"`) names each node with its upstream, and the placement policy; and `curl -s --unix-socket $XDG_RUNTIME_DIR/lh/gateway.sock localhost/metrics | grep -E 'lh_gateway_(node_ready|sessions|placements_total)'` shows which nodes take sessions, the sessions on each, and the placements by reason.
+
+## Monitoring
+
+`ops/prometheus/prometheus.example.yml` scrapes the gateway's `/metrics` and, through the gateway, the engine's (`/metrics/engine`), with the metrics key; run Prometheus as the deploy user, so that it may read the key's file. `ops/prometheus/rules.yml` holds the SLIs, the burn-rate alerts of [the SLO's two objectives](../docs/SLO.md#indicators) (a page at 14.4 times the budget's rate over an hour or 6 times over six hours, a ticket at 1 times over three days) and the health alerts: the gateway unreadable, the engine not ready (the gateway answering 503), the engine's metrics unrelayed, streams broken off, and a full KV pool with requests waiting. `ops/grafana/leaseholder.json` is the dashboard: import it with a Prometheus data source. The voice worker's LiveKit metrics are not scraped: its namespace has no route in. `ops/metrics/` lists the metric families of vLLM 0.32.0 and of the worker, from their sources; with the gateway's `crates/lh-gateway/metrics.txt` they are what `python/leaseholder_bench/tests/test_ops.py` checks every expression against. `promtool check rules` and `check config` (Prometheus 3.5.0) pass on the files, the dashboard's expressions included.
 
 ## The voice plane
 
