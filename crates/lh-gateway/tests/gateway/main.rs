@@ -8,6 +8,7 @@ mod leaseholder;
 mod metrics;
 mod placement;
 mod proxy;
+mod reload;
 mod sockets;
 mod streams;
 mod upstream;

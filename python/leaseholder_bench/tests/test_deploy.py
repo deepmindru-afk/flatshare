@@ -447,9 +447,72 @@ def test_the_gateways_socket_unit_listens_where_gateway_toml_does() -> None:
     # The gateway refuses an inherited socket that no [[listen]] entry names; %t is cyan's /run/user/1007.
     assert {listen.replace("%t", "/run/user/1007") for listen in listens} == entries
     service = (systemd / "lh-gateway.service").read_text()
-    for line in ("Type=notify", "Requires=lh-gateway.socket"):
+    for line in ("Type=notify", "NotifyAccess=all", "Requires=lh-gateway.socket"):
         assert line in service.splitlines(), line
     assert "lh-gateway.socket" in exec_lines(service, "After")[0].split()
+    assert exec_lines(service, "ExecReload") == [
+        "%h/leaseholder/src/deploy/bin/lh-gateway-reload %n $MAINPID"
+    ]
+
+
+GATEWAY = """\
+import signal, sys, time
+signal.signal(signal.SIGHUP, lambda *_: open(sys.argv[1], "w").write("reload"))
+print("up", flush=True)
+time.sleep(30)
+"""
+"""A gateway's main process to the reload helper: it marks a SIGHUP in a file."""
+
+
+def reload_gateway(work: Path, takes_over: bool) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Runs deploy/bin/lh-gateway-reload against a main process that marks SIGHUP, with a systemctl whose MainPID
+    changes once the mark is there if ``takes_over``, as when the successor tells systemd it is the main process."""
+    marked = work / "sighup"
+    gateway = subprocess.Popen(
+        [sys.executable, "-c", GATEWAY, str(marked)], stdout=subprocess.PIPE, text=True
+    )
+    assert gateway.stdout.readline() == "up\n"
+    successor = "4242" if takes_over else str(gateway.pid)
+    bin_dir = work / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "systemctl").write_text(
+        "#!/bin/sh\n"
+        f'[ "$*" = "--user show --property MainPID --value lh-gateway.service" ] || exit 2\n'
+        f"if [ -e {marked} ]; then echo {successor}; else echo {gateway.pid}; fi\n"
+    )
+    (bin_dir / "systemctl").chmod(0o755)
+    env = os.environ | {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "LH_GATEWAY_RELOAD_WAIT_S": "1",
+    }
+    try:
+        done = subprocess.run(
+            [DEPLOY / "bin" / "lh-gateway-reload", "lh-gateway.service", str(gateway.pid)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        gateway.kill()
+        gateway.wait()
+    return done, marked
+
+
+def test_a_reload_succeeds_once_the_successor_is_the_main_process(tmp_path: Path) -> None:
+    done, marked = reload_gateway(tmp_path, takes_over=True)
+    assert marked.read_text() == "reload", "the main process got SIGHUP"
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.endswith(
+        "lh-gateway.service's main process is 4242, after " + done.args[2] + "\n"
+    )
+
+
+def test_a_reload_fails_while_the_old_process_is_still_the_main_one(tmp_path: Path) -> None:
+    done, marked = reload_gateway(tmp_path, takes_over=False)
+    assert marked.exists()
+    assert done.returncode == 1
+    assert "main process is still" in done.stderr and "after 1 s" in done.stderr
 
 
 def exec_lines(text: str, key: str) -> list[str]:

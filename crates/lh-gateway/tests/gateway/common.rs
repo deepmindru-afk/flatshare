@@ -761,3 +761,43 @@ impl EventSink for RecordingSink {
 }
 
 pub const CHAT: &str = r#"{"model":"qwen","messages":[{"role":"user","content":"hi"}]}"#;
+
+/// Awaits `future` for a few seconds at most: what a drain or a reload does takes well under a second here, so a
+/// test whose gateway does not do it fails instead of waiting for the timeouts it would hit instead.
+pub async fn soon<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(3), future)
+        .await
+        .expect("done within 3 s")
+}
+
+/// A chat completion's stream whose response has begun: its body after the first frame, which `bytes` holds.
+pub struct Open {
+    body: Incoming,
+    bytes: Vec<u8>,
+    _connection: JoinHandle<()>,
+}
+
+pub async fn begin(target: &Target, headers: &[(&str, &str)]) -> Open {
+    let (response, connection) = open(target, "POST", "/v1/chat/completions", headers, CHAT).await;
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    Open {
+        body,
+        bytes: first.to_vec(),
+        _connection: connection,
+    }
+}
+
+/// Reads a begun stream to its end: its bytes, whether it ended with an error rather than cleanly, and when.
+pub fn finish(mut open: Open) -> JoinHandle<(Vec<u8>, bool, Instant)> {
+    tokio::spawn(async move {
+        loop {
+            match open.body.frame().await {
+                Some(Ok(frame)) => open.bytes.extend_from_slice(&frame.into_data().unwrap()),
+                Some(Err(_)) => return (open.bytes, true, Instant::now()),
+                None => return (open.bytes, false, Instant::now()),
+            }
+        }
+    })
+}

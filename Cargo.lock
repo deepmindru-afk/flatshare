@@ -506,6 +506,7 @@ dependencies = [
  "lh-proto",
  "listenfd",
  "memchr",
+ "nix",
  "prometheus-client",
  "serde",
  "serde_json",

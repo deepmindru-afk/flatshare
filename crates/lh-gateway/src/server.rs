@@ -3,8 +3,10 @@
 use std::fmt::Display;
 use std::future::{Future, IntoFuture};
 use std::io;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -135,9 +137,26 @@ pub struct Server {
     listeners: Vec<(Listener, Option<usize>)>,
     /// How many of them it inherited.
     inherited: usize,
-    /// The socket files it bound itself, removed when the server stops; an inherited socket's stays.
+    /// The socket files it bound itself, removed when the server stops unless it handed them over; an inherited
+    /// socket's stays.
     sockets: Vec<SocketFile>,
+    handover: HandOver,
     drain_timeout: Duration,
+}
+
+/// Set once a successor serves the gateway's sockets ([`crate::handover`]), before the drain starts: the socket
+/// files the gateway bound itself then stay when it stops.
+#[derive(Clone, Debug, Default)]
+pub struct HandOver(Arc<AtomicBool>);
+
+impl HandOver {
+    pub fn done(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    fn is_done(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 #[derive(Debug)]
@@ -251,6 +270,7 @@ impl Server {
             listeners,
             inherited: given,
             sockets,
+            handover: HandOver::default(),
             drain_timeout: config.drain_timeout,
         })
     }
@@ -259,6 +279,22 @@ impl Server {
     /// `GET /metrics` answers.
     pub fn metrics(&self) -> MetricsReader {
         MetricsReader(Arc::clone(&self.shared.metrics))
+    }
+
+    /// Copies of the listening sockets, in configuration order, for a successor to take over.
+    pub fn listener_fds(&self) -> io::Result<Vec<OwnedFd>> {
+        self.listeners
+            .iter()
+            .map(|(listener, _)| match listener {
+                Listener::Tcp(listener) => listener.as_fd().try_clone_to_owned(),
+                Listener::Unix(listener, _) => listener.as_fd().try_clone_to_owned(),
+            })
+            .collect()
+    }
+
+    /// What tells [`Server::run`] that a successor serves the sockets.
+    pub fn handover(&self) -> HandOver {
+        self.handover.clone()
     }
 
     /// Where the listeners are bound, in configuration order, with the assigned port for TCP port 0.
@@ -274,7 +310,7 @@ impl Server {
 
     /// Serves until `shutdown` completes, then stops accepting and lets in-flight requests finish for up to the
     /// drain timeout, except background ones, which are cut `background_drain_s` into the drain. The socket files
-    /// it bound itself are removed before it returns.
+    /// it bound itself are removed before it returns, unless a successor serves them ([`Server::handover`]).
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let shared = &self.shared;
         let admission = shared.nodes[0].admission.as_ref();
@@ -371,7 +407,9 @@ impl Server {
         {
             tracing::warn!("drain timeout reached; stopping with requests in flight");
         }
-        drop(self.sockets);
+        if self.handover.is_done() {
+            self.sockets.into_iter().for_each(SocketFile::keep);
+        }
     }
 }
 
@@ -564,6 +602,13 @@ impl MetricsReader {
 /// A Unix socket file the server created, removed when dropped.
 #[derive(Debug)]
 struct SocketFile(PathBuf);
+
+impl SocketFile {
+    /// Leaves the file in place: another process serves it.
+    fn keep(self) {
+        std::mem::forget(self);
+    }
+}
 
 impl Drop for SocketFile {
     fn drop(&mut self) {

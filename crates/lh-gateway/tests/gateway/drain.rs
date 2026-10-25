@@ -5,9 +5,6 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use http_body_util::BodyExt;
-use hyper::body::Incoming;
-use tokio::task::JoinHandle;
 
 use crate::common::*;
 
@@ -17,46 +14,6 @@ const WAITING: &str = "lh_gateway_admission_waiting{class=\"background\"}";
 
 fn outcome(class: &str, outcome: &str) -> String {
     format!("lh_gateway_request_outcomes_total{{class=\"{class}\",outcome=\"{outcome}\"}}")
-}
-
-/// Awaits `future` for a few seconds at most: what a drain does takes well under a second here, so a test whose
-/// gateway does not cut fails instead of waiting for the timeouts it would hit instead.
-async fn soon<T>(future: impl std::future::Future<Output = T>) -> T {
-    tokio::time::timeout(Duration::from_secs(3), future)
-        .await
-        .expect("done within 3 s")
-}
-
-/// A stream whose response has begun: its body after the first frame, which `bytes` holds.
-struct Open {
-    body: Incoming,
-    bytes: Vec<u8>,
-    _connection: JoinHandle<()>,
-}
-
-async fn begin(target: &Target, headers: &[(&str, &str)]) -> Open {
-    let (response, connection) = open(target, "POST", "/v1/chat/completions", headers, CHAT).await;
-    assert_eq!(response.status(), 200);
-    let mut body = response.into_body();
-    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
-    Open {
-        body,
-        bytes: first.to_vec(),
-        _connection: connection,
-    }
-}
-
-/// Reads a begun stream to its end: its bytes, whether it ended with an error rather than cleanly, and when.
-fn finish(mut open: Open) -> JoinHandle<(Vec<u8>, bool, Instant)> {
-    tokio::spawn(async move {
-        loop {
-            match open.body.frame().await {
-                Some(Ok(frame)) => open.bytes.extend_from_slice(&frame.into_data().unwrap()),
-                Some(Err(_)) => return (open.bytes, true, Instant::now()),
-                None => return (open.bytes, false, Instant::now()),
-            }
-        }
-    })
 }
 
 #[tokio::test]

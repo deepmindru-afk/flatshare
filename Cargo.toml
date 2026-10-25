@@ -26,6 +26,7 @@ lh-core = { path = "crates/lh-core" }
 lh-proto = { path = "crates/lh-proto" }
 listenfd = "1"
 memchr = "2"
+nix = { version = "0.31", features = ["signal"] }
 prometheus-client = "0.25"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

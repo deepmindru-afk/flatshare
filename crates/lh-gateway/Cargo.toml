@@ -11,6 +11,7 @@ repository.workspace = true
 axum.workspace = true
 bytes.workspace = true
 clap.workspace = true
+command-fds.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
 http.workspace = true
@@ -22,6 +23,7 @@ lh-core.workspace = true
 lh-proto.workspace = true
 listenfd.workspace = true
 memchr.workspace = true
+nix.workspace = true
 prometheus-client.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -34,7 +36,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-command-fds.workspace = true
 futures-util.workspace = true
 
 [lints]

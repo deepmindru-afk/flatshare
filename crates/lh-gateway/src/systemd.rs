@@ -69,12 +69,13 @@ impl Inherited {
         self.len() == 0
     }
 
-    /// The TCP socket bound to `addr`, if one is here.
+    /// The TCP socket bound to `addr`, if one is here; for port 0 (any port), one on its IP address.
     pub(crate) fn take_tcp(&mut self, addr: SocketAddr) -> Option<TcpListener> {
-        let found = self
-            .tcp
-            .iter()
-            .position(|listener| listener.local_addr().is_ok_and(|bound| bound == addr))?;
+        let found = self.tcp.iter().position(|listener| {
+            listener
+                .local_addr()
+                .is_ok_and(|bound| bound == addr || (addr.port() == 0 && bound.ip() == addr.ip()))
+        })?;
         Some(self.tcp.swap_remove(found))
     }
 
@@ -169,10 +170,15 @@ mod tests {
         let other_addr = other.local_addr().unwrap();
         let mut inherited = Inherited::default().tcp(tcp).unix(unix).tcp(other);
         assert_eq!(inherited.len(), 3);
+        assert!(inherited.take_tcp("127.0.0.2:0".parse().unwrap()).is_none());
         assert!(inherited.take_unix(Path::new("/elsewhere.sock")).is_none());
         assert!(inherited.take_unix(&path).is_some());
         assert!(inherited.take_tcp(addr).is_some());
         assert!(inherited.take_tcp(addr).is_none(), "taken once");
+        // Port 0, any port, is the other one on 127.0.0.1.
+        let any = inherited.take_tcp("127.0.0.1:0".parse().unwrap()).unwrap();
+        assert_eq!(any.local_addr().unwrap(), other_addr);
+        inherited = inherited.tcp(any);
         let err = inherited.none_left().unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(

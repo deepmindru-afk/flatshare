@@ -28,6 +28,7 @@ mod auth;
 pub mod config;
 mod events;
 mod exchange;
+pub mod handover;
 mod metrics;
 mod placement;
 mod proxy;
@@ -39,5 +40,5 @@ mod usage;
 
 pub use config::{Config, ConfigError, ListenAddr};
 pub use events::{AcceptedEvent, EventSink, LogSink};
-pub use server::{MetricsReader, Server};
+pub use server::{HandOver, MetricsReader, Server};
 pub use systemd::Inherited;
