@@ -177,9 +177,39 @@ The host is measured by [`bench_host.py`](../benchmarks/a100/bench_host.py), wit
 
 `make check-a100-calibration EXPORTS=<the v0.3 calibration exports> CORPUS=<weka-x32>` runs the analysis's calibration code on the box's three W2 points with the box's E0, and checks that it gives the box's own table rows.
 
+### On Google Colab
+
+The run of 2026-10-26 had an A100 SXM4 80 GB on a Colab runtime with high RAM: a container (Ubuntu 24.04, root, no
+systemd user manager) with 12 vCPUs of a 2.20 GHz Xeon (Cascade Lake), 167 GiB of RAM, an 82 GiB `/dev/shm`, driver
+580.82.07 and CUDA 13.0's toolkit. Colab's command-line client
+([google-colab-cli](https://github.com/googlecolab/google-colab-cli), its `colab` command, signed in once) makes the
+runtime and reaches it:
+
+```sh
+colab new -s a100 --gpu A100 --high-mem   # the runtime, billed in compute units from here to `colab stop -s a100`
+colab usage                               # the balance and the rate (6.77 units an hour for this runtime)
+```
+
+and an SSH host entry whose `ProxyCommand` is `colab ssh --proxy-mode -s a100` carries `push.sh`, `pull.sh` and every
+command (`FLATSHARE_SSH="ssh -F <that file>"`). Four things differ from the hosts the kit was rehearsed on:
+
+1. **One connection.** The bridge carries one SSH connection at a time and refuses a second (HTTP 429): the host entry
+   multiplexes every command over one master connection (`ControlMaster auto`, `ControlPersist`), so that `pull.sh`'s
+   copy every two minutes, a watch and a command typed meanwhile share it, and the run starts detached (`nohup setsid`),
+   held by no connection.
+2. **No user manager.** The first stage chose flatshare-svc.
+3. **The driver's libraries outside the linker's search** (`/usr/lib64-nvidia`): `bootstrap.sh gpu` refused the host
+   until the GPU units named that directory, which the kit now does ([single-host mode](#single-host-mode)); this run's
+   host had it registered by hand (`/etc/ld.so.conf.d`, `ldconfig`) before the fix.
+4. **Billing from creation to stop**, whatever the card does: staging ran before the GPU stages, the core's blocks back
+   to back, and the optional arms were queued to start as the core ended, under one deadline the balance set; the
+   records were pulled every two minutes, and the runtime stopped once the last pull was in. This run's runtime lived
+   5 hours 5 minutes (04:07Z to 09:12Z) and used 34.35 compute units of 37.38, at 6.77 an hour; the GPU stages held the
+   card from 04:28Z to 09:12Z, 93% of that time.
+
 ### What it measured (2026-10-26)
 
-The run had an A100 SXM4 80 GB on Google Colab ([below](#on-google-colab)), so the analysis reads it against
+The run had an A100 SXM4 80 GB on Google Colab ([above](#on-google-colab)), so the analysis reads it against
 [`forecast-80gb.md`](../benchmarks/a100/forecast-80gb.md). Staging, `gpu` and `warm` took 19 minutes (`warm` 9 of them,
 the four compile configurations from empty caches on the host's 12 vCPUs), and the core's blocks 0 to 10 ran back to
 back in 3 hours 13 minutes, each E2 round in 26 minutes. Its records are
@@ -273,36 +303,6 @@ HOST_JSON=...`), the forecast's E0 cells come within 9% of the measured GPU hits
 mean, from 69% and 22% off before the run; recompute, which the host does not set, stays 17% off. The host leaves
 the running share where it was: placed on it, the forecast gives the core 11% and A' 18%, against 6% and 6.5%
 measured, so the host is not what the simulator misses there.
-
-### On Google Colab
-
-The run of 2026-10-26 had an A100 SXM4 80 GB on a Colab runtime with high RAM: a container (Ubuntu 24.04, root, no
-systemd user manager) with 12 vCPUs of a 2.20 GHz Xeon (Cascade Lake), 167 GiB of RAM, an 82 GiB `/dev/shm`, driver
-580.82.07 and CUDA 13.0's toolkit. Colab's command-line client
-([google-colab-cli](https://github.com/googlecolab/google-colab-cli), its `colab` command, signed in once) makes the
-runtime and reaches it:
-
-```sh
-colab new -s a100 --gpu A100 --high-mem   # the runtime, billed in compute units from here to `colab stop -s a100`
-colab usage                               # the balance and the rate (6.77 units an hour for this runtime)
-```
-
-and an SSH host entry whose `ProxyCommand` is `colab ssh --proxy-mode -s a100` carries `push.sh`, `pull.sh` and every
-command (`FLATSHARE_SSH="ssh -F <that file>"`). Four things differ from the hosts the kit was rehearsed on:
-
-1. **One connection.** The bridge carries one SSH connection at a time and refuses a second (HTTP 429): the host entry
-   multiplexes every command over one master connection (`ControlMaster auto`, `ControlPersist`), so that `pull.sh`'s
-   copy every two minutes, a watch and a command typed meanwhile share it, and the run starts detached (`nohup setsid`),
-   held by no connection.
-2. **No user manager.** The first stage chose flatshare-svc.
-3. **The driver's libraries outside the linker's search** (`/usr/lib64-nvidia`): `bootstrap.sh gpu` refused the host
-   until the GPU units named that directory, which the kit now does ([single-host mode](#single-host-mode)); this run's
-   host had it registered by hand (`/etc/ld.so.conf.d`, `ldconfig`) before the fix.
-4. **Billing from creation to stop**, whatever the card does: staging ran before the GPU stages, the core's blocks back
-   to back, and the optional arms were queued to start as the core ended, under one deadline the balance set; the
-   records were pulled every two minutes, and the runtime stopped once the last pull was in. This run's runtime lived
-   5 hours 5 minutes (04:07Z to 09:12Z) and used 34.35 compute units of 37.38, at 6.77 an hour; the GPU stages held the
-   card from 04:28Z to 09:12Z, 93% of that time.
 
 ## The kit, rehearsed on the box
 
