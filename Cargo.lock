@@ -478,16 +478,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "lh-core"
+name = "flatshare-core"
 version = "1.1.0"
 dependencies = [
- "lh-proto",
+ "flatshare-proto",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "lh-gateway"
+name = "flatshare-gateway"
 version = "1.1.0"
 dependencies = [
  "axum",
@@ -502,8 +502,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "lh-core",
- "lh-proto",
+ "flatshare-core",
+ "flatshare-proto",
  "listenfd",
  "memchr",
  "nix",
@@ -520,7 +520,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lh-proto"
+name = "flatshare-proto"
 version = "1.1.0"
 dependencies = [
  "schemars",
@@ -529,11 +529,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "lh-sim"
+name = "flatshare-sim"
 version = "1.1.0"
 dependencies = [
  "clap",
- "lh-core",
+ "flatshare-core",
  "serde",
  "serde_json",
  "sha2",
