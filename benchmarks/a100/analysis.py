@@ -399,14 +399,27 @@ def complete_points(host: Path, campaigns: str) -> list[Path]:
 
 
 def e2_lines(
-    points: list[Path], out: Path, lh_bench: Path | None, forecast_running: str, scenario: str
+    points: list[Path],
+    out: Path,
+    lh_bench: Path | None,
+    forecast_running: str,
+    scenario: str,
+    reference: list[Path] | None = None,
 ) -> list[str]:
     """E2's points: lh-bench e2 report's frontier over them (with lh-bench), the points by round, and each
-    configuration's measured running share against the forecast's for the scenario."""
+    configuration's measured running share against the forecast's for the scenario. `reference` (voice alone's
+    points, the SLO's reference) enters the report alone."""
     lines = []
     if lh_bench is not None:
         subprocess.run(
-            [str(lh_bench), "e2", "report", *map(str, points), "--out", str(out)],
+            [
+                str(lh_bench),
+                "e2",
+                "report",
+                *map(str, [*(reference or []), *points]),
+                "--out",
+                str(out),
+            ],
             check=True,
             capture_output=True,
         )
@@ -506,14 +519,17 @@ def batch_lines(batch: Path) -> list[str]:
 
 
 def e0_slopes(cells: dict[str, dict[str, float]]) -> dict[str, float]:
-    """E0's per-token terms, in µs a prompt token, between its shortest and longest prompt: the GPU hit's (the
-    host's work on a prompt, tokenizing and hashing it, with no prefill), and the CPU restore's beyond it (the
+    """E0's per-token terms, in µs a prompt token, as least-squares slopes over its prompt lengths: the GPU hit's
+    (the host's work on a prompt, tokenizing and hashing it, with no prefill), and the CPU restore's beyond it (the
     transfer)."""
     tokens = sorted(int(t) for t in cells["gpu"])
-    lo, hi = str(tokens[0]), str(tokens[-1])
-    span = (tokens[-1] - tokens[0]) / 1e3
-    gpu = (cells["gpu"][hi] - cells["gpu"][lo]) / span
-    return {"gpu_hit": gpu, "transfer": (cells["cpu"][hi] - cells["cpu"][lo]) / span - gpu}
+    thousands = [t / 1e3 for t in tokens]
+    gpu = [cells["gpu"][str(t)] for t in tokens]
+    beyond = [cells["cpu"][str(t)] - hit for t, hit in zip(tokens, gpu, strict=True)]
+    return {
+        "gpu_hit": statistics.linear_regression(thousands, gpu).slope,
+        "transfer": statistics.linear_regression(thousands, beyond).slope,
+    }
 
 
 def forecast_e0_box(text: str) -> dict[str, dict[str, float]]:
@@ -649,11 +665,12 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
         # The SLO's reference is voice alone on this card: the core's points of it.
         alone = [p for p in core_points if p.name == "w5-a1-voice"]
         lines += e2_lines(
-            alone + aprime,
+            aprime,
             out / "e2-aprime",
             lh_bench,
             forecast.aprime["running"],
             "A', 32 sessions",
+            reference=alone,
         )
     else:
         lines.append("Not measured: no A' point (results/e2/a100-aprime-r1, -r2).")

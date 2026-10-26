@@ -169,6 +169,19 @@ def test_the_core_section_reads_the_core_rounds_alone(tmp_path: Path) -> None:
         status = "running" if label == "in progress" else "complete"
         write(point / "run.json", json.dumps({"status": status, "arm": {"label": label}}))
         write(point / "summary.json", json.dumps({"kv": {"running_share": share}}))
+    # Voice alone, the SLO's reference, which A' reads from the core's rounds for its report alone.
+    voice = host / "results" / "e2" / "a100-r1" / "w5-a1-voice"
+    write(
+        voice / "run.json",
+        json.dumps(
+            {
+                "status": "complete",
+                "arm": {"name": "w5-a1-voice", "label": "voice alone"},
+                "agents_seed": 11,
+            }
+        ),
+    )
+    write(voice / "summary.json", json.dumps({"voice": {"v2v_ms": {"p95": 1445.0}}}))
     text = analysis.report(
         host, tmp_path / "corpus", tmp_path / "no-lh-sim", tmp_path / "out", None
     ).read_text()
@@ -181,6 +194,9 @@ def test_the_core_section_reads_the_core_rounds_alone(tmp_path: Path) -> None:
         "- the box's pool: 18%" in aprime
         and "against the forecast's 18% (central) for A'" in aprime
     )
+    # Voice alone has its round's row in §4; in A' it is the report's SLO reference alone, with no row or share.
+    assert "| 11 | 1,445 |" in section
+    assert "oice alone" not in aprime
 
 
 def test_the_tail_line_names_each_stock_setting_by_its_cap_and_threshold(tmp_path: Path) -> None:
@@ -379,8 +395,9 @@ def test_the_host_section_reads_e0_against_the_link_and_the_cpu_against_the_boxs
     tmp_path: Path,
 ) -> None:
     # E0's GPU hit grows with the prompt by the host's own work on it, and the CPU restore beyond the GPU hit is the
-    # transfer: here 1.83 and 12.84 µs a token, so 11.49 GB/s of 144 KiB a token, against the box's cells in the
-    # forecast's E0 table (3.61 and 23.70) and the forecast's own link.
+    # transfer, each a least-squares slope over the prompt lengths: here 1.83 and 12.84 µs a token, so 11.49 GB/s
+    # of 144 KiB a token, against the box's seven cells in the forecast's E0 table (3.79 and 23.60) and the
+    # forecast's own link.
     e0 = {
         "gpu": {"1024": 18.27, "31744": 74.57},
         "cpu": {"1024": 32.09, "31744": 482.72},
@@ -400,9 +417,9 @@ def test_the_host_section_reads_e0_against_the_link_and_the_cpu_against_the_boxs
     assert (
         "in 190.0 ms, the box's Xeon E5-2609 v4 at 1.70 GHz in 381.1: 2.01 times as fast." in text
     )
-    assert "by 1.83 ms every 1,000 tokens on this host and 3.61 on the box (1.97 times)" in text
+    assert "by 1.83 ms every 1,000 tokens on this host and 3.79 on the box (2.07 times)" in text
     assert (
-        "takes 12.84 µs a token on this host, 11.49 GB/s of KV, and 23.70 on the box (6.22 GB/s)"
+        "takes 12.84 µs a token on this host, 11.49 GB/s of KV, and 23.60 on the box (6.25 GB/s)"
         in text
     )
     assert "the forecast took 5.91 µs a token (25.0 GB/s)" in text
