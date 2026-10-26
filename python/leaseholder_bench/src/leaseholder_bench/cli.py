@@ -586,7 +586,7 @@ def _add_e2(commands: Commands) -> None:
         "the agents' tokens/s of the configurations a TOML file names, one [[row]] each "
         '(point = "...", label = "...", note = "...", change = true for the engine change\'s rows, '
         "featured = true for the one to deploy), in its order, or [[group]] tables of rows, one "
-        "per GPU",
+        'per GPU (title = "...", and gpu = "..." where the GPUs ran the same points)',
     )
     export = actions.add_parser(
         "export",

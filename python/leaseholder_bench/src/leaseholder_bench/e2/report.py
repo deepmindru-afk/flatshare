@@ -511,10 +511,11 @@ to deploy."""
 def read_dots(path: Path) -> list[dict[str, Any]]:
     """The groups of voice-p95.svg from a TOML file, in the file's order: the ``[[row]]`` tables
     at its top as one group, or ``[[group]]`` tables, each with a ``title`` and ``[[group.row]]``
-    tables, for a figure of several GPUs. A row names its point (``point``) and its label
-    (``label``), and may give a ``note``, whether it runs the engine change (``change``) and
-    whether it is the configuration to deploy (``featured``, at most one a group; it runs the
-    change), both false by default. A ValueError names what is wrong."""
+    tables, for a figure of several GPUs, and the ``gpu`` its points ran on where the GPUs ran the
+    same arm files (as :func:`gpu_name` gives it: "A100-SXM4-80GB"). A row names its point
+    (``point``) and its label (``label``), and may give a ``note``, whether it runs the engine
+    change (``change``) and whether it is the configuration to deploy (``featured``, at most one a
+    group; it runs the change), both false by default. A ValueError names what is wrong."""
     try:
         data = tomllib.loads(path.read_text())
     except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -525,8 +526,10 @@ def read_dots(path: Path) -> list[dict[str, Any]]:
     if not groups or not all(g.get("row") for g in groups):
         raise ValueError(f"{path}: no [[row]] tables")
     for group in groups:
-        if set(group) - {"title", "row"}:
-            raise ValueError(f"{path}: a group with keys other than title and row: {group}")
+        if set(group) - {"title", "gpu", "row"}:
+            raise ValueError(f"{path}: a group with keys other than title, gpu and row: {group}")
+        if not isinstance(group.get("gpu", ""), str):
+            raise ValueError(f"{path}: a group whose gpu is not a string: {group}")
         if len(groups) > 1 and not isinstance(group.get("title"), str):
             raise ValueError(f"{path}: a group without a title, among several")
         for row in group["row"]:
@@ -544,7 +547,7 @@ def read_dots(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"{path}: a featured row that does not run the change: {row}")
         if sum(bool(row.get("featured")) for row in group["row"]) > 1:
             raise ValueError(f"{path}: a group with more than one featured row")
-    return [{"title": g.get("title"), "rows": g["row"]} for g in groups]
+    return [{"title": g.get("title"), "gpu": g.get("gpu"), "rows": g["row"]} for g in groups]
 
 
 def write_report(
@@ -602,12 +605,21 @@ def _dot_group(
     group: Mapping[str, Any], configurations: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
     """A group of voice-p95.svg: the configuration of each point its rows name, with the row, and
-    their workload's voice SLO, GPU, callers and agents' sessions."""
+    their workload's voice SLO, GPU, callers and agents' sessions; with the group's ``gpu``, the
+    configurations measured on that GPU."""
+    gpu = group.get("gpu")
     chosen = []
     for dot in group["rows"]:
-        found = [g for g in configurations if g["point"] == dot["point"]]
+        found = [
+            g
+            for g in configurations
+            if g["point"] == dot["point"] and gpu in (None, gpu_name(g["runs"][0]["hardware"]))
+        ]
         if len(found) != 1:
-            raise ValueError(f"{len(found)} configurations of {dot['point']} in the report, not 1")
+            on = f" on {gpu}" if gpu else ""
+            raise ValueError(
+                f"{len(found)} configurations of {dot['point']}{on} in the report, not 1"
+            )
         chosen.append((found[0], dot))
     workloads = {c["workload"] for c, _ in chosen}
     if len(workloads) > 1:

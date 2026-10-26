@@ -1557,6 +1557,60 @@ def test_the_voice_figure_takes_a_group_for_each_gpu(tmp_path: Path) -> None:
         write_report(rows, tmp_path / "report", dots=read_dots(figure_toml))
 
 
+def test_a_group_names_its_gpu_where_both_gpus_ran_the_same_points(tmp_path: Path) -> None:
+    # The A100 ran the box's own arm files (benchmarks/a100/run.sh), so each point's name is on both
+    # GPUs: a group's gpu, as the figure names it, picks the configurations its rows mean.
+    a100 = "NVIDIA A100-SXM4-80GB"
+    dirs = []
+    for root, (voice, frozen, pr), tokens in (
+        ("box", (1760, 10000, 2200), (3300, 3200)),
+        ("a100", (1700, 4000, 1800), (9000, 8800)),
+    ):
+        dirs += [
+            point(tmp_path / root, "a1-voice", "1", None, voice),
+            point(tmp_path / root, "frozen", "4", tokens[0], frozen),
+            point(tmp_path / root, "pr", "9", tokens[1], pr),
+        ]
+    for run_dir in dirs:
+        if run_dir.parent.name == "a100":
+            samples = [named(T0 + 10, "1410 MHz", a100), named(T0 + 20, "1395 MHz", a100)]
+            (run_dir / "gpu.csv").write_text("\n".join(samples) + "\n")
+        if run_dir.name != "a1-voice":
+            rewrite(
+                run_dir,
+                lambda s: s["background"].update(
+                    fixed_window={"tokens_per_s": s["background"]["tokens_per_s"], "seconds": 240.0}
+                ),
+            )
+    rows, _ = load_points(dirs)
+    figure_toml = tmp_path / "figure.toml"
+    both = (
+        '[[group.row]]\npoint = "frozen"\nlabel = "Tuned vLLM"\n'
+        '[[group.row]]\npoint = "pr"\nlabel = "Both PRs"\nchange = true\nfeatured = true\n'
+    )
+    figure_toml.write_text(
+        f'[[group]]\ntitle = "RTX 5060 Ti 16 GB"\ngpu = "RTX 5060 Ti"\n{both}'
+        f'[[group]]\ntitle = "A100 80 GB"\ngpu = "A100-SXM4-80GB"\n{both}'
+    )
+    groups = read_dots(figure_toml)
+    assert [g["gpu"] for g in groups] == ["RTX 5060 Ti", "A100-SXM4-80GB"]
+    for path in write_report(rows, tmp_path / "report", dots=groups)[-2:]:
+        figure = path.read_text()
+        assert figure.index(">RTX 5060 Ti 16 GB<") < figure.index(">A100 80 GB<")
+        assert ">SLO 2.01 s<" in figure and ">SLO 1.95 s<" in figure
+        assert ">3,200<" in figure and ">97%<" in figure  # the box's PRs, 3,200 of its 3,300
+        assert ">8,800<" in figure and ">98%<" in figure  # the A100's, 8,800 of its 9,000
+    figure_toml.write_text(f'[[group]]\ntitle = "Both"\n{both}')
+    with pytest.raises(ValueError, match="2 configurations of frozen in the report, not 1"):
+        write_report(rows, tmp_path / "report", dots=read_dots(figure_toml))
+    figure_toml.write_text(f'[[group]]\ntitle = "H100"\ngpu = "H100 80GB HBM3"\n{both}')
+    with pytest.raises(ValueError, match="0 configurations of frozen on H100 80GB HBM3 in the"):
+        write_report(rows, tmp_path / "report", dots=read_dots(figure_toml))
+    figure_toml.write_text(f'[[group]]\ntitle = "A100"\ngpu = 100\n{both}')
+    with pytest.raises(ValueError, match="a group whose gpu is not a string"):
+        read_dots(figure_toml)
+
+
 def test_a_point_summary_reads_its_run_directory(tmp_path: Path) -> None:
     run_dir = tmp_path / "a1"
     (run_dir / "bots").mkdir(parents=True)
