@@ -56,6 +56,9 @@ This report makes four contributions:
   traces (§4, §5.1).
 - **It changes vLLM's priority scheduling** for a full KV cache and for prefill interference, in two rules proposed
   upstream as two stacked pull requests and built into vLLM 0.32's scheduler without modifying the installed vLLM (§3).
+  Neither idea is new (§7). The first brings to vLLM's V1 scheduler the preemption for a waiting request that its V0
+  scheduler had only with chunked prefill off, and keeps the victims' KV in the CPU tier; the second bounds its hold
+  on lower-priority prefill to the reply's first tokens, sized to cover its first sentence.
 - **It shows each rule necessary and prices it.** The KV preemption alone halves the tail; the prefill rule closes most
   of the rest once its window covers the reply's first sentence; the agents keep 97% of their throughput and pay through
   the prefill rule's hold, not the preemptions (§5.2-5.4).
@@ -107,7 +110,9 @@ prefix-hit blocks never count as freed. And the running decodes keep growing unt
 asynchronous scheduling, with frees deferred by a step, means two steps of growth. The scheduler makes no room again for
 a request the waiting loop has not tried since, and a victim waits until prefills already in flight have the blocks they
 still need, so preemptions cannot cascade. With vLLM's CPU offload connector, a victim's pending stores are flushed and
-its KV stays in the CPU tier: it resumes by a restore.
+its KV stays in the CPU tier: it resumes by a restore. vLLM's V0 scheduler preempted for the highest-priority waiting
+request too ([#5958](https://github.com/vllm-project/vllm/pull/5958)), until it fit and with no cap, but only with
+chunked prefill off and by recompute; V1's never has (§7).
 
 **The budget cap ([#63351](https://github.com/vllm-project/vllm/pull/63351)).** Lower-priority prefill sits out the
 steps of a high-priority request's first tokens: from the step in which the highest-priority waiting request fits, while
@@ -305,19 +310,35 @@ warm caches; the engine's first start on empty caches takes 532 s.
 
 ## 7. Related work
 
-**Co-serving a latency class with best-effort work** is established. ConServe, HyGen, BROS and Niyama schedule online
-requests beside offline ones in one engine, and Valve colocates them in production on 8,054 GPUs with sub-millisecond
-compute preemption and dynamic memory reservation. We do not claim the goal. We measure it for a workload pair these
-systems do not report together, a cascaded voice agent beside long-context coding agents on one GPU, and change an
-existing engine's scheduler rather than build one.
+**Co-serving a latency class with best-effort work** is established. ConServe, HyGen, BROS, Niyama, Chiron, Echo and
+ProServe schedule online requests beside offline ones, and Valve colocates them in production on 8,054 GPUs with
+sub-millisecond compute preemption and dynamic memory reservation. We do not claim the goal. We measure it for a
+workload pair these systems do not report together, a cascaded voice agent beside long-context coding agents on one
+GPU, and change an existing engine's scheduler rather than build one.
 
-**Engines.** vLLM preempts among running requests under priority scheduling, never for a waiting one (#40004), and its
-open fixes (#54530 and the ones before it) preempt at the request-count cap, which does not bind when KV fills. SGLang
-ships priority preemption, but its admission loop stops when KV memory runs out; draft #45686 adds preemption on KV
-exhaustion with a best-effort keep of the victim's KV, the SGLang counterpart of our first rule. Llumnix holds memory
-headroom for a high-priority request and migrates others away; DeepInfer admits prefill only below a 90% KV watermark.
-Sarathi-Serve's chunked prefill bounds how long a decode waits behind a prefill; our second rule takes lower-priority
-chunks out of a high-priority reply's first steps altogether.
+**Engines.** vLLM's V0 scheduler had the first rule's preemption: from v0.6.2 (#5958, 2024) until V0 was removed in
+v0.11.0 (2025), a waiting request of the highest priority that could not be allocated preempted lower-priority running
+requests until it fit, but only with chunked prefill off, and the victims were recomputed. Priority scheduling in the
+V1 scheduler (#19057) preempts among running requests, never for a waiting one (#40004), and its open fixes (#54530 and
+the ones before it) preempt at the request-count cap, which does not bind when KV fills. Our first rule brings V0's
+preemption to V1's scheduler, under chunked prefill and with the CPU tier keeping the victims' KV. SGLang ships priority
+preemption, but its admission loop stops when KV memory runs out; draft #45686 adds preemption on KV exhaustion with a
+best-effort keep of the victim's KV, the SGLang counterpart of our first rule. Llumnix holds memory headroom for a
+high-priority request and migrates others away; DeepInfer admits prefill only below a 90% KV watermark. Sarathi-Serve's
+chunked prefill bounds how long a decode waits behind a prefill; our second rule takes lower-priority chunks out of a
+high-priority reply's first steps altogether.
+
+**Preemption that keeps the victim's KV, and prefill held back.** Both rules' ideas are published. TokenFlow (EuroSys
+2026) preempts running streams so that waiting ones run, and writes KV through to host memory as it is generated, so
+that a preemption's offload is nearly instant. ConServe (ICML 2026), built atop vLLM, preempts offline requests when an
+online one lacks memory and checkpoints each new token's KV to host memory; Chiron lets interactive requests evict batch
+ones, migrating the batch requests' KV to CPU memory; ProServe and FastServe (NSDI 2026) copy lower-priority requests'
+KV to host memory ahead of need; Echo builds its online-offline scheduler on V0's #5958. Semantic Scheduling keeps new
+prefills out of the batch while its most urgent request decodes, and VoxServe, serving speech language models,
+prioritizes newly admitted requests until their first audio chunk. What is ours is narrower: the two rules as a change
+to vLLM's V1 scheduler, the second's window bounded to the reply's first tokens and sized to the first sentence the
+voice agent hands to text to speech, and their measurement end to end beside coding agents, negative results included
+(§5.5, §5.6).
 
 **Routers and gateways.** llm-d's flow control (priority bands, holdback ceilings, SLO-deadline ordering), SMG (reserved
 slots per class, preemption before the first byte), Dynamo and AIBrix (priority queues mapped onto engine priority) and

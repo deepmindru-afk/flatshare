@@ -40,10 +40,10 @@ and range is in [BENCHMARKS.md](docs/BENCHMARKS.md#voice-under-agent-load-e2).
 
 ## What it shows
 
-1. **vLLM cannot preempt for a waiting request.** Its scheduler serves running requests first and preempts only so that
-   one of them can grow; the waiting loop stops at the first request it cannot allocate. Behind two 18k-token agent
-   requests in a full pool, a 750-token voice turn waits 4.9–5.0 s for its first token, and 219–290 ms with #63350 ([the
-   KV case](docs/BENCHMARKS.md#the-kv-case-make-room)).
+1. **vLLM 0.32 cannot preempt for a waiting request.** Its scheduler serves running requests first and preempts only
+   so that one of them can grow; the waiting loop stops at the first request it cannot allocate. Behind two 18k-token
+   agent requests in a full pool, a 750-token voice turn waits 4.9–5.0 s for its first token, and 219–290 ms with
+   #63350 ([the KV case](docs/BENCHMARKS.md#the-kv-case-make-room)).
 2. **Getting the turn into the batch is not enough.** A step cap bounds tokens, not time. Beside three agent prefills
    the reply's tokens come 60–65 ms apart with #63350 alone and 16–20 ms apart with #63351, and #63350 alone leaves the
    voice p95 at 5.1 s.
