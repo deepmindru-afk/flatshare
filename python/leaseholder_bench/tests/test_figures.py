@@ -1,7 +1,6 @@
 """The docs' figures: what their style refuses to draw, the contrast of its inks, and that every SVG under
-docs/figures is what its generator draws today from the committed records (`make e2-figures e2-w5-figure`
-rewrites them), so a change to a generator, a record or figure.toml fails here until the figures are drawn
-again."""
+docs/figures is what its generator draws today from the committed records (`make figures` rewrites them), so a
+change to a generator, a record or figure.toml fails here until the figures are drawn again."""
 
 from __future__ import annotations
 
@@ -10,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from leaseholder_bench import diagrams
 from leaseholder_bench import figure_style as style
 from leaseholder_bench.e2.report import load_points, read_dots, write_report
 
@@ -126,11 +126,15 @@ def drawn(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     rows, incomplete = load_points(sorted(run.parent for run in W5.glob("*/*/run.json")))
     assert rows and not incomplete
     write_report(rows, out / "w5", dots=read_dots(W5 / "figure.toml"))
+    # make method-figure.
+    diagrams.render(out)
     return {
         "e2-frontier.svg": out / "e2" / "frontier-weka-x32-long.svg",
         "e2-waterfall.svg": out / "e2" / "waterfall.svg",
         "e2-voice-p95.svg": out / "w5" / "voice-p95.svg",
         "e2-voice-p95-narrow.svg": out / "w5" / "voice-p95-narrow.svg",
+        "method.svg": out / "method.svg",
+        "method-narrow.svg": out / "method-narrow.svg",
     }
 
 
@@ -139,7 +143,7 @@ def test_every_svg_under_docs_figures_is_what_its_generator_draws(drawn: dict[st
     stale = [
         name for name, path in drawn.items() if path.read_bytes() != (DOCS / name).read_bytes()
     ]
-    assert not stale, f"run make e2-figures e2-w5-figure and commit what they draw: {stale}"
+    assert not stale, f"run make figures and commit what it draws: {stale}"
 
 
 def test_the_figures_set_their_type_in_its_sizes_and_never_in_bold(drawn: dict[str, Path]) -> None:
@@ -151,3 +155,6 @@ def test_the_figures_set_their_type_in_its_sizes_and_never_in_bold(drawn: dict[s
         assert "font-weight:400" in svg and not re.search(r"font-weight:(?!400)|bold", svg), name
         # Each paints its own page, under prefers-color-scheme's palette.
         assert '<rect class="page"' in svg and "prefers-color-scheme:dark" in svg, name
+        # Orange text clears 4.5:1 on the page alone, not on a panel's ground: the method figure sets none.
+        if name.startswith("method"):
+            assert 'class="orange tint' not in svg, name

@@ -21,8 +21,8 @@ E2_W5_REPORT ?= build/reproduce-e2-w5
 
 .PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-make-room-ci \
   test-python schema metrics \
-  reproduce-e1 reproduce-calibration reproduce-e2 reproduce-e2-w5 e2-figures e2-w5-figure forecast-a100 \
-  forecast-fitted profiles reproduce-a100 check-a100-calibration
+  reproduce-e1 reproduce-calibration reproduce-e2 reproduce-e2-w5 figures e2-figures e2-w5-figure method-figure \
+  forecast-a100 forecast-fitted profiles reproduce-a100 check-a100-calibration
 
 check: lint test
 
@@ -252,6 +252,14 @@ e2-w5-figure:
 	@mkdir -p docs/figures
 	cp build/e2-w5-figure/voice-p95.svg docs/figures/e2-voice-p95.svg
 	cp build/e2-w5-figure/voice-p95-narrow.svg docs/figures/e2-voice-p95-narrow.svg
+
+# The README's method figure, docs/figures/method.svg and its phone layout method-narrow.svg: the voice agent and the
+# coding agents on one GPU, and the two scheduler rules of #63350 and #63351, drawn by leaseholder_bench.diagrams.
+method-figure:
+	cd python/leaseholder_bench && uv run -q python -m leaseholder_bench.diagrams $(abspath docs/figures)
+
+# Every figure under docs/figures that its records or its code draw; the bench's tests check each is current.
+figures: e2-figures e2-w5-figure method-figure
 
 # The frozen box's hardware profile against deploy/phastform (deploy/profile.py): `make profiles` checks that it
 # renders today's files byte for byte, and `make profiles UPDATE=1` writes them from deploy/templates after a

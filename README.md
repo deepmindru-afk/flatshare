@@ -43,6 +43,13 @@ and range is in [BENCHMARKS.md](docs/BENCHMARKS.md#voice-under-agent-load-e2).
 
 ## What it shows
 
+<picture>
+  <source media="(max-width: 767px)" srcset="docs/figures/method-narrow.svg">
+  <img src="docs/figures/method.svg" width="100%" alt="The method in three panels. (a) A caller's speech goes to speech to text, then to vLLM 0.32's scheduler with #63350 and #63351, then to text to speech and back to the caller; 24 coding-agent sessions send their requests to the same scheduler at priority 2, the voice turn's at priority 0, and the scheduler allocates from the KV pool beneath it. (b) #63350: in a full pool of 12 KV blocks, two agent requests hold 5 each and 2 are free; a voice turn that needs 4 waits beside it on stock vLLM, and with #63350 the latest agent request, agent B, is preempted and the turn takes its blocks. (c) #63351: without it, each step of the reply carries an agent's prefill chunk beside its token, 14 tokens in the time #63351, holding agent prefill, gives the reply its first 48; agent prefill resumes after the window">
+</picture>
+
+*The voice agent's turn and the coding agents share vLLM's scheduler and its KV pool (a). #63350 lets a waiting turn take KV from the latest agent request (b); #63351 keeps agent prefill out of the steps of the reply's first tokens (c). The blocks and steps are illustrative; a step's length is drawn in the ratio of the gaps measured between the reply's tokens beside agent prefill and with it held (60–65 and 16–20 ms).*
+
 1. **vLLM 0.32 cannot preempt for a waiting request.** Its scheduler serves running requests first and preempts only
    so that one of them can grow; the waiting loop stops at the first request it cannot allocate. Behind two 18k-token
    agent requests in a full pool, a 750-token voice turn waits 4.9–5.0 s for its first token, and 219–290 ms with
