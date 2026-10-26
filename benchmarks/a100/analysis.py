@@ -378,7 +378,8 @@ def probe_lines(runs: Path, forecast: Forecast | None = None) -> list[str]:
 
 
 def running_shares(points: list[Path]) -> dict[str, list[float]]:
-    """Each configuration's measured running shares (the points' summary.json kv), by arm label."""
+    """Each configuration's measured running shares (the points' summary.json kv), by its name in POINTS, as the
+    rounds' table gives it, or its arm's label."""
     shares: dict[str, list[float]] = {}
     for point in points:
         try:
@@ -388,7 +389,10 @@ def running_shares(points: list[Path]) -> dict[str, list[float]]:
             continue
         kv = summary.get("kv") or {}
         if "running_share" in kv:
-            shares.setdefault(run["arm"]["label"], []).append(kv["running_share"])
+            arm = run["arm"]
+            shares.setdefault(POINTS.get(arm.get("name", ""), arm["label"]), []).append(
+                kv["running_share"]
+            )
     return shares
 
 

@@ -127,12 +127,19 @@ def test_running_shares_by_configuration(tmp_path: Path) -> None:
         ("b", "frozen", 0.15),
         ("c", "PRs", 0.05),
         ("d", "voice", None),
+        ("e", "vLLM PRs A and B with a 48-token window", 0.06),
     ):
-        write(tmp_path / name / "run.json", json.dumps({"arm": {"label": label}}))
+        arm = {"label": label} | ({"name": "w5-disc-pr-ab48-s24"} if name == "e" else {})
+        write(tmp_path / name / "run.json", json.dumps({"arm": arm}))
         kv = {"running_share": share} if share is not None else None
         write(tmp_path / name / "summary.json", json.dumps({"kv": kv}))
     points = sorted(tmp_path.iterdir())
-    assert analysis.running_shares(points) == {"frozen": [0.12, 0.15], "PRs": [0.05]}
+    # A point of the A100's arm files goes by its name in the rounds' table, as the docs give it.
+    assert analysis.running_shares(points) == {
+        "frozen": [0.12, 0.15],
+        "PRs": [0.05],
+        "The PRs' values": [0.06],
+    }
 
 
 def test_a_report_says_what_its_records_lack(tmp_path: Path) -> None:
