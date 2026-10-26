@@ -361,6 +361,74 @@ def test_a_unit_has_started_though_its_main_process_exits_before_the_runner_look
         ctl(host, "--user", "stop", "quick.service")
 
 
+def test_a_start_keeps_what_its_runner_wrote_while_the_client_was_held_up(host: dict) -> None:
+    # A start wrote the unit's state after spawning its runner: activating, the runner's pid and no main process. A
+    # runner that had started its main process and reached active by then (the client descheduled on a busy host;
+    # LH_SVC_SPAWN_DELAY makes it so) lost those writes: the unit read activating for as long as it ran, and a second
+    # start waited out its TimeoutStartSec for it and failed. The client now writes the state before the spawn, and the
+    # runner's pid alone after it.
+    py = sys.executable
+    (host["units"] / "held.service").write_text(
+        f"[Service]\nExecStart={py} -c 'import time; time.sleep(60)'\nTimeoutStartSec=5\n"
+    )
+    try:
+        done = subprocess.run(
+            ["systemctl", "--user", "start", "held.service"],
+            env=os.environ | host["env"] | {"LH_SVC_SPAWN_DELAY": "3"},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert done.returncode == 0, done.stderr
+        assert ctl(host, "--user", "is-active", "held.service").stdout.strip() == "active"
+        # The main process its runner recorded, still there.
+        recorded = Path(host["env"]["XDG_STATE_HOME"]) / "lh-svc" / "held.service.json"
+        state = json.loads(recorded.read_text())
+        assert state["main"] and not gone(state["main"]), state
+        begun = time.monotonic()
+        again = ctl(host, "--user", "start", "held.service")
+        took = time.monotonic() - begun
+        assert again.returncode == 0 and took < 3, (again.stderr, took)
+    finally:
+        ctl(host, "--user", "stop", "held.service")
+
+
+def test_a_unit_reads_activating_while_its_start_spawns_its_runner(
+    host: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A start writes its unit activating before it spawns the runner: until the runner is named, the client stands for
+    # it, or is-active reads the unit failed meanwhile, as it reads an activating unit whose runner is gone. Here this
+    # process is the start's client, and reads the unit at the spawn.
+    for key, value in host["env"].items():
+        monkeypatch.setenv(key, value)
+    lh_svc = _module("lh_svc", BIN / "lh-svc")
+    (host["units"] / "spawned.service").write_text(
+        f"[Service]\nExecStart={sys.executable} -c 'import time; time.sleep(60)'\n"
+    )
+    read: list[str] = []
+    runners: list[subprocess.Popen] = []
+    popen = subprocess.Popen
+
+    def spawn(argv: list[str], **kwargs: object) -> subprocess.Popen:
+        if argv[2:] != ["run", "spawned.service"]:
+            return popen(argv, **kwargs)
+        read.append(lh_svc.current("spawned.service"))
+        runners.append(popen(argv, **kwargs))
+        return runners[-1]
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    try:
+        assert lh_svc.start(["spawned.service"]) == 0
+    finally:
+        monkeypatch.setattr(subprocess, "Popen", popen)
+        # This process is the runner's parent, and reaps it as it exits, as init reaps one whose client has exited:
+        # the stop waits for the runner to be gone, and where there is no /proc a zombie reads as alive.
+        for runner in runners:
+            threading.Thread(target=runner.wait, daemon=True).start()
+        ctl(host, "--user", "stop", "spawned.service")
+    assert read == ["activating"]
+
+
 def system_pythons() -> list[str]:
     """The host's own interpreters from 3.10 on, which the shims run before any venv exists (the tests' own
     Python is the venv's)."""
@@ -558,6 +626,39 @@ def test_a_runner_stops_whichever_line_of_its_wait_its_sigterm_is_handled_at(
     except subprocess.TimeoutExpired:
         pytest.fail("the runner froze: its SIGTERM handler waited for good on its wait's lock")
     assert done.returncode == 0 and done.stdout.strip() == "stopped", done.stderr
+
+
+def test_two_writes_of_a_units_state_at_once_keep_each_others_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # write_state reads the unit's state, merges its fields in and writes it back through a temporary file: two writers
+    # at once, a client and its runner, lost each other's fields, or the second found the first's temporary file
+    # renamed. Each now holds the state's own lock from its read to its rename. Here each read is held up long enough
+    # for both writers to have read before either writes.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    lh_svc = _module("lh_svc", BIN / "lh-svc")
+    read = lh_svc.read_state
+
+    def slow_read(name: str) -> dict:
+        values = read(name)
+        time.sleep(0.3)
+        return values
+
+    monkeypatch.setattr(lh_svc, "read_state", slow_read)
+    raised: list[Exception] = []
+
+    def write(**values: object) -> None:
+        try:
+            lh_svc.write_state("both.service", **values)
+        except Exception as exc:
+            raised.append(exc)
+
+    writers = [threading.Thread(target=write, kwargs={key: 1}) for key in ("first", "second")]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+    assert not raised and read("both.service").keys() >= {"first", "second"}, raised
 
 
 def journal_times(host: dict, unit: str, message: str) -> list[float]:

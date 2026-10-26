@@ -332,11 +332,16 @@ def write_state(name: str, **values: object) -> None:
         if key in values:
             values[f"{key}_start"] = started_at(values[key])
     values["boot"] = boot_id()
-    state = read_state(name) | values
-    path = state_path(name)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state))
-    temporary.replace(path)
+    # The read, the merge and the rename under a lock of the state's own, not the unit's, which a start holds while it
+    # writes: a client and its runner writing at once lost each other's fields, or the one found the other's temporary
+    # file renamed.
+    with open(state_dir() / f"{name}.state.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = read_state(name) | values
+        path = state_path(name)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state))
+        temporary.replace(path)
 
 
 def alive(pid: int | None) -> bool:
@@ -454,6 +459,9 @@ def subreaper() -> bool:
 LOOK_DELAY = "LH_SVC_LOOK_DELAY"
 """The tests' stand-in for a loaded host: seconds a runner waits, once it has started a unit's main process, before it
 first looks at it, where a busy host can deschedule it for longer than a main process that exits at once lives."""
+SPAWN_DELAY = "LH_SVC_SPAWN_DELAY"
+"""The same for a start: seconds the client waits between spawning a unit's runner and writing its pid, where a busy
+host can deschedule it for as long as the runner takes to start the unit."""
 
 
 class Stopping:
@@ -610,6 +618,8 @@ class Runner:
         """One start: the unit's exit status, or None when it was stopped."""
         env = environment(unit)
         deadline = time.time() + unit.seconds("TimeoutStartSec", 90.0)
+        # Its own pid too, the one its client writes: a client killed between the spawn and that write would otherwise
+        # leave a runner that no stop finds. It writes no other runner but None, at its end.
         write_state(self.name, state="activating", runner=os.getpid(), main=None)
         self.say(f"Starting {self.name}")
         if not self.control(unit, "ExecStartPre", env, deadline):
@@ -857,6 +867,11 @@ def start(names: list[str]) -> int:
             runner = None
             # A live runner's start, or its deactivation still past its time: joined, never a second runner.
             if state not in ("activating", "deactivating"):
+                # The start's state before the runner runs, and after its spawn the runner's pid alone: a runner that
+                # wrote its main process, or active, before this client's next write (on a busy host) keeps them.
+                # Until the spawn the client stands for its runner, so that the unit reads activating meanwhile, not
+                # failed, as an activating unit whose runner is gone reads.
+                write_state(name, state="activating", runner=os.getpid(), main=None, result=None)
                 runner = subprocess.Popen(
                     [sys.executable, os.path.abspath(__file__), "run", name],
                     stdin=subprocess.DEVNULL,
@@ -864,7 +879,9 @@ def start(names: list[str]) -> int:
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
-                write_state(name, state="activating", runner=runner.pid, main=None, result=None)
+                if delay := os.environ.get(SPAWN_DELAY):
+                    time.sleep(float(delay))
+                write_state(name, runner=runner.pid)
         # The wait, unlocked.
         deadline = time.time() + unit.seconds("TimeoutStartSec", 90.0) + 10
         while time.time() < deadline:
