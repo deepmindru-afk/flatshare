@@ -6,6 +6,8 @@
 //! box's own measured values stand beside them. Where the box has a measurement of the same thing
 //! (E0's cells, the probes on Gray), the forecast is that measurement times the modeled ratio of the
 //! two cards, so that what the box's model misses of its own measurement does not carry over.
+//! Once the card has a step-time model and E0 tier fits of its own, the forecast places the
+//! calibration point and the core with them too ([`fitted_cells`]).
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -234,6 +236,12 @@ impl Cell {
     }
 }
 
+/// The scenarios at the box's pool: the core, more agents than its 24 sessions, and the calibration
+/// point.
+const CORE: &str = "A: the core, the box's pool";
+const MORE_AGENTS: &str = "A': the box's pool, more agents";
+const CALIBRATION: &str = "the calibration point, the whole corpus";
+
 /// E2's scenarios on `gpu`, as the A100 campaign's design names them, with the box's own cells
 /// beside the core's and the calibration's.
 pub fn cells(gpu: &Gpu) -> Vec<Cell> {
@@ -264,11 +272,9 @@ pub fn cells(gpu: &Gpu) -> Vec<Cell> {
     let gpu14 = Costs::of(gpu, &QWEN3_14B_FP8, central);
     let own4 = gpu.model_pool_tokens(&QWEN3_4B_FP8);
     let own14 = gpu.model_pool_tokens(&QWEN3_14B_FP8);
-    let core = "A: the core, the box's pool";
-    let calibration = "the calibration point, the whole corpus";
     let mut out = vec![
         cell(
-            core,
+            CORE,
             true,
             measured.clone(),
             QWEN3_4B_FP8,
@@ -277,7 +283,7 @@ pub fn cells(gpu: &Gpu) -> Vec<Cell> {
             pool,
         ),
         cell(
-            core,
+            CORE,
             true,
             name("the E1 map's"),
             QWEN3_4B_FP8,
@@ -286,7 +292,7 @@ pub fn cells(gpu: &Gpu) -> Vec<Cell> {
             pool,
         ),
         cell(
-            core,
+            CORE,
             true,
             name("central"),
             QWEN3_4B_FP8,
@@ -295,7 +301,7 @@ pub fn cells(gpu: &Gpu) -> Vec<Cell> {
             pool,
         ),
         cell(
-            calibration,
+            CALIBRATION,
             false,
             measured,
             QWEN3_4B_FP8,
@@ -304,7 +310,7 @@ pub fn cells(gpu: &Gpu) -> Vec<Cell> {
             pool,
         ),
         cell(
-            calibration,
+            CALIBRATION,
             false,
             name("central"),
             QWEN3_4B_FP8,
@@ -314,7 +320,7 @@ pub fn cells(gpu: &Gpu) -> Vec<Cell> {
         ),
     ];
     out.push(cell(
-        "A': the box's pool, more agents",
+        MORE_AGENTS,
         true,
         name("central"),
         QWEN3_4B_FP8,
@@ -354,6 +360,29 @@ pub fn cells(gpu: &Gpu) -> Vec<Cell> {
         24,
         own4,
     ));
+    out
+}
+
+/// The cells with `costs`, the card's fitted costs: the calibration point, to read the fitted model
+/// against the measured point, and the discriminating scenario at the box's pool at each of
+/// `sessions`, named A' above the core's 24. Each is otherwise its scenario's central cell.
+pub fn fitted_cells(gpu: &Gpu, costs: &Costs, sessions: &[usize]) -> Vec<Cell> {
+    let cell = |scenario, long, sessions| Cell {
+        scenario,
+        long,
+        label: format!("{} (fitted)", gpu.title),
+        model: QWEN3_4B_FP8,
+        costs: costs.clone(),
+        sessions,
+        pool_tokens: lh_core::FROZEN_BOX_POOL_TOKENS,
+        cpu_bytes: lh_core::FROZEN_BOX_CPU_BYTES,
+    };
+    let mut out = vec![cell(CALIBRATION, false, 16)];
+    out.extend(
+        sessions
+            .iter()
+            .map(|&s| cell(if s > 24 { MORE_AGENTS } else { CORE }, true, s)),
+    );
     out
 }
 
@@ -619,15 +648,22 @@ pub fn probes_section(gpu: &Gpu) -> String {
 /// The placements table.
 pub fn placements_table(cells: &[Cell], placed: &[Placed], seeds: &[u64]) -> String {
     let seeds: Vec<_> = seeds.iter().map(u64::to_string).collect();
-    let mut text = format!(
+    format!(
         "Means over seeds {}; `lru-cpu`, the stock engine's policy; a realtime tier of two calls. \
          Running / working set: the time running agent requests / the agents' working set leave \
          those calls short of KV. Busy: the card's step time over the replay's. Stalled: the \
-         requests that waited for free blocks.\n\n\
-         | Scenario | Card | Sessions | Pool | CPU tier | Pressure | π | ρ | Running / working set \
+         requests that waited for free blocks.\n\n{}",
+        seeds.join(", "),
+        table(cells, placed),
+    )
+}
+
+/// The placements table's head and a row per cell.
+fn table(cells: &[Cell], placed: &[Placed]) -> String {
+    let mut text = String::from(
+        "| Scenario | Card | Sessions | Pool | CPU tier | Pressure | π | ρ | Running / working set \
          | Busy | Stalled | Computed | Resume TTFT p50 / p90 |\n\
          |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
-        seeds.join(", "),
     );
     for (c, p) in cells.iter().zip(placed) {
         writeln!(
@@ -746,8 +782,72 @@ pub fn reading(gpu: &Gpu, cells: &[Cell], placed: &[Placed]) -> String {
     text
 }
 
-/// The whole report for `gpu`.
-pub fn report(gpu: &Gpu, cells: &[Cell], placed: &[Placed], seeds: &[u64]) -> String {
+/// The cells with the card's fitted costs ([`fitted_cells`]), where they were placed, and the names
+/// of the files the costs came from.
+#[derive(Clone, Copy, Debug)]
+pub struct Fitted<'a> {
+    /// E0's summary (`--costs`) and the step-time model (`--step-costs`).
+    pub summary: &'a str,
+    pub steps: &'a str,
+    pub cells: &'a [Cell],
+    pub placed: &'a [Placed],
+}
+
+/// Of `(sessions, running share)` pairs, the one whose share is closest to `target`, the lower
+/// session count on a tie.
+pub fn closest_sessions(target: f64, shares: &[(usize, f64)]) -> Option<(usize, f64)> {
+    shares.iter().copied().min_by(|a, b| {
+        (a.1 - target)
+            .abs()
+            .total_cmp(&(b.1 - target).abs())
+            .then(a.0.cmp(&b.0))
+    })
+}
+
+/// The fitted cells' section: where their costs came from, their table, and the session count at
+/// which the core's running share comes closest to the box's (`cells`' measured core cell).
+pub fn fitted_section(fitted: &Fitted<'_>, cells: &[Cell], placed: &[Placed]) -> String {
+    let mut text = format!(
+        "\n## With the card's fitted costs\n\nThe calibration point and the core at the box's pool \
+         with the card's own costs in place of the modeled ones: the step-time model in `{}` and \
+         E0's tier fits in `{}`.\n\n",
+        fitted.steps, fitted.summary,
+    );
+    text.push_str(&table(fitted.cells, fitted.placed));
+    let on_box = cells
+        .iter()
+        .zip(placed)
+        .find(|(c, _)| c.scenario == CORE && c.label.contains("measured"));
+    let core: Vec<(usize, f64)> = fitted
+        .cells
+        .iter()
+        .zip(fitted.placed)
+        .filter(|(c, _)| c.long)
+        .map(|(c, p)| (c.sessions, p.running_share))
+        .collect();
+    if let Some((_, b)) = on_box
+        && let Some((sessions, share)) = closest_sessions(b.running_share, &core)
+    {
+        writeln!(
+            text,
+            "\nClosest to the box's running share in the core ({}): {sessions} sessions ({}).",
+            pct(b.running_share),
+            pct(share),
+        )
+        .expect("writing to a String");
+    }
+    text
+}
+
+/// The whole report for `gpu`, with the fitted cells' section after the scenario table when
+/// `fitted` gives them.
+pub fn report(
+    gpu: &Gpu,
+    cells: &[Cell],
+    placed: &[Placed],
+    seeds: &[u64],
+    fitted: Option<&Fitted<'_>>,
+) -> String {
     // The make target that writes it: the A100 40 GB's is the default.
     let target = if gpu.name == hardware::A100_40GB.name {
         "make forecast-a100".to_string()
@@ -799,6 +899,9 @@ pub fn report(gpu: &Gpu, cells: &[Cell], placed: &[Placed], seeds: &[u64]) -> St
     )
     .expect("writing to a String");
     text.push_str(&placements_table(cells, placed, seeds));
+    if let Some(fitted) = fitted {
+        text.push_str(&fitted_section(fitted, cells, placed));
+    }
     writeln!(text, "\n## What the forecast says the run will show\n").expect("writing to a String");
     text.push_str(&reading(gpu, cells, placed));
     text
@@ -971,7 +1074,7 @@ mod tests {
         assert!(names.contains(&("C': Qwen3-14B-FP8 at its own pool", 40, 379_488)));
         assert!(names.contains(&("D: Qwen3-4B at the card's own pool", 24, 502_432)));
         // The report names the make target that writes it.
-        let text = report(&A100_80GB, &cells, &[], &[11]);
+        let text = report(&A100_80GB, &cells, &[], &[11], None);
         assert!(
             text.starts_with(
                 "# Forecast: the A100 SXM4 80 GB against the frozen box\n\nWritten by `lh-sim \
@@ -979,6 +1082,131 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(report(&A100_40GB, &[], &[], &[11]).contains("(`make forecast-a100`) from"));
+        assert!(report(&A100_40GB, &[], &[], &[11], None).contains("(`make forecast-a100`) from"));
+    }
+
+    #[test]
+    fn the_fitted_cells_are_the_central_cells_at_the_boxs_pool_with_the_fitted_costs() {
+        let costs = Costs::of(&A100_80GB, &QWEN3_4B_FP8, Scaling::LOW);
+        let fitted = fitted_cells(&A100_80GB, &costs, &[24, 28, 32, 36, 40]);
+        let names: Vec<_> = fitted
+            .iter()
+            .map(|c| (c.scenario, c.long, c.sessions))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("the calibration point, the whole corpus", false, 16),
+                ("A: the core, the box's pool", true, 24),
+                ("A': the box's pool, more agents", true, 28),
+                ("A': the box's pool, more agents", true, 32),
+                ("A': the box's pool, more agents", true, 36),
+                ("A': the box's pool, more agents", true, 40),
+            ]
+        );
+        // Each is its scenario's central cell with the fitted costs in its place: the box's pool
+        // and 20 GiB CPU tier, the box's checkpoint.
+        let modeled = cells(&A100_80GB);
+        for f in &fitted {
+            assert_eq!(f.label, "A100 SXM4 80 GB (fitted)");
+            assert_eq!(f.costs, costs);
+            let c = modeled
+                .iter()
+                .find(|c| c.scenario == f.scenario && c.label.contains("central"))
+                .unwrap();
+            assert_eq!(
+                (f.long, f.model, f.pool_tokens, f.cpu_bytes),
+                (c.long, c.model, c.pool_tokens, c.cpu_bytes)
+            );
+        }
+        assert_eq!(
+            (fitted[1].pool_tokens, fitted[1].cpu_bytes),
+            (36_400, 20 << 30)
+        );
+        // The calibration point alone when no count of the core is asked.
+        assert_eq!(fitted_cells(&A100_80GB, &costs, &[]).len(), 1);
+    }
+
+    #[test]
+    fn the_closest_session_count_takes_the_lower_on_a_tie() {
+        let shares = [(24, 0.10), (28, 0.15), (32, 0.18), (36, 0.25)];
+        assert_eq!(closest_sessions(0.17, &shares), Some((32, 0.18)));
+        // A quarter and three quarters are as far from a half: the lower count, wherever it is.
+        assert_eq!(
+            closest_sessions(0.5, &[(32, 0.75), (28, 0.25)]),
+            Some((28, 0.25))
+        );
+        assert_eq!(closest_sessions(0.5, &[]), None);
+    }
+
+    #[test]
+    fn the_report_has_the_fitted_section_only_with_the_fitted_cells() {
+        let at = |running_share: f64| Placed {
+            pressure_mean: 9.0,
+            pressure_peak: 10.0,
+            pi: 98.0,
+            rho: 0.11,
+            running_share,
+            working_set_share: 1.0,
+            busy: 0.71,
+            stalled: 0.5,
+            computed: 0.4,
+            resume_p50_ms: 1_168.0,
+            resume_p90_ms: 9_717.0,
+        };
+        let modeled = cells(&A100_80GB);
+        // The box's core cell comes first, at 17%.
+        let placed: Vec<_> = (0..modeled.len())
+            .map(|i| at(if i == 0 { 0.17 } else { 0.1 }))
+            .collect();
+        let without = report(&A100_80GB, &modeled, &placed, &[11], None);
+        assert!(
+            !without.contains("## With the card's fitted costs"),
+            "{without}"
+        );
+        // The calibration point at the box's share, which the closest count leaves out, then the
+        // core from 24 sessions to 40.
+        let cells = fitted_cells(&A100_80GB, &Costs::frozen_box(), &[24, 28, 32, 36, 40]);
+        let shares = [0.17, 0.10, 0.15, 0.18, 0.21, 0.30];
+        let fitted_placed: Vec<_> = shares.iter().map(|&s| at(s)).collect();
+        let fitted = Fitted {
+            summary: "summary.json",
+            steps: "steps.json",
+            cells: &cells,
+            placed: &fitted_placed,
+        };
+        let with = report(&A100_80GB, &modeled, &placed, &[11], Some(&fitted));
+        // The section comes between the scenario table and the reading, and the rest is unchanged.
+        let start = with.find("\n## With the card's fitted costs\n").unwrap();
+        let end = with
+            .find("\n## What the forecast says the run will show\n")
+            .unwrap();
+        assert_eq!(format!("{}{}", &with[..start], &with[end..]), without);
+        let section = &with[start..end];
+        assert!(
+            section.contains(
+                "with the card's own costs in place of the modeled ones: the step-time model in \
+                 `steps.json` and E0's tier fits in `summary.json`.\n\n| Scenario | Card |"
+            ),
+            "{section}"
+        );
+        assert!(
+            section.contains(
+                "| A': the box's pool, more agents | A100 SXM4 80 GB (fitted) | 32 | 36,400 tokens \
+                 | 20 GiB | 9.0 / 10.0 | 98.0 | 0.11 | 18% / 100% | 71% | 50% | 40% \
+                 | 1,168 / 9,717 ms |\n"
+            ),
+            "{section}"
+        );
+        assert_eq!(section.matches(" (fitted) |").count(), 6);
+        assert!(
+            section.ends_with(
+                "|\n\nClosest to the box's running share in the core (17%): 32 sessions (18%).\n"
+            ),
+            "{section}"
+        );
+        // Without the box's core cell there is no share to come closest to.
+        let alone = fitted_section(&fitted, &modeled[1..], &placed[1..]);
+        assert!(!alone.contains("Closest"), "{alone}");
     }
 }

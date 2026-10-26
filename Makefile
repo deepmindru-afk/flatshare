@@ -21,8 +21,8 @@ E2_W5_REPORT ?= build/reproduce-e2-w5
 
 .PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-make-room-ci \
   test-python schema metrics \
-  reproduce-e1 reproduce-calibration reproduce-e2 reproduce-e2-w5 e2-figures e2-w5-figure forecast-a100 profiles \
-  reproduce-a100 check-a100-calibration
+  reproduce-e1 reproduce-calibration reproduce-e2 reproduce-e2-w5 e2-figures e2-w5-figure forecast-a100 \
+  forecast-fitted profiles reproduce-a100 check-a100-calibration
 
 check: lint test
 
@@ -167,6 +167,25 @@ forecast-a100:
 	@mkdir -p benchmarks/a100
 	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu $(GPU) --markdown $(FORECAST_MD) >/dev/null
 	@ls $(FORECAST_MD)
+
+# The same forecast with a section on the card's fitted costs, into OUT: the card's E0 summary.json (COSTS; the
+# records' runs/a100/block1/frozen-e0/summary.json) and the step-time model fit_step_cost.py fits on its calibration
+# point (STEPS; make reproduce-a100 writes it to build/reproduce-a100/steps.json) place the calibration point and the
+# core at the box's pool at 24 to 40 sessions, and the section names the count whose running share is closest to the
+# box's in the core. GPU is the A100 SXM4 80 GB here unless it names another card. Usage: make forecast-fitted
+# CORPUS=<the 32x corpus directory> COSTS=<E0's summary.json> STEPS=<steps.json> [GPU=a100-80gb]
+# [OUT=build/forecast-fitted.md].
+forecast-fitted: GPU = a100-80gb
+forecast-fitted: OUT = build/forecast-fitted.md
+forecast-fitted:
+	@test -n "$(CORPUS)" -a -n "$(COSTS)" -a -n "$(STEPS)" || \
+	  { echo "usage: make forecast-fitted CORPUS=<the 32x corpus directory> COSTS=<E0's summary.json> STEPS=<steps.json> [GPU=a100-80gb] [OUT=build/forecast-fitted.md]" >&2; exit 2; }
+	cargo build --release --locked -p lh-sim
+	uv run -q --no-project python benchmarks/e2/long_traces.py $(CORPUS) $(FORECAST_LONG) 48 >/dev/null
+	@mkdir -p $(dir $(OUT))
+	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu $(GPU) --costs $(COSTS) --step-costs $(STEPS) \
+	  --markdown $(OUT) >/dev/null
+	@ls $(OUT)
 
 # The A100 run's analysis (benchmarks/a100/analysis.py; docs/HARDWARE.md, the analysis) from a single host's records
 # as deploy/a100/pull.sh copies them, and the 32x corpus, into build/reproduce-a100/a100.md, with the bench venv for

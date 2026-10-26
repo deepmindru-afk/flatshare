@@ -4,8 +4,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
-use lh_core::{FROZEN_BOX_POOL_TOKENS, KvGeometry, PromptSources, TierCapacity};
+use lh_core::{
+    FROZEN_BOX_POOL_TOKENS, KvGeometry, PromptSources, StepCost, TierCapacity, TierCost,
+};
 use lh_sim::aiperf::{PlanOptions, reference};
 use lh_sim::corpus::Corpus;
 use lh_sim::engine::Engine;
@@ -326,7 +329,7 @@ fn the_forecast_places_its_cells_as_run_places_them() {
     let (b, a) = (&placed[0], &placed[2]);
     assert!(a.busy < b.busy, "{} vs {}", a.busy, b.busy);
     assert!(a.resume_p90_ms <= b.resume_p90_ms);
-    let report = forecast::report(&A100_40GB, cells, &placed, &[11]);
+    let report = forecast::report(&A100_40GB, cells, &placed, &[11], None);
     for heading in [
         "# Forecast: the A100 40 GB against the frozen box",
         "## Step and tier costs, Qwen3-4B-Instruct-2507-FP8",
@@ -339,6 +342,80 @@ fn the_forecast_places_its_cells_as_run_places_them() {
         assert!(report.contains(heading), "{heading}\n{report}");
     }
     assert!(report.contains("| A: the core, the box's pool | RTX 5060 Ti 16 GB (measured) | 24 |"));
+}
+
+/// `lh-sim forecast` for the A100 80 GB with `args`, on the subset as both corpora at seed 11 in
+/// 120 s replays: the report it prints.
+fn forecast_on_subset(args: &[&str]) -> String {
+    let traces = testdata("weka-x32-sub16");
+    let out = Command::new(env!("CARGO_BIN_EXE_lh-sim"))
+        .arg("forecast")
+        .args([&traces, &traces])
+        .args(["--gpu", "a100-80gb", "--seeds", "11", "--duration", "120"])
+        .args(["--jobs", "2"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// `testdata/forecast-a100-80gb-sub16.md` is that report as `lh-sim forecast` wrote it before it
+/// took a card's fitted costs (`lh-sim forecast testdata/weka-x32-sub16 testdata/weka-x32-sub16
+/// --gpu a100-80gb --seeds 11 --duration 120 --markdown testdata/forecast-a100-80gb-sub16.md`
+/// rewrites it).
+#[test]
+fn the_forecast_is_unchanged_without_fitted_costs_and_the_boxs_own_give_its_rows() {
+    let golden = std::fs::read_to_string(testdata("forecast-a100-80gb-sub16.md")).unwrap();
+    assert_eq!(forecast_on_subset(&[]), golden);
+    // The box's own costs as the card's fitted ones: its E0 fits as `lh-bench tiers` writes them,
+    // and its step-time model as fit_step_cost.py does.
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let (summary, steps) = (dir.join("box-e0-summary.json"), dir.join("box-steps.json"));
+    let tier = TierCost::frozen_box();
+    let fits = json!({"fits": {
+        "gpu": tier.gpu_hit,
+        "cpu_over_gpu": tier.cpu_restore,
+        "recompute": tier.recompute,
+    }});
+    std::fs::write(&summary, fits.to_string()).unwrap();
+    std::fs::write(&steps, json!(StepCost::frozen_box()).to_string()).unwrap();
+    let report = forecast_on_subset(&[
+        "--costs",
+        summary.to_str().unwrap(),
+        "--step-costs",
+        steps.to_str().unwrap(),
+    ]);
+    // Every table is as it was, with the fitted section between the scenario table and the reading.
+    let start = report.find("\n## With the card's fitted costs\n").unwrap();
+    let end = report
+        .find("\n## What the forecast says the run will show\n")
+        .unwrap();
+    assert_eq!(format!("{}{}", &report[..start], &report[end..]), golden);
+    let section = &report[start..end];
+    assert!(
+        section.contains("`box-steps.json` and E0's tier fits in `box-e0-summary.json`."),
+        "{section}"
+    );
+    // The box's costs give the box's rows: the calibration point's, and the core's at 24 sessions.
+    let measured: Vec<_> = golden
+        .lines()
+        .filter(|l| l.contains(" | RTX 5060 Ti 16 GB (measured) | "))
+        .collect();
+    assert_eq!(measured.len(), 2);
+    for row in measured {
+        let fitted = row.replace("RTX 5060 Ti 16 GB (measured)", "A100 SXM4 80 GB (fitted)");
+        assert!(section.contains(&fitted), "{fitted}\n{section}");
+    }
+    assert_eq!(section.matches(" (fitted) | ").count(), 6);
+    assert!(
+        section.contains("Closest to the box's running share in the core (0%): 24 sessions (0%)."),
+        "{section}"
+    );
 }
 
 /// The idle service is v0's: with the W0 settings it gives the subset run v0 published, 559 requests

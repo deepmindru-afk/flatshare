@@ -183,19 +183,21 @@ impl CostArgs {
     }
 
     fn cost(&self) -> Result<TierCost, String> {
-        let mut cost = match &self.costs {
-            Some(path) => {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                TierCost::from_e0_summary(&text).map_err(|e| format!("{}: {e}", path.display()))?
-            }
-            None => TierCost::frozen_box(),
-        };
+        let mut cost = tier_cost(self.costs.as_deref())?;
         if let Some(itl) = self.itl_ms {
             cost = cost.with_inter_token_ms(itl);
         }
         Ok(cost)
     }
+}
+
+/// The E0 tier fits in `path`, or the frozen box's.
+fn tier_cost(path: Option<&Path>) -> Result<TierCost, String> {
+    let Some(path) = path else {
+        return Ok(TierCost::frozen_box());
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    TierCost::from_e0_summary(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// The step-time model in `path`, or the frozen box's.
@@ -395,6 +397,22 @@ struct ForecastArgs {
     /// Profiling duration of each cell's replay, in seconds.
     #[arg(long, default_value_t = 600.0)]
     duration: f64,
+    /// The card's E0 tier fits, read as `run` reads them: with --step-costs, the report adds the
+    /// calibration point and the core at the box's pool with the card's fitted costs.
+    #[arg(long, requires = "step_costs")]
+    costs: Option<PathBuf>,
+    /// The card's step-time model, read as `run` reads it (scripts/fit_step_cost.py writes it);
+    /// with --costs.
+    #[arg(long, requires = "costs")]
+    step_costs: Option<PathBuf>,
+    /// Session counts of the core with the fitted costs.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        default_value = "24,28,32,36,40",
+        requires = "costs"
+    )]
+    fitted_sessions: Vec<usize>,
     /// Cells to run at once. Default: the machine's cores.
     #[arg(long)]
     jobs: Option<usize>,
@@ -878,8 +896,30 @@ fn hardware(args: HardwareArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// The last component of `path`, as the report names a file.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
 fn forecast(args: ForecastArgs) -> Result<(), String> {
-    let cells = forecast::cells(&args.gpu);
+    let mut cells = forecast::cells(&args.gpu);
+    let modeled = cells.len();
+    // The card's fitted costs, which clap takes both or neither of; their cells follow the modeled.
+    let sources = args.costs.as_deref().zip(args.step_costs.as_deref());
+    if let Some((summary, steps)) = sources {
+        let costs = forecast::Costs {
+            steps: step_cost(Some(steps))?,
+            tier: tier_cost(Some(summary))?,
+        };
+        cells.extend(forecast::fitted_cells(
+            &args.gpu,
+            &costs,
+            &args.fitted_sessions,
+        ));
+    }
     let jobs = args.jobs.unwrap_or_else(|| {
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
     });
@@ -897,7 +937,20 @@ fn forecast(args: ForecastArgs) -> Result<(), String> {
         &args.seeds,
         jobs,
     )?;
-    let report = forecast::report(&args.gpu, &cells, &placed, &args.seeds);
+    let names = sources.map(|(summary, steps)| (file_name(summary), file_name(steps)));
+    let fitted = names.as_ref().map(|(summary, steps)| forecast::Fitted {
+        summary,
+        steps,
+        cells: &cells[modeled..],
+        placed: &placed[modeled..],
+    });
+    let report = forecast::report(
+        &args.gpu,
+        &cells[..modeled],
+        &placed[..modeled],
+        &args.seeds,
+        fitted.as_ref(),
+    );
     print!("{report}");
     eprintln!(
         "{} cells x {} seeds in {:.1} s on {jobs} threads",
@@ -1105,6 +1158,56 @@ mod tests {
             Command::Forecast(f) => assert_eq!(f.gpu, hardware::A100_80GB),
             _ => panic!("not the forecast command"),
         }
+    }
+
+    #[test]
+    fn forecast_takes_the_cards_fitted_costs_both_or_neither() {
+        let forecast = |args: &[&str]| match parse(args).unwrap().command {
+            Command::Forecast(f) => f,
+            _ => panic!("not the forecast command"),
+        };
+        // By default neither, and the core's counts from 24 sessions to 40 for when they are given.
+        let d = forecast(&["forecast", "WHOLE", "LONG"]);
+        assert_eq!((d.costs, d.step_costs), (None, None));
+        assert_eq!(d.fitted_sessions, [24, 28, 32, 36, 40]);
+        let f = forecast(&[
+            "forecast",
+            "WHOLE",
+            "LONG",
+            "--costs",
+            "E0",
+            "--step-costs",
+            "STEPS",
+            "--fitted-sessions",
+            "24,30",
+        ]);
+        assert_eq!(
+            (f.costs, f.step_costs, f.fitted_sessions),
+            (
+                Some(PathBuf::from("E0")),
+                Some(PathBuf::from("STEPS")),
+                vec![24, 30]
+            )
+        );
+        // One without the other is refused, and so are session counts without the costs.
+        for args in [
+            &["--costs", "E0"][..],
+            &["--step-costs", "STEPS"],
+            &["--fitted-sessions", "32"],
+            &["--fitted-sessions", "32", "--costs", "E0"],
+        ] {
+            let all: Vec<&str> = ["forecast", "WHOLE", "LONG"]
+                .iter()
+                .chain(args)
+                .copied()
+                .collect();
+            assert!(parse(&all).is_err(), "{args:?}");
+        }
+        // A file that cannot be read is named in the error; the report names each file by its own
+        // name.
+        let e = tier_cost(Some(Path::new("no-such-summary.json"))).unwrap_err();
+        assert!(e.starts_with("no-such-summary.json: "), "{e}");
+        assert_eq!(file_name(Path::new("runs/a100/steps.json")), "steps.json");
     }
 
     #[test]
