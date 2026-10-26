@@ -903,7 +903,7 @@ pub fn report(
             String::new(),
         ),
         Some(h) => {
-            write!(target, " HOST={}", h.file).expect("writing to a String");
+            write!(target, " HOST_JSON={}", h.file).expect("writing to a String");
             let cpu = match &h.host.cpu {
                 Some(name) => format!(" ({name})"),
                 None => String::new(),
@@ -1398,7 +1398,7 @@ mod tests {
         };
         let text = report(&A100_80GB, Some(&file), &on_host, &[], &[11], None);
         for part in [
-            "(`make forecast-a100 GPU=a100-80gb HOST=host.json`) from the box's measured costs, the \
+            "(`make forecast-a100 GPU=a100-80gb HOST_JSON=host.json`) from the box's measured costs, the \
              card's published peaks, the path vLLM 0.32.0 takes for the box's checkpoint on it \
              (Marlin W8A16; `crates/lh-sim/src/hardware.rs`) and the host it is placed on, as \
              `benchmarks/a100/bench_host.py` measured it: its CPU (Intel(R) Xeon(R) CPU @ 2.20GHz) \

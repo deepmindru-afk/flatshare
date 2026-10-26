@@ -436,7 +436,7 @@ fn on_the_boxs_own_host_the_card_keeps_the_boxs_host_time_and_takes_its_link() {
     let golden = std::fs::read_to_string(testdata("forecast-a100-80gb-sub16.md")).unwrap();
     let report = forecast_on_subset(&["--host", testdata("box-host.json").to_str().unwrap()]);
     for text in [
-        "(`make forecast-a100 GPU=a100-80gb HOST=box-host.json`) from the box's measured costs, the \
+        "(`make forecast-a100 GPU=a100-80gb HOST_JSON=box-host.json`) from the box's measured costs, the \
          card's published peaks, the path vLLM 0.32.0 takes for the box's checkpoint on it (Marlin \
          W8A16; `crates/lh-sim/src/hardware.rs`) and the host it is placed on, as \
          `benchmarks/a100/bench_host.py` measured it: its CPU (Intel(R) Xeon(R) CPU E5-2609 v4 @ \
