@@ -227,7 +227,7 @@ The voice turn by stage (means over each configuration's replies, ms):
 
 ![The voice turn by stage: stock vLLM loses its seconds in the reply's first sentence](figures/e2-waterfall.svg)
 
-The same stages as bars (`make e2-figures`), a row per point of the records: `a1-voice` is voice alone (four runs: its W2 run predates the worker's stage times), `disc-frozen-s24` the frozen box, `a6-reserve2048` the static reservation, `a8c-resubmit` preempt-resubmit, `a9` arm 9 and `pr-ab48` the PRs with a 48-token window. The grey bar is the LLM's first token, from its request.
+The same stages as bars (`make e2-figures`), a row per point of the records: `a1-voice` is voice alone (four runs: its W2 run predates the worker's stage times), `disc-frozen-s24` the frozen box, `a6-reserve2048` the static reservation, `a8c-resubmit` preempt-resubmit, `a9` arm 9 and `pr-ab48` the PRs with a 48-token window. The violet stage is the reply to its first sentence; the LLM's first token, from its request, is in the table above.
 
 What the repeats say:
 - **The change takes the voice tail to the SLO's edge.** With full replies and a 48-token window, the PRs' configuration reaches 2,193 ms (2,168–2,286), 176 ms over the SLO, against the frozen box's 10,138 and preempt-resubmit's 2,591. Arm 9, whose gateway capped every reply at 16 tokens, reaches 2,057 ms: two of its five runs are under the SLO, and its median is 40 ms over it, within one point's spread. No configuration without the change has a run under the SLO; vLLM's queued-token limit refused 48 of its 50 voice turns, which count at the reply timeout.

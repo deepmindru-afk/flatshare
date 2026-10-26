@@ -243,14 +243,15 @@ e2-figures:
 	cp build/e2-figures/frontier-weka-x32-long.svg docs/figures/e2-frontier.svg
 	cp build/e2-figures/waterfall.svg docs/figures/e2-waterfall.svg
 
-# The README's figure, docs/figures/e2-voice-p95.svg, from W5's records: the configurations figure.toml names, each run
-# in the same rounds over the same five samples of the agents' traces.
+# The README's chart, docs/figures/e2-voice-p95.svg and its phone layout e2-voice-p95-narrow.svg, from W5's records:
+# the configurations figure.toml names, each run in the same rounds over the same five samples of the agents' traces.
 e2-w5-figure:
 	@cd python/leaseholder_bench && uv run -q lh-bench e2 report \
 	  $(abspath $(dir $(wildcard $(E2_W5_RESULTS)/*/*/run.json))) \
 	  --dots $(abspath $(E2_W5_RESULTS)/figure.toml) --out $(abspath build/e2-w5-figure) >/dev/null
 	@mkdir -p docs/figures
 	cp build/e2-w5-figure/voice-p95.svg docs/figures/e2-voice-p95.svg
+	cp build/e2-w5-figure/voice-p95-narrow.svg docs/figures/e2-voice-p95-narrow.svg
 
 # The frozen box's hardware profile against deploy/phastform (deploy/profile.py): `make profiles` checks that it
 # renders today's files byte for byte, and `make profiles UPDATE=1` writes them from deploy/templates after a

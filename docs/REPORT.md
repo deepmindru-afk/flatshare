@@ -177,7 +177,10 @@ range.
 
 ### 5.1 The headline
 
-![Voice-to-voice p95 of each configuration over its runs, against the SLO](figures/e2-voice-p95.svg)
+<picture>
+  <source media="(max-width: 767px)" srcset="figures/e2-voice-p95-narrow.svg">
+  <img src="figures/e2-voice-p95.svg" width="100%" alt="Two panels, a row per configuration beside 24 coding-agent sessions: the voice-to-voice p95, median of its runs, against the 2.03 s SLO, 10.48 s for tuned vLLM, 2.52 s with a router that aborts and resubmits, 5.09 s with #63350, 3.09 s with both PRs and a 16-token window and 2.24 s with a 48-token window; and the agents' tokens/s, 3,305, 3,332, 3,414, 3,298 and 3,203, 97% of tuned vLLM's">
+</picture>
 
 | Two calls beside 24 agent sessions that fill the KV pool | Voice p95, median (range) | Over the SLO | Agents' tokens/s | Agents' TTFT p50 / p99 |
 |---|---:|---:|---:|---:|

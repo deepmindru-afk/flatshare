@@ -16,7 +16,10 @@ bring it to 2.24 s, 0.20 s over its SLO, while the agents keep 97% of their thro
 1.9 s, tuned vLLM after 9.6 s; over both calls of each run, their V2V p95 was 2.2 and 11.2 s. The 170-second video, with
 sound, is in the [v1.0 release](https://github.com/StevenWang-CY/leaseholder/releases/tag/v1.0).*
 
-![Voice-to-voice p95 of each configuration over its runs, against the SLO: tuned vLLM near 10.5 s, a router that aborts and resubmits near 2.52 s, the two PRs at 2.24 s](docs/figures/e2-voice-p95.svg)
+<picture>
+  <source media="(max-width: 767px)" srcset="docs/figures/e2-voice-p95-narrow.svg">
+  <img src="docs/figures/e2-voice-p95.svg" width="100%" alt="Two panels, a row per configuration beside 24 coding-agent sessions: the voice-to-voice p95, median of its runs, against the 2.03 s SLO, 10.48 s for tuned vLLM, 2.52 s with a router that aborts and resubmits, 5.09 s with #63350, 3.09 s with both PRs and a 16-token window and 2.24 s with a 48-token window; and the agents' tokens/s, 3,305, 3,332, 3,414, 3,298 and 3,203, 97% of tuned vLLM's">
+</picture>
 
 | Two calls beside 24 coding-agent sessions that fill the KV pool | Voice p95 | Over the SLO | Agents' tokens/s | Agents' TTFT p50 |
 |---|---:|---:|---:|---:|

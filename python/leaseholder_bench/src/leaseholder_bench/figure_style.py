@@ -66,6 +66,7 @@ FLOW_HEAD = 8.0  # dataflow's head: its length
 FLOW_HALF = 4.8  # and its half width
 FLOW_GAP = 2.5  # the clearance between a head and its target's edge
 MIN_SHAFT = 2.2  # an arrow's last segment, at least this many head lengths
+HUE_HEAD = 7.2  # a hued connector's head: its length (its half width is half that)
 
 FONT_NOTICE = (
     " Text is set in subsets of STIX Two Text and STIX Two Math, SIL Open Font License 1.1 "
@@ -160,9 +161,12 @@ DARK = {
     "gray-a": "#1a1f26",
 }
 HUES = ("blue", "orange", "green", "violet", "gray")
-BARS = ("hi", "soft", "lo", "mid")
-"""A chart's bar fills: the configuration to deploy, a sibling of it, a comparison, and a
-comparison that stands beside a pale bar (mid gray, so three bars stay apart in grayscale)."""
+BARS = ("hi", "soft", "lo", "mid", "open")
+"""A chart's bar fills: the configuration to deploy, a sibling of it, a comparison, a comparison
+that stands beside a pale bar (mid gray, so three bars stay apart in grayscale), and an open bar,
+outlined on the page, for a configuration a figure shows but sets back (off its arm's frontier)."""
+SEGMENTS = {"lo": "bar-lo", "mid": "bar-mid", "violet": "violet-w", "pale": "gray-a"}
+"""The fills of a stacked bar's segments, each the palette's color it takes."""
 TEXT_CLASSES = {"", "soft", "mute", *(f"{hue} tint" for hue in HUES)}
 """The inks a label may take: the three neutrals, and a hue where the hue names an identity."""
 
@@ -186,10 +190,16 @@ BASE_CSS = (
     f".axis{{fill:none;stroke:var(--axis);stroke-width:{THIN}}}"
     f".rule{{fill:none;stroke:var(--rule);stroke-width:{HAIR}}}"
     + "".join(
-        f".g-{bar}{{fill:var(--bar-{bar});stroke:var(--bar-line);stroke-width:{BAR_LINE}}}"
+        f".g-{bar}{{fill:var(--{'page' if bar == 'open' else 'bar-' + bar});"
+        f"stroke:var(--bar-line);stroke-width:{BAR_LINE}}}"
         for bar in BARS
     )
+    + "".join(
+        f".s-{name}{{fill:var(--{color});stroke:var(--bar-line);stroke-width:{BAR_LINE}}}"
+        for name, color in SEGMENTS.items()
+    )
     + ".g-margin{fill:var(--margin)}"
+    ".halo{paint-order:stroke;stroke:var(--page);stroke-width:6px;stroke-linejoin:round}"
     f".slo{{fill:none;stroke:var(--orange);stroke-width:{THIN};stroke-dasharray:5 4}}"
     f".panel-a,.panel-b{{stroke:var(--border);stroke-width:{PANEL_LINE};stroke-dasharray:6 4}}"
     ".panel-a{fill:var(--ground-a)}.panel-b{fill:var(--ground-b)}"
@@ -203,6 +213,9 @@ BASE_CSS = (
     ".flow-head{fill:var(--flow)}"
     f".line{{fill:none;stroke:var(--c);stroke-width:{FLOW / 2};stroke-linecap:round;"
     "stroke-linejoin:round}"
+    ".line-head{fill:var(--c)}"
+    f".leader{{fill:none;stroke:var(--border);stroke-width:{PANEL_LINE};stroke-dasharray:6 4}}"
+    f".bracket{{fill:none;stroke:var(--axis);stroke-width:{THIN};stroke-linejoin:round}}"
     f".hatch{{fill:none;stroke:var(--c);stroke-width:{HAIR}}}"
     ".cell{fill:var(--w);stroke:var(--c);stroke-width:1}"
     ".cell-empty{fill:var(--box);stroke:var(--rule);stroke-width:1}"
@@ -372,6 +385,8 @@ class Box:
     x1: float
     y1: float
     label: str
+    halo: bool = False
+    """Set on the page by a halo of the page's color, which gridlines and rules pass beneath."""
 
     def overlaps(self, other: Box, pad: float = 0.0) -> bool:
         return not (
@@ -417,6 +432,9 @@ class Figure:
         self.items: list[str] = []
         self.boxes: list[Box] = []
         self.wires: list[tuple[list[tuple[float, float]], tuple[str, ...]]] = []
+        """Connectors, which no label may cross, and what each may (its ``ignore``)."""
+        self.rules: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        """Gridlines, axes and reference rules, which only a label set on a halo may cross."""
         self.glyphs: dict[str, set[str]] = {face: set() for face in FACES}
 
     # Text -------------------------------------------------------------------------------------
@@ -432,8 +450,10 @@ class Figure:
         cls: str = "",
         collide: bool = True,
         name: str | None = None,
+        halo: bool = False,
     ) -> Box:
-        """A label at baseline ``y``. ``cls`` is its ink: "", "soft", "mute" or "<hue> tint"."""
+        """A label at baseline ``y``. ``cls`` is its ink: "", "soft", "mute" or "<hue> tint".
+        ``halo`` sets it on a halo of the page's color, for a value that gridlines run behind."""
         if cls not in TEXT_CLASSES:
             raise ValueError(f"text takes ink, soft, mute or a hue's tint, not {cls!r}")
         markup = str(markup)
@@ -454,7 +474,8 @@ class Figure:
             text = escape(span.text, quote=False)
             parts.append(f"<tspan {' '.join(attrs)}>{text}</tspan>" if attrs else text)
         anchor_attr = "" if anchor == "start" else f' text-anchor="{anchor}"'
-        cls_attr = f' class="{cls}"' if cls else ""
+        classes = " ".join(c for c in (cls, "halo" if halo else "") if c)
+        cls_attr = f' class="{classes}"' if classes else ""
         size_attr = "" if size == LABEL else f' font-size="{fmt(size)}"'
         self.items.append(
             f'<text x="{fmt(x)}" y="{fmt(y)}"{anchor_attr}{cls_attr}{size_attr}>'
@@ -471,6 +492,7 @@ class Figure:
             left + width,
             y + (0.24 if descends else 0.04) * size - low * size,
             name or markup,
+            halo,
         )
         if collide:
             self.boxes.append(box)
@@ -495,10 +517,14 @@ class Figure:
         self.items.append(f'<path d="{d}" class="{cls}"/>')
 
     def rule(self, x0: float, x1: float, y: float, cls: str = "axis") -> None:
+        """A horizontal rule: an axis, a gridline (``cls`` "grid") or the SLO's ("slo")."""
         self.path(f"M{fmt(x0)} {fmt(y)}H{fmt(x1)}", cls)
+        self.rules.append(((x0, y), (x1, y)))
 
     def vrule(self, x: float, y0: float, y1: float, cls: str = "axis") -> None:
+        """A vertical rule, as :meth:`rule`."""
         self.path(f"M{fmt(x)} {fmt(y0)}V{fmt(y1)}", cls)
+        self.rules.append(((x, y0), (x, y1)))
 
     # Charts -----------------------------------------------------------------------------------
 
@@ -512,17 +538,45 @@ class Figure:
         self.text(cx, below, subtitle, size=NOTE, anchor="middle", cls="soft")
         return below
 
-    def hbar(self, x: float, y: float, length: float, thickness: float, bar: str) -> None:
-        """A flat horizontal bar from the axis at ``x``, its free end's corners rounded."""
+    def hbar(
+        self, x: float, y: float, length: float, thickness: float, bar: str, *, cut: bool = False
+    ) -> None:
+        """A flat horizontal bar from the axis at ``x``, its free end's corners rounded; a bar
+        ``cut`` at the scale's end has a square end, and its value says how far it goes."""
         if bar not in BARS:
             raise ValueError(f"a bar is one of {BARS}, not {bar!r}")
-        r = min(3.0, length / 2, thickness / 2)
+        self._hpath(x, y, length, thickness, f"g-{bar}", 0.0 if cut else 3.0)
+
+    def segments(
+        self, x: float, y: float, parts: list[tuple[float, str]], thickness: float
+    ) -> list[float]:
+        """A stacked horizontal bar: ``parts`` are (length, fill) from the axis at ``x``, each fill
+        one of SEGMENTS; the last segment's free end is rounded. Returns each segment's start."""
+        starts = []
+        for k, (length, fill) in enumerate(parts):
+            if fill not in SEGMENTS:
+                raise ValueError(f"a segment is one of {tuple(SEGMENTS)}, not {fill!r}")
+            starts.append(x)
+            self._hpath(x, y, length, thickness, f"s-{fill}", 3.0 if k == len(parts) - 1 else 0.0)
+            x += length
+        return starts
+
+    def _hpath(self, x: float, y: float, length: float, thickness: float, cls: str, r: float):
+        r = min(r, length / 2, thickness / 2)
         x1, y1 = x + length, y + thickness
+        if r <= 0:
+            self.path(f"M{fmt(x)} {fmt(y)}H{fmt(x1)}V{fmt(y1)}H{fmt(x)}Z", cls)
+            return
         self.path(
             f"M{fmt(x)} {fmt(y)}H{fmt(x1 - r)}Q{fmt(x1)} {fmt(y)} {fmt(x1)} {fmt(y + r)}"
             f"V{fmt(y1 - r)}Q{fmt(x1)} {fmt(y1)} {fmt(x1 - r)} {fmt(y1)}H{fmt(x)}Z",
-            f"g-{bar}",
+            cls,
         )
+
+    def swatch(self, x: float, baseline: float, fill: str, name: str, *, size: float = NOTE):
+        """A legend's entry: a small segment swatch and its name; returns the name's box."""
+        self._hpath(x, baseline - 0.62 * size, 22, 0.66 * size, f"s-{fill}", 2.0)
+        return self.text(x + 30, baseline, name, size=size)
 
     def vbar(self, x: float, base: float, height: float, width: float, bar: str) -> None:
         """A flat vertical bar standing on ``base``, its top corners rounded."""
@@ -628,23 +682,26 @@ class Figure:
         radius: float = 8,
         collide: bool = True,
         ignore: tuple[str, ...] = (),
+        hue: str | None = None,
     ) -> None:
         """Dataflow: a steel-blue polyline of one weight, rounded at its corners, its solid head
-        ending FLOW_GAP short of the last point, a target's edge. An arrow whose last segment is
-        shorter than MIN_SHAFT head lengths is refused: it would read as a bare head."""
+        ending FLOW_GAP short of the last point, a target's edge. With ``hue``, a thinner line in
+        that hue, which carries that hue's values (the voice turn's blocks). An arrow whose last
+        segment is shorter than MIN_SHAFT head lengths is refused: it would read as a bare head."""
         points = [(float(x), float(y)) for x, y in points]
+        head, half = (FLOW_HEAD, FLOW_HALF) if hue is None else (HUE_HEAD, HUE_HEAD / 2)
         if arrow:
             (ax, ay), (bx, by) = points[-2], points[-1]
             length = math.hypot(bx - ax, by - ay)
-            if length < MIN_SHAFT * FLOW_HEAD:
+            if length < MIN_SHAFT * head:
                 raise ValueError(
                     f"an arrow's last segment is {length:.1f} units, under "
-                    f"{MIN_SHAFT * FLOW_HEAD:.1f}: make room for its shaft"
+                    f"{MIN_SHAFT * head:.1f}: make room for its shaft"
                 )
             ux, uy = (bx - ax) / length, (by - ay) / length
             tip = (bx - ux * FLOW_GAP, by - uy * FLOW_GAP)
             # The shaft ends inside the head, so its round cap never shows past the head's base.
-            draw = [*points[:-1], (tip[0] - ux * FLOW_HEAD * 0.6, tip[1] - uy * FLOW_HEAD * 0.6)]
+            draw = [*points[:-1], (tip[0] - ux * head * 0.6, tip[1] - uy * head * 0.6)]
         else:
             draw = points
         d = f"M{fmt(draw[0][0])} {fmt(draw[0][1])}"
@@ -658,21 +715,38 @@ class Figure:
                 d += f"L{fmt(ax)} {fmt(ay)}Q{fmt(cx)} {fmt(cy)} {fmt(bx)} {fmt(by)}"
             else:
                 d += f"L{fmt(draw[k][0])} {fmt(draw[k][1])}"
-        self.path(d, "flow")
+        self.path(d, "flow" if hue is None else f"{hue} line")
         if arrow:
             nx, ny = -uy, ux
             x, y = tip
-            base = (x - ux * FLOW_HEAD, y - uy * FLOW_HEAD)
+            base = (x - ux * head, y - uy * head)
             corners = [
                 (x, y),
-                (base[0] + nx * FLOW_HALF, base[1] + ny * FLOW_HALF),
-                (base[0] - nx * FLOW_HALF, base[1] - ny * FLOW_HALF),
+                (base[0] + nx * half, base[1] + ny * half),
+                (base[0] - nx * half, base[1] - ny * half),
             ]
             self.path(
-                "M" + "L".join(f"{fmt(px)} {fmt(py)}" for px, py in corners) + "Z", "flow-head"
+                "M" + "L".join(f"{fmt(px)} {fmt(py)}" for px, py in corners) + "Z",
+                "flow-head" if hue is None else f"{hue} line-head",
             )
         if collide:
             self.wires.append((points, ignore))
+
+    def leader(self, points: list[tuple[float, float]]) -> None:
+        """A zoom's dashed leader, from a dashed outline in a stage strip to the panel it expands."""
+        self.path("M" + "L".join(f"{fmt(x)} {fmt(y)}" for x, y in points), "leader")
+        self.wires.append(([(float(x), float(y)) for x, y in points], ()))
+
+    def bracket(
+        self, x0: float, x1: float, y: float, name: str, *, below: bool = True, size: float = NOTE
+    ) -> Box:
+        """A tick-ended bracket spanning exactly ``x0`` to ``x1`` at ``y``, its ticks toward what it
+        names (up when it sits ``below`` it), its name once, centred on its far side."""
+        tick = -6 if below else 6
+        self.path(f"M{fmt(x0)} {fmt(y + tick)}V{fmt(y)}H{fmt(x1)}V{fmt(y + tick)}", "bracket")
+        self.rules.append(((x0, y), (x1, y)))
+        baseline = y + 0.72 * size + 6 if below else y - 8
+        return self.text((x0 + x1) / 2, baseline, name, size=size, anchor="middle")
 
     def junction(self, x: float, y: float) -> None:
         """A dot where dataflow splits or joins."""
@@ -695,6 +769,10 @@ class Figure:
                 for a, b in itertools.pairwise(points):
                     if _segment_hits_box(a, b, box, pad=1.5):
                         raise ValueError(f"a connector crosses the text {box.label!r} near {a}")
+        for a, b in self.rules:
+            for box in self.boxes:
+                if not box.halo and _segment_hits_box(a, b, box, pad=1.0):
+                    raise ValueError(f"a rule crosses the text {box.label!r} near {a}")
 
     def check_crop(self, left: float, top: float, width: float, height: float) -> None:
         """Refuse a phone layout's crop that would cut through a label."""
