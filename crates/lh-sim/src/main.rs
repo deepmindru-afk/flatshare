@@ -12,7 +12,7 @@ use lh_sim::aiperf::{ConvKind, PlanOptions, reference};
 use lh_sim::corpus::Corpus;
 use lh_sim::engine::Engine;
 use lh_sim::forecast;
-use lh_sim::hardware::{self, Gpu};
+use lh_sim::hardware::{self, Gpu, Host};
 use lh_sim::replay::{Pauses, ReplayConfig, Service};
 use lh_sim::replay_log;
 use lh_sim::run::{self, Arm, ArmResult, RunConfig};
@@ -207,6 +207,12 @@ fn step_cost(path: Option<&Path>) -> Result<StepCost, String> {
     };
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The host in `path`, the host.json bench_host.py writes.
+fn read_host(path: &Path) -> Result<Host, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Host::from_bench_host(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[derive(Args)]
@@ -413,6 +419,11 @@ struct ForecastArgs {
         requires = "costs"
     )]
     fitted_sessions: Vec<usize>,
+    /// The host the card runs on: the host.json benchmarks/a100/bench_host.py writes there. The
+    /// card's cells take the API server's time from its CPU and the restores from its link, and the
+    /// costs tables add the card's costs on it.
+    #[arg(long)]
+    host: Option<PathBuf>,
     /// Cells to run at once. Default: the machine's cores.
     #[arg(long)]
     jobs: Option<usize>,
@@ -905,7 +916,8 @@ fn file_name(path: &Path) -> String {
 }
 
 fn forecast(args: ForecastArgs) -> Result<(), String> {
-    let mut cells = forecast::cells(&args.gpu);
+    let host = args.host.as_deref().map(read_host).transpose()?;
+    let mut cells = forecast::cells(&args.gpu, host.as_ref());
     let modeled = cells.len();
     // The card's fitted costs, which clap takes both or neither of; their cells follow the modeled.
     let sources = args.costs.as_deref().zip(args.step_costs.as_deref());
@@ -944,8 +956,14 @@ fn forecast(args: ForecastArgs) -> Result<(), String> {
         cells: &cells[modeled..],
         placed: &placed[modeled..],
     });
+    let host_file = args.host.as_deref().map(file_name);
+    let on_host = host
+        .as_ref()
+        .zip(host_file.as_deref())
+        .map(|(host, file)| forecast::OnHost { host, file });
     let report = forecast::report(
         &args.gpu,
+        on_host.as_ref(),
         &cells[..modeled],
         &placed[..modeled],
         &args.seeds,
@@ -1208,6 +1226,46 @@ mod tests {
         let e = tier_cost(Some(Path::new("no-such-summary.json"))).unwrap_err();
         assert!(e.starts_with("no-such-summary.json: "), "{e}");
         assert_eq!(file_name(Path::new("runs/a100/steps.json")), "steps.json");
+    }
+
+    #[test]
+    fn forecast_takes_a_host_and_names_a_file_it_refuses() {
+        let forecast = |args: &[&str]| match parse(args).unwrap().command {
+            Command::Forecast(f) => f,
+            _ => panic!("not the forecast command"),
+        };
+        // None by default: the box's CPU and the card's datasheet link. One goes with the fitted
+        // costs too.
+        assert_eq!(forecast(&["forecast", "WHOLE", "LONG"]).host, None);
+        let f = forecast(&[
+            "forecast",
+            "WHOLE",
+            "LONG",
+            "--host",
+            "host.json",
+            "--costs",
+            "E0",
+            "--step-costs",
+            "STEPS",
+        ]);
+        assert_eq!(
+            (f.host, f.costs),
+            (Some(PathBuf::from("host.json")), Some(PathBuf::from("E0")))
+        );
+        // The box's own reads back; one that cannot be read, or holds no host, is named.
+        let testdata = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        let b = read_host(&testdata.join("box-host.json")).unwrap();
+        assert_eq!(
+            (b.python_ms, b.h2d_gb_per_s),
+            (hardware::BOX_PYTHON_MS, hardware::BOX_H2D_GB_PER_S)
+        );
+        let e = read_host(Path::new("no-such-host.json")).unwrap_err();
+        assert!(e.starts_with("no-such-host.json: "), "{e}");
+        let plan = testdata.join("aiperf-0.13.0-sub16.json");
+        assert_eq!(
+            read_host(&plan).unwrap_err(),
+            format!("{}: python_ms.p50 is missing", plan.display())
+        );
     }
 
     #[test]

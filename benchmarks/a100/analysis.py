@@ -176,11 +176,12 @@ def forecast_probes(text: str, card: str) -> dict[str, str]:
 
 
 def forecast_core(text: str, card: str, scenario: str = CORE) -> dict[str, str]:
-    """A scenario's cell on the forecast's card, central (the core's by default): its running share, busy and stalled
-    shares."""
+    """A scenario's cell on the forecast's card, central (the core's by default), on the host the forecast places the
+    card on if it names one (lh-sim forecast --host): its running share, busy and stalled shares."""
+    labels = (f"{card} (central)", f"{card} (central, on this host)")
     for line in text.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) >= 11 and cells[:2] == [scenario, f"{card} (central)"]:
+        if len(cells) >= 11 and cells[0] == scenario and cells[1] in labels:
             return {"running": cells[8].split(" / ")[0], "busy": cells[9], "stalled": cells[10]}
     raise ValueError(f"the forecast has no central cell of {scenario!r} for the {card}")
 

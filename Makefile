@@ -155,36 +155,38 @@ reproduce-e1:
 # The A100 run's forecast, benchmarks/a100/forecast.md, from the 32x corpus (outside the repository) and its 48
 # traces with the largest contexts, E2's discriminating corpus, which long_traces.py links into FORECAST_LONG. GPU names
 # the card (lh-sim's profile): GPU=a100-80gb writes benchmarks/a100/forecast-80gb.md, for the A100 SXM4 80 GB, which
-# analysis.py reads for records whose card is one. Usage: make forecast-a100 CORPUS=<the 32x corpus directory>
-# [GPU=a100-80gb].
+# analysis.py reads for records whose card is one. HOST, the host.json benchmarks/a100/bench_host.py writes on the
+# card's host, places the card there (lh-sim forecast --host). Usage: make forecast-a100 CORPUS=<the 32x corpus
+# directory> [GPU=a100-80gb] [HOST=<host.json>].
 FORECAST_LONG ?= build/weka-x32-long
 GPU ?= a100-40gb
 FORECAST_MD = benchmarks/a100/forecast$(if $(filter-out a100-40gb,$(GPU)),-$(GPU:a100-%=%)).md
 forecast-a100:
-	@test -n "$(CORPUS)" || { echo "usage: make forecast-a100 CORPUS=<the 32x corpus directory> [GPU=a100-80gb]" >&2; exit 2; }
+	@test -n "$(CORPUS)" || { echo "usage: make forecast-a100 CORPUS=<the 32x corpus directory> [GPU=a100-80gb] [HOST=<host.json>]" >&2; exit 2; }
 	cargo build --release --locked -p lh-sim
 	uv run -q --no-project python benchmarks/e2/long_traces.py $(CORPUS) $(FORECAST_LONG) 48 >/dev/null
 	@mkdir -p benchmarks/a100
-	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu $(GPU) --markdown $(FORECAST_MD) >/dev/null
+	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu $(GPU) $(if $(HOST),--host $(HOST)) --markdown $(FORECAST_MD) \
+	  >/dev/null
 	@ls $(FORECAST_MD)
 
 # The same forecast with a section on the card's fitted costs, into OUT: the card's E0 summary.json (COSTS; the
 # records' runs/a100/block1/frozen-e0/summary.json) and the step-time model fit_step_cost.py fits on its calibration
 # point (STEPS; make reproduce-a100 writes it to build/reproduce-a100/steps.json) place the calibration point and the
 # core at the box's pool at 24 to 40 sessions, and the section names the count whose running share is closest to the
-# box's in the core. GPU is the A100 SXM4 80 GB here unless it names another card. Usage: make forecast-fitted
-# CORPUS=<the 32x corpus directory> COSTS=<E0's summary.json> STEPS=<steps.json> [GPU=a100-80gb]
-# [OUT=build/forecast-fitted.md].
+# box's in the core. GPU is the A100 SXM4 80 GB here unless it names another card, and HOST places it on its host as
+# for forecast-a100. Usage: make forecast-fitted CORPUS=<the 32x corpus directory> COSTS=<E0's summary.json>
+# STEPS=<steps.json> [GPU=a100-80gb] [HOST=<host.json>] [OUT=build/forecast-fitted.md].
 forecast-fitted: GPU = a100-80gb
 forecast-fitted: OUT = build/forecast-fitted.md
 forecast-fitted:
 	@test -n "$(CORPUS)" -a -n "$(COSTS)" -a -n "$(STEPS)" || \
-	  { echo "usage: make forecast-fitted CORPUS=<the 32x corpus directory> COSTS=<E0's summary.json> STEPS=<steps.json> [GPU=a100-80gb] [OUT=build/forecast-fitted.md]" >&2; exit 2; }
+	  { echo "usage: make forecast-fitted CORPUS=<the 32x corpus directory> COSTS=<E0's summary.json> STEPS=<steps.json> [GPU=a100-80gb] [HOST=<host.json>] [OUT=build/forecast-fitted.md]" >&2; exit 2; }
 	cargo build --release --locked -p lh-sim
 	uv run -q --no-project python benchmarks/e2/long_traces.py $(CORPUS) $(FORECAST_LONG) 48 >/dev/null
 	@mkdir -p $(dir $(OUT))
 	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu $(GPU) --costs $(COSTS) --step-costs $(STEPS) \
-	  --markdown $(OUT) >/dev/null
+	  $(if $(HOST),--host $(HOST)) --markdown $(OUT) >/dev/null
 	@ls $(OUT)
 
 # The A100 run's analysis (benchmarks/a100/analysis.py; docs/HARDWARE.md, the analysis) from a single host's records

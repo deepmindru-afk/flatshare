@@ -262,6 +262,12 @@ def test_each_forecast_reads_back_its_own_cards_numbers() -> None:
     assert f40.core == {"running": "13%", "busy": "76%", "stalled": "57%"}
     with pytest.raises(ValueError):
         analysis.forecast_core(analysis.FORECAST.read_text(), "A100 SXM4 80 GB")
+    # A forecast that places the card on a host (lh-sim forecast --host) names its cells so.
+    text = analysis.FORECAST_80GB.read_text()
+    on_host = text.replace(" (central) |", " (central, on this host) |")
+    assert on_host != text
+    assert analysis.forecast_core(on_host, f80.card) == f80.core
+    assert analysis.forecast_core(on_host, f80.card, analysis.APRIME) == f80.aprime
 
 
 @pytest.mark.parametrize(
