@@ -172,7 +172,7 @@ During every agent point `flatshare-bench e2 run` samples the engine's `/metrics
 
 ### The optional arms
 
-In the plan's order, each complete in itself, after the core (`run.sh NAME`). On 2026-10-26 the batch, tuned vLLM, the PRs' values at tuned vLLM's cap, A' (one round) and FlashInfer's attention ran, in that order; C', the PRs' own code and preempt-resubmit did not ([what it measured](#what-it-measured-2026-10-26)).
+Each arm is complete in itself and runs after the core (`run.sh NAME`); the list is in the plan's order, and arm 8 was added during the run. On 2026-10-26 the batch, tuned vLLM, the PRs' values at tuned vLLM's cap, A' (one round) and FlashInfer's attention ran, in that order; C', the PRs' own code and preempt-resubmit did not ([what it measured](#what-it-measured-2026-10-26)).
 
 1. **C'** ([`cprime.sh`](../benchmarks/a100/cprime.sh)): Qwen3-14B-FP8 at the A100 40 GB's own pool, 117,344 tokens (modeled), at 40 sessions, on its own node (`a100-40gb-qwen3-14b`), the agent's requests naming it (the `qwen3-14b` worker variant): its first starts, the pool checked, a smoke reply without `<think>`, E0 with one rep, its own voice alone, then three rounds of tuned vLLM (the step cap with the lowest calls' first-token p95 in blocks 1 and 2, [`probe_results.py`](../benchmarks/a100/probe_results.py) `pick-stock`) against the PRs' values. About 95 minutes.
 2. **The PRs' own code** ([`branches.sh`](../benchmarks/a100/branches.sh)): vLLM at the PRs' tip with their switches on against vLLM at their base, two Python-only installs over precompiled binaries staged beforehand (`branches.sh stage BASE HEAD`), each through the probes: KV x3, prefill x2, tail x2. About 45 minutes.
