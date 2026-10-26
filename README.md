@@ -16,13 +16,14 @@ the agents' throughput holds.
   <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/figures/e2-demo-narrow-dark.webp">
   <source media="(max-width: 767px)" srcset="docs/figures/e2-demo-narrow.webp">
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/e2-demo-dark.webp">
-  <img src="docs/figures/e2-demo.webp" width="100%" alt="The same caller's first measured turn on two engines beside 24 coding-agent sessions on one RTX 5060 Ti, drawn as it plays on one time axis: the caller's line, the wait for the reply as a growing bar with a clock, and the agent's reply. With #63350 and #63351 the reply comes 1.9 s after the line ends, before the dashed SLO rule at 2.03 s; on tuned vLLM 0.32 it comes after 9.6 s">
+  <img src="docs/figures/e2-demo.webp" width="100%" alt="The same caller's first measured turn on two engines beside 24 coding-agent sessions on one RTX 5060 Ti, in two panels side by side as it plays. Each panel shows the wait's clock and the wait against the 2.03 s SLO, the reply's voice-to-voice as a bar against the SLO, the caller's line and the agent's reply as waveforms on the turn's time axis with the wait between them, and the agents' tokens a second over the calls' first 240 s. Tuned vLLM 0.32 answers after 9.6 s, over the SLO; with #63350 and #63351 the reply comes after 1.9 s, within it, and the agents make 3,355 tokens a second against 3,437, 98%">
 </picture>
 
-*The same caller's first measured turn on each engine, beside the same agents (recorded 2026-10-25), as it plays: with
-the two PRs the reply comes 1.9 s after the caller's line ends, on tuned vLLM after 9.6 s; over both calls of each run,
-their V2V p95 was 2.2 and 11.2 s. The video of ten turns, with sound, its closing card with both GPUs' runs, is in the
-[v1.1 release](https://github.com/StevenWang-CY/flatshare/releases/tag/v1.1).*
+*The same caller's first measured turn on each engine, beside the same agents (recorded 2026-10-25), as it plays:
+tuned vLLM answers 9.6 s after the caller's line ends, over the SLO; with the two PRs the reply comes after 1.9 s,
+within it, and the agents keep 98% of their tokens a second. Over both calls of each run, the V2V p95 was 11.2 and
+2.2 s. The video of ten turns, with sound, its closing card with both GPUs' runs, is in the
+[v1.2 release](https://github.com/StevenWang-CY/flatshare/releases/tag/v1.2).*
 
 <picture>
   <source media="(max-width: 767px)" srcset="docs/figures/e2-voice-p95-gpus-narrow.svg">
