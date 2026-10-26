@@ -444,6 +444,8 @@ case "$*" in
 esac
 """,
     "nvidia-smi": "#!/bin/sh\nexit 1\n",  # staging: no card yet
+    # ldconfig -p: the linker's cache, the libraries that $FAKE_HOST/ld.so.cache lists (none unless a test writes it).
+    "ldconfig": '#!/bin/sh\n[ "$1" = -p ] || exit 1\ncat "$FAKE_HOST/ld.so.cache" 2>/dev/null || true\n',
     "sudo": "#!/bin/sh\nexit 1\n",
     "systemd-detect-virt": "#!/bin/sh\nexit 1\n",
     "unshare": "#!/bin/sh\nexit 1\n",
@@ -716,6 +718,54 @@ def test_bootstrap_keeps_the_hub_cache_the_first_stage_resolved(ubuntu: dict) ->
         assert "export HF_HUB_CACHE=/data/hf/hub\n" in (node / "env.sh").read_text(), invocation
         engine = (node / "systemd" / "lh-engine.service").read_text().splitlines()
         assert 'Environment="HF_HUB_CACHE=/data/hf/hub"' in engine, invocation
+
+
+def test_the_stages_facts_find_the_drivers_libraries_and_the_gpu_units_name_them(
+    ubuntu: dict,
+) -> None:
+    # Colab's container: the driver's libraries in /usr/lib64-nvidia, which the linker's cache does not list and the
+    # operator's shell reaches through LD_LIBRARY_PATH. The stage's facts find them there and the stage says so; the
+    # GPU units name the directory, and so does every check that runs with a unit's environment (with-engine-env,
+    # vLLM's parse), without the shell's. Once the cache lists them (ldconfig), the units name nothing.
+    nvidia = ubuntu["home"].parent / "lib64-nvidia"
+    nvidia.mkdir()
+    (nvidia / "libcuda.so.580.82.07").write_text("")
+    (nvidia / "libcuda.so.1").symlink_to("libcuda.so.580.82.07")
+    node = ubuntu["node"]
+    done = bootstrap(ubuntu, "render", LD_LIBRARY_PATH=str(nvidia))
+    assert done.returncode == 0, done.stdout + done.stderr
+    libs = json.loads((node / "host.json").read_text())["driver_libs"]
+    assert libs == {"path": str(nvidia), "linker": False, "via": "LD_LIBRARY_PATH"}
+    assert (
+        f"the driver's libcuda.so.1 is in {nvidia}, which the linker does not search" in done.stdout
+    )
+    for unit in ("lh-engine", "lh-stt", "lh-tts"):
+        lines = (node / "systemd" / f"{unit}.service").read_text().splitlines()
+        assert f"Environment=LD_LIBRARY_PATH={nvidia}" in lines, unit
+    shell = {k: v for k, v in ubuntu["env"].items() if k != "LD_LIBRARY_PATH"}
+    checked = subprocess.run(
+        [
+            sys.executable,
+            str(REPO / "deploy" / "a100" / "host.py"),
+            "with-engine-env",
+            str(node),
+            "env",
+        ],
+        env=shell,
+        capture_output=True,
+        text=True,
+    )
+    assert f"LD_LIBRARY_PATH={nvidia}" in checked.stdout.splitlines(), checked.stderr
+    libc6 = {"x86_64": "libc6,x86-64", "aarch64": "libc6,AArch64"}.get(os.uname().machine, "libc6")
+    (ubuntu["state"] / "ld.so.cache").write_text(
+        f"\tlibcuda.so.1 ({libc6}) => {nvidia}/libcuda.so.1\n"
+    )
+    done = bootstrap(ubuntu, "render", LD_LIBRARY_PATH=str(nvidia))
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert json.loads((node / "host.json").read_text())["driver_libs"]["linker"] is True
+    assert "which the linker does not search" not in done.stdout
+    for unit in ("lh-engine", "lh-stt", "lh-tts"):
+        assert "LD_LIBRARY_PATH" not in (node / "systemd" / f"{unit}.service").read_text(), unit
 
 
 FAKE_VLLM = """\
