@@ -86,15 +86,15 @@ def saved_call(run_dir: Path, v2v_s: list[float], *, label: str, point: str) -> 
     return run_dir
 
 
-def frontier(path: Path) -> Path:
+def frontier(path: Path, on: str = "", scale: float = 1.0) -> Path:
     """A report's frontier.csv: voice alone with two callers (V2V p95 1,500 and 1,600 ms, so an
-    SLO of 1,800 ms), and the two points' runs in another corpus with as many callers."""
-    rows = [("1", "weka-x32, 2 callers", "alone", 1500.0, "")]
-    rows += [("1", "weka-x32, 2 callers", "alone", 1600.0, "")]
-    rows += [("4", "weka-x32-long, 2 callers", "frozen", p95, 900.0) for p95 in (3000.0, 3500.0)]
-    rows += [
-        ("9", "weka-x32-long, 2 callers", "a9", p95, 880.0) for p95 in (1100.0, 1300.0, 1200.0)
-    ]
+    SLO of 1,800 ms), and the two points' runs in another corpus with as many callers; ``on``
+    names the GPU in the workloads, as off the box, and ``scale`` multiplies the agents' tokens/s."""
+    rows = [("1", f"weka-x32, 2 callers{on}", "alone", 1500.0, "")]
+    rows += [("1", f"weka-x32, 2 callers{on}", "alone", 1600.0, "")]
+    long = f"weka-x32-long, 2 callers{on}"
+    rows += [("4", long, "frozen", p95, 900.0 * scale) for p95 in (3000.0, 3500.0)]
+    rows += [("9", long, "a9", p95, 880.0 * scale) for p95 in (1100.0, 1300.0, 1200.0)]
     with path.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["arm", "workload", "point", "v2v_p95_ms", "fixed_window_tokens_per_s"])
@@ -161,6 +161,7 @@ def test_the_waits_and_the_soundtrack(timeline: Any) -> None:
 
 def test_the_summary_is_the_reports(summary: Any, tmp_path: Path) -> None:
     assert summary.slo_ms == pytest.approx(1800.0)  # voice alone's median p95 plus 250 ms
+    assert summary.gpu is None  # the box's workloads name no GPU
     assert summary.p95_ms == (3250.0, 1200.0) and summary.runs == (2, 3)
     assert summary.tokens == (900.0, 880.0)
     with pytest.raises(ValueError, match="0 runs of absent"):
@@ -222,7 +223,9 @@ def test_each_v2v_holds_once_it_is_given(timeline: Any, summary: Any) -> None:
                 assert row.clock.get_alpha() == 1.0
 
 
-def test_no_text_leaves_its_room_or_overlaps_another(timeline: Any, summary: Any) -> None:
+def test_no_text_leaves_its_room_or_overlaps_another(
+    timeline: Any, summary: Any, tmp_path: Path
+) -> None:
     forms = [(1280, False, False), (1280, True, False), (680, True, True)]
     for theme in ("light", "dark"):
         for width, excerpt, narrow in forms:  # the video's, the README's and its phone layout's
@@ -241,6 +244,12 @@ def test_no_text_leaves_its_room_or_overlaps_another(timeline: Any, summary: Any
                 frames.check(t)
     demo.title_card(timeline, "A voice agent and coding agents", width=1280)
     demo.closing_card(summary, timeline, width=1280, theme="dark")
+    # Another GPU's report of the same two points: a group of its own, against its own SLO.
+    on = ", NVIDIA A100-SXM4-80GB, 1 warm-up turn"
+    a100 = demo.Summary.read(frontier(tmp_path / "a100.csv", on, 3.0), ["frozen", "a9"])
+    assert a100.gpu == "A100-SXM4-80GB" and a100.tokens == (2700.0, 2640.0)
+    for theme in ("light", "dark"):
+        demo.closing_card(summary, timeline, also=[a100], width=1280, theme=theme)
     # The check refuses a text out of its room.
     frames = demo.Frames(timeline, summary, width=640)
     artist, room = frames.board.texts[0]
@@ -283,6 +292,15 @@ def test_the_video_is_its_planned_frames_each_its_size(timeline: Any, summary: A
     assert (without.title, without.tail, without.total) == (0, 0, without.arrival + without.calls)
 
 
+def test_another_gpus_report_needs_the_calls_own(
+    pair: tuple[Path, Path], tmp_path: Path, capsys
+) -> None:
+    also = frontier(tmp_path / "a100.csv", ", NVIDIA A100-SXM4-80GB")
+    with pytest.raises(SystemExit):
+        demo.main([*map(str, pair), "--out", str(tmp_path / "demo.mp4"), "--also", str(also)])
+    assert "--also adds to the closing card that --summary makes" in capsys.readouterr().err
+
+
 def test_a_text_needs_its_glyphs() -> None:
     board = demo.Board(160, demo.FULL_H)
     with pytest.raises(ValueError, match="no glyph"):
@@ -299,6 +317,7 @@ def test_the_script_renders_a_video_and_an_excerpt(pair: tuple[Path, Path], tmp_
     out = tmp_path / "demo.mp4"
     command = [uv, "run", "-q", str(DEMO), *map(str, pair), "--out", str(out)]
     command += ["--summary", str(frontier(tmp_path / "frontier.csv")), "--heading", "A title"]
+    command += ["--also", str(frontier(tmp_path / "a100.csv", ", NVIDIA A100-SXM4-80GB", 3.0))]
     command += ["--fps", "10", "--width", "320", "--turns", "2"]
     command += [
         "--excerpt",

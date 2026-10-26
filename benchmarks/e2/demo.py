@@ -29,8 +29,10 @@ turn's V2V as a pair of bars. ``--summary`` is a report's frontier.csv (``lh-ben
 voice SLO is the report's, 250 ms above voice alone's median V2V p95 with as many callers, drawn as
 a dashed rule against each wait and each bar; and a closing card gives both configurations (by their
 points' names) over all the report's runs, the median of their V2V p95 and of the agents' tokens/s
-over the calls' first 240 s, as the README's chart draws them. An opening card names the calls and
-the engines (``--heading`` is its heading).
+over the calls' first 240 s, as the README's chart draws them. ``--also`` adds another GPU's report of
+the same two points (its own frontier.csv): the closing card then gives each GPU's as a group under
+its name, against its own SLO. An opening card names the calls and the engines (``--heading`` is its
+heading).
 
 The soundtrack is one call at a time, the caller and the agent mixed: the baseline's for the first
 half of the turns and the featured configuration's for the rest, and the side heard is marked. The
@@ -377,6 +379,9 @@ class Summary:
     runs: tuple[int, int]
     tokens: tuple[float | None, float | None]
     """Each one's median of the agents' tokens/s over the calls' first 240 s (None unmeasured)."""
+    gpu: str | None = None
+    """The GPU the workload names, without the vendor's prefixes; None on the box, whose
+    workloads name none."""
 
     @classmethod
     def read(cls, path: Path, points: Sequence[str]) -> Summary:
@@ -399,11 +404,19 @@ class Summary:
         if p95[0] is None or p95[1] is None:
             raise ValueError(f"{path}: a configuration of {list(points)} without a V2V p95")
         tokens = [median(runs, "fixed_window_tokens_per_s") for runs in found]
+        # The workload: the corpus, the callers, then the GPU and the model where they are not the
+        # box's (a model's name has its organization's slash), then any warm-up turns.
+        named = [
+            part
+            for part in found[0][0]["workload"].split(", ")[2:]
+            if "/" not in part and "warm-up turn" not in part
+        ]
         return cls(
             _slo(rows, found[0][0]),
             (p95[0], p95[1]),
             (len(found[0]), len(found[1])),
             (tokens[0], tokens[1]),
+            named[0].removeprefix("NVIDIA ").removeprefix("GeForce ") if named else None,
         )
 
 
@@ -1329,17 +1342,26 @@ def title_card(
 
 
 def closing_card(
-    summary: Summary, timeline: Timeline, *, width: int = 1920, theme: str = "light"
+    summary: Summary,
+    timeline: Timeline,
+    *,
+    also: Sequence[Summary] = (),
+    width: int = 1920,
+    theme: str = "light",
 ) -> np.ndarray:
     """The closing card: both configurations over all the report's runs, as the README's chart
     draws them: the median of their V2V p95 against the SLO, and of the agents' tokens/s over the
-    calls' first 240 s with each one's share of the baseline's."""
+    calls' first 240 s with each one's share of the baseline's. ``also`` is other GPUs' reports of
+    the same two points: each is a group under its GPU's name after the calls' own, against its own
+    SLO and its own baseline's tokens/s, on one scale."""
     board = Board(width, FULL_H, theme)
     calls = timeline.calls
     gpu = calls[0].gpu or calls[1].gpu
-    top = 184.0
+    groups = [(summary.gpu or gpu, summary), *((other.gpu, other) for other in also)]
+    several = len(groups) > 1
+    top = 84.0 if several else 184.0
     board.text(W / 2, top, "Both configurations over all their runs", style.TITLE, ha="center")
-    where = f" on one {gpu}" if gpu else ""
+    where = " on each GPU" if several else f" on one {gpu}" if gpu else ""
     sub = (
         f"{_counted(calls[0].callers)} voice calls beside {calls[0].sessions} coding-agent "
         f"sessions{where}"
@@ -1355,15 +1377,23 @@ def closing_card(
         board.text(cx, heads, head, style.LABEL, ha="center")
         line = f"{sub_text} \N{BULLET} {better} is better"
         board.text(cx, heads + 25, line, style.NOTE, "soft", ha="center")
-    plot = heads + 68  # the SLO's label; the plot starts under it
-    y = plot + 16
+    plot = heads + 68  # the first SLO's label; the plot starts under it
     pitch, thick = 54.0, 26.0
-    p95 = [ms / 1000 for ms in summary.p95_ms]
-    slo = summary.slo_ms / 1000 if summary.slo_ms else None
-    marks_a = ticks(max([*p95, slo or 0.0]), alen)
-    tokens = summary.tokens
-    marks_b = ticks(max([v or 0.0 for v in tokens] + [1.0]), blen)
-    bottom = y + pitch + thick + 8
+    p95_top = max(max(*g.p95_ms, g.slo_ms or 0.0) for _, g in groups) / 1000
+    marks_a = ticks(p95_top, alen)
+    marks_b = ticks(max([v or 0.0 for _, g in groups for v in g.tokens] + [1.0]), blen)
+    rows = []  # each row's top, its group and its side
+    slos = []  # each group's SLO: its label's baseline and its rows' top and end
+    y = plot + 16
+    for k, (name, group) in enumerate(groups):
+        if several:
+            board.text(24, y + 22, name or "", style.NOTE, "mute")
+            y += 36
+        rows += [(y + pitch * side, group, side) for side in (0, 1)]
+        if group.slo_ms is not None:
+            slos.append((group.slo_ms / 1000, plot if k == 0 else y - 8, y + pitch + thick + 6))
+        y += 2 * pitch + 10
+    bottom = rows[-1][0] + thick + 8
     for x0, length, marks in ((ax0, alen, marks_a), (bx0, blen, marks_b)):
         step = marks[1] - marks[0]
         for mark in marks:
@@ -1372,17 +1402,17 @@ def closing_card(
             board.text(x, bottom + 23, mark_text(mark, step), style.NOTE, "mute", ha="center")
         board.line([x0, x0 + length], [bottom, bottom], "axis", style.HAIR)
     values = []
-    for side in (0, 1):
-        ry = y + pitch * side
+    for ry, group, side in rows:
         board.text(right, ry + 15, calls[side].label, style.VALUE, ha="right")
-        runs = summary.runs[side]
+        runs = group.runs[side]
         runs_text = f"{runs} run{'s' if runs != 1 else ''}"
         board.text(right, ry + 37, runs_text, style.NOTE, "soft", ha="right")
-        length = alen * p95[side] / marks_a[-1]
+        p95 = group.p95_ms[side] / 1000
+        length = alen * p95 / marks_a[-1]
         shape = bar_shape(ax0, ry, length, thick, "right")
         board.patch(shape, BARS[side], "bar-line", style.BAR_LINE)
-        values.append((ax0 + length + 8, ry + 19, f"{p95[side]:.2f}", "ink"))
-        value = tokens[side]
+        values.append((ax0 + length + 8, ry + 19, f"{p95:.2f}", "ink"))
+        value, baseline = group.tokens[side], group.tokens[0]
         if value is None:
             values.append((bx0 + 8, ry + 19, "\N{EN DASH}", "soft"))
             continue
@@ -1390,13 +1420,15 @@ def closing_card(
         shape = bar_shape(bx0, ry, length, thick, "right")
         board.patch(shape, BARS[side], "bar-line", style.BAR_LINE)
         values.append((bx0 + length + 8, ry + 19, f"{value:,.0f}", "ink"))
-        if tokens[0]:
+        if baseline:
             after = bx0 + length + 16 + board.width_of(f"{value:,.0f}", style.NOTE)
-            values.append((after, ry + 19, f"{value / tokens[0]:.0%}", "soft"))
-    if slo is not None:
+            values.append((after, ry + 19, f"{value / baseline:.0%}", "soft"))
+    for slo, label, end in slos:
         x = ax0 + alen * slo / marks_a[-1]
-        board.line([x, x], [plot + 8, bottom], "orange", style.THIN, dashes=(5, 4))
-        board.text(x, plot, f"SLO {slo:.2f} s", style.NOTE, "orange", ha="center", halo=6.0)
+        board.line(
+            [x, x], [label + 8, end if several else bottom], "orange", style.THIN, dashes=(5, 4)
+        )
+        board.text(x, label, f"SLO {slo:.2f} s", style.NOTE, "orange", ha="center", halo=6.0)
     for x, baseline, text, ink in values:
         board.text(x, baseline, text, style.NOTE, ink, halo=6.0)
     image = board.pixels()
@@ -1468,8 +1500,9 @@ def video_frames(
     width: int = 1920,
     theme: str = "light",
     heading: str | None = None,
+    also: Sequence[Summary] = (),
 ) -> tuple[Plan, Callable[[], Iterator[np.ndarray]]]:
-    """The video's plan, and a generator of its frames."""
+    """The video's plan, and a generator of its frames; ``also`` as :func:`closing_card` takes it."""
     steps = plan(timeline, summary, heading, fps)
 
     def generate() -> Iterator[np.ndarray]:
@@ -1490,7 +1523,7 @@ def video_frames(
             yield last
         if steps.tail:
             assert summary is not None
-            card = closing_card(summary, timeline, width=width, theme=theme)
+            card = closing_card(summary, timeline, also=also, width=width, theme=theme)
             held = last.copy()
             for index in range(steps.tail):
                 t = index / fps
@@ -1511,12 +1544,13 @@ def render(
     width: int = 1920,
     theme: str = "light",
     heading: str | None = None,
+    also: Sequence[Summary] = (),
 ) -> Plan:
     """Write the video with its soundtrack: H.264 at CRF 18 in yuv420p, BT.709, AAC."""
     import imageio_ffmpeg
 
     steps, generate = video_frames(
-        timeline, summary, fps=fps, width=width, theme=theme, heading=heading
+        timeline, summary, fps=fps, width=width, theme=theme, heading=heading, also=also
     )
     rate = timeline.calls[0].rate
     height = round(width * FULL_H / W / 2) * 2
@@ -1611,6 +1645,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--summary", type=Path, help="a report's frontier.csv: the SLO and the closing card"
     )
+    parser.add_argument(
+        "--also",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FRONTIER_CSV",
+        help="another GPU's report of the same two points: a group of the closing card, against "
+        "its own SLO (repeatable)",
+    )
     parser.add_argument("--heading", help="the opening card's heading (default: no opening card)")
     parser.add_argument(
         "--excerpt",
@@ -1642,6 +1685,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.out is None and args.excerpt is None:
         parser.error("nothing to write: give --out, --excerpt or both")
+    if args.also and args.summary is None:
+        parser.error("--also adds to the closing card that --summary makes: give --summary")
     labels = args.labels or (None, None)
     try:
         baseline, featured = (
@@ -1650,7 +1695,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         calls = (baseline, featured)
         timeline = Timeline.choose(calls, args.first_turn, args.turns, args.seconds)
-        summary = Summary.read(args.summary, [c.point for c in calls]) if args.summary else None
+        points = [c.point for c in calls]
+        summary = Summary.read(args.summary, points) if args.summary else None
+        also = [Summary.read(path, points) for path in args.also]
         short = Timeline.choose(calls, timeline.first, args.excerpt_turns)
     except (OSError, KeyError, ValueError) as exc:
         print(f"demo.py: {exc}", file=sys.stderr)
@@ -1664,6 +1711,7 @@ def main(argv: list[str] | None = None) -> int:
             width=args.width,
             theme=args.theme,
             heading=args.heading,
+            also=also,
         )
         cards = (f", an opening card of {TITLE_S:g} s" if steps.title else "") + (
             f", a closing card of {CLOSING_S:g} s" if steps.tail else ""
