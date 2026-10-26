@@ -413,7 +413,7 @@ The method, all five arms, correctness and the history-rehydration runs are in [
 
 ## Engine plugins
 
-The lease-aware plugins of v0.3 ([its tree](https://github.com/StevenWang-CY/flatshare/tree/v0.3/python/flatshare_vllm)), measured in W1 and never used; they were removed after v0.3 ([ADR-0006](adr/0006-the-engine-change-carries-the-realtime-tier.md)).
+The lease-aware plugins of v0.3 ([its tree](https://github.com/StevenWang-CY/flatshare/tree/v0.3/python/leaseholder_vllm), where the package has its former name, `leaseholder_vllm`), measured in W1 and never used; they were removed after v0.3 ([ADR-0006](adr/0006-the-engine-change-carries-the-realtime-tier.md)).
 
 `LeasePolicy` at a full-size tier of 18,204 chunks (40 GiB of Qwen3-4B BF16 KV), against vLLM's real offload manager on CPU:
 
