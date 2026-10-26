@@ -301,8 +301,11 @@ def plot_waterfall(cells: Sequence[Mapping[str, Any]], path: Path) -> Path:
         if c["workload"] != workload:  # each run of one workload's rows under its heading
             workload = c["workload"]
             y += 2 if placed else 0
-            s.text(24, y + 15, workload, size=NOTE, cls="mute")
-            y += 26
+            # In the label column, clear of the gridlines: a GPU's name makes one wider than it.
+            lines = wrap(workload, right - 24, NOTE)
+            for k, line in enumerate(lines):
+                s.text(24, y + 15 + 20 * k, line, size=NOTE, cls="mute")
+            y += 26 + 20 * (len(lines) - 1)
         height = _name(s, right, y, label(c["label"]), f"{c['runs']} runs" if c["runs"] > 1 else "")
         placed.append((y + max(height, 22) / 2 - 10, c))
         y += max(height, 22) + 10

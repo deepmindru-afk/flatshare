@@ -1005,6 +1005,26 @@ def test_the_stage_waterfall_stacks_each_configurations_stages_to_its_mean_v2v(
     assert ">4.30<" in figure  # the mean V2V, the stacked bar's length
 
 
+def test_the_waterfall_wraps_a_heading_that_names_the_gpu(tmp_path: Path) -> None:
+    # A point off the box has the GPU in its workload's heading, wider than the label column: the
+    # heading wraps there, where one line would run across the gridlines and the figure refuse it.
+    a100 = "NVIDIA A100-SXM4-80GB"
+    pr = point(tmp_path / "a100-r1", "w5-disc-pr-ab48-s24", "9", 8800, 1800, data="weka-x32-long")
+    samples = [named(T0 + 10, "1410 MHz", a100), named(T0 + 20, "1395 MHz", a100)]
+    (pr / "gpu.csv").write_text("\n".join(samples) + "\n")
+    turn_lines(
+        pr,
+        {"transcript_ms": 800, "end_of_turn_ms": 810, "llm_ttft_ms": 400}
+        | {"turn_to_first_sentence_ms": 700, "tts_first_audio_ms": 200},
+        2,
+        answered(1500, 1700),
+    )
+    rows, _ = load_points([pr])
+    write_report(rows, tmp_path / "report")
+    figure = (tmp_path / "report" / "waterfall.svg").read_text()
+    assert ">weka-x32-long, 2 callers,<" in figure and f">{a100}<" in figure
+
+
 SNAPSHOT = (
     "/home/alice/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Instruct-2507-FP8/snapshots/859180"
 )
