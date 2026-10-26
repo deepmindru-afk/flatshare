@@ -168,7 +168,7 @@ The rehearsal ran block 0 in 34 minutes on the box from a fresh home (`gpu` 1.4,
 
 `run.sh --until HH:MM` (UTC) starts no block whose estimate above would end after then, and hands that one deadline, as an epoch, to every campaign and to C', which start no point that cannot end before it: a point is budgeted by the longest of its kind measured on this host once one has run (`durations.tsv`), by W5's durations before. A campaign stopped so leaves its block undone and the run exits 0; any failure exits 1. `--estimate BLOCK=MINUTES` puts another estimate in the table's place for a block or an arm (a host measured faster or slower, or an E2 block run for its first point alone, which the campaign's own budget then stops at the deadline).
 
-During every agent point `flatshare-bench e2 run` samples the engine's `/metrics` every 0.5 s, from which each point's summary gives the measured running share (the time free KV is under two calls' 2,048 tokens).
+During every agent point `flatshare-bench e2 run` samples the engine's `/metrics` every 0.5 s, from which each point's summary gives the measured running share (the time free KV is under two calls' 2,048 tokens). W5's points on the box ran without this sampler, so the box's running share is the forecast's [modeled].
 
 ### The optional arms
 
