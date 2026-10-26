@@ -135,6 +135,35 @@ def test_tuned_vllm_is_the_cores_frozen_point_at_the_probes_best_cap_on_the_core
         assert [arm.name for arm in arms] == ["a100-tuned-s24.toml"], n
 
 
+def test_the_prs_at_the_a100s_best_cap_are_the_cores_pr_point_at_tuned_vllms_cap() -> None:
+    # The PRs' 48-token configuration on tuned vLLM's 2,048/0, otherwise the core's point, on the samples of the
+    # core's rounds 1 and 2, so that each pairs with tuned vLLM's round and that round's two core points.
+    ours = load_arm(A100 / "arms" / "a100-pr-ab48-2048-s24.toml")
+    core = load_arm(REPO / "benchmarks" / "e2" / "arms" / "w5-disc-pr-ab48-s24.toml")
+    tuned = load_arm(A100 / "arms" / "a100-tuned-s24.toml")
+    assert str(ours.engine) == (
+        "make-room --max-num-batched-tokens 2048 --long-prefill-token-threshold 0 "
+        "--additional-config.make_room.reserve_tokens 0 "
+        "--additional-config.make_room.budget_cap_tokens 48"
+    )
+    assert (
+        str(ours.engine)
+        .removeprefix("make-room ")
+        .startswith(str(tuned.engine).removeprefix("frozen "))
+    )
+    assert (ours.arm, ours.voice, ours.agents.sessions, ours.agents.data) == (
+        core.arm,
+        core.voice,
+        core.agents.sessions,
+        core.agents.data,
+    )
+    assert "vLLM PRs A and B with a 48-token window" in ours.label
+    for n in (1, 2):
+        seed, arms = campaign(A100 / f"a100-prtuned-r{n}.campaign")
+        assert seed == campaign(A100 / f"a100-tuned-r{n}.campaign")[0] == 10 + n
+        assert [arm.name for arm in arms] == ["a100-pr-ab48-2048-s24.toml"], n
+
+
 PROBE_LINE = (
     "kv: priority-0 TTFT {ttft} ms, 16 tokens {t16} ms, 40 tokens {t40}, for 761 prompt tokens, sent with 2 "
     "priority-2 requests of 17999 tokens running and 24 of 2274 blocks free; after it, 2 running and 0 waiting"

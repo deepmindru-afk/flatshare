@@ -994,6 +994,34 @@ def test_an_estimate_given_for_a_block_starts_it_where_the_pages_would_miss_the_
         assert done.returncode == 2 and "usage" in done.stderr, (bad, done.stderr)
 
 
+def test_the_prs_at_the_a100s_best_cap_run_both_rounds_on_their_engine(
+    tmp_path: Path, runtime: Path
+) -> None:
+    # run.sh prtuned: the PRs' values at tuned vLLM's 2,048/0, its two campaigns on the samples of the core's rounds 1
+    # and 2, each point on make-room with the step cap's flags before the PRs' own.
+    hosts = tmp_path / "hosts"
+    home = a100_host(hosts)
+    env = dry_env(home, hosts, runtime)
+    done = subprocess.run(
+        ["bash", str(RUN), "--estimate", "prtuned=24", "prtuned"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    runs = home / "leaseholder" / "runs" / "a100"
+    assert "block prtuned: done" in (runs / "blocks.log").read_text()
+    results = home / "leaseholder" / "results" / "e2"
+    for n in (1, 2):
+        run = results / f"a100-prtuned-r{n}" / "a100-pr-ab48-2048-s24" / "run.json"
+        assert '"status": "complete"' in run.read_text(), n
+    assert (
+        "variant.sh use make-room --max-num-batched-tokens 2048 --long-prefill-token-threshold 0 "
+        "--additional-config.make_room.reserve_tokens 0 --additional-config.make_room.budget_cap_tokens 48"
+    ) in lines(home / "variant.log")
+
+
 def test_a_cap_of_2048_is_measured_beside_vllms_default(tmp_path: Path, runtime: Path) -> None:
     # --cap 2048, the forecast's low value: block 2's second setting is 2,048/1,024, whose runs are its own, not
     # 2,048/0's under the same names (skipped as done, the engine restarted for nothing).

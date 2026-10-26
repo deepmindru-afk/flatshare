@@ -16,9 +16,9 @@ which.
    GPU, CPU and computed shares of the prompt tokens.
 3. The probes (probe_results.py): every run, then the KV case's wait and the prefill case's token gap on stock and on
    the PRs' values, and the calls' tail at each stock setting, beside the forecast and the box.
-4. E2 within the A100: `lh-bench e2 report` over the core's points and tuned vLLM's (results/e2/a100-r1 to -r5,
-   a100-tuned-r1 and -r2) into OUT/e2, its frontier quoted, the points by round (each round one sample of the agents,
-   which tuned vLLM's rounds share with the core's first two), and each configuration's measured running share
+4. E2 within the A100: `lh-bench e2 report` over the core's points, tuned vLLM's and the PRs' values at its step cap
+   (results/e2/a100-r1 to -r5, a100-tuned-r1 and -r2, a100-prtuned-r1 and -r2) into OUT/e2, its frontier quoted, the
+   points by round (each round one sample of the agents, which the two arms' rounds share with the core's first two), and each configuration's measured running share
    against the forecast's.
 5. A': the same over its points (results/e2/a100-aprime-r1, -r2) and the core's voice alone, the SLO's reference on
    this card, into OUT/e2-aprime, against the forecast's A' cell.
@@ -109,6 +109,7 @@ POINTS = {
     "w5-a1-voice": "Voice alone",
     "w5-disc-frozen-s24": "Frozen, 512/256",
     "a100-tuned-s24": "Tuned vLLM, 2,048/0",
+    "a100-pr-ab48-2048-s24": "The PRs' values, 2,048/0",
     "w5-disc-pr-ab48-s24": "The PRs' values",
     "a100-aprime-frozen-s32": "Frozen, 512/256",
     "a100-aprime-pr-ab48-s32": "The PRs' values",
@@ -686,10 +687,15 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
     else:
         lines.append("Not measured: no probe block (runs/a100/block1-3).")
     lines += ["", "## 4. E2 within the A100", ""]
-    # The core's rounds (a100-r1 to -r5) and tuned vLLM's (a100-tuned-r1, -r2), which replay the samples of the core's
-    # rounds 1 and 2; the other optional arms' campaigns begin a100-r too (a100-resubmit-r3 ...), and A' has its own.
+    # The core's rounds (a100-r1 to -r5), and tuned vLLM's and the PRs' values at its step cap (a100-tuned-r1, -r2,
+    # a100-prtuned-r1, -r2), which replay the samples of the core's rounds 1 and 2; the other optional arms' campaigns
+    # begin a100-r too (a100-resubmit-r3 ...), and A' has its own.
     core_points = complete_points(host, "a100-r[0-9]*")
-    points = core_points + complete_points(host, "a100-tuned-r*")
+    points = (
+        core_points
+        + complete_points(host, "a100-tuned-r*")
+        + complete_points(host, "a100-prtuned-r*")
+    )
     if points:
         lines += e2_lines(points, out / "e2", lh_bench, core["running"], "the core")
     else:
