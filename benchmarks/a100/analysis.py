@@ -108,9 +108,9 @@ KV_BYTES_PER_TOKEN = 36 * 8 * 128 * 2 * 2
 POINTS = {
     "w5-a1-voice": "Voice alone",
     "w5-disc-frozen-s24": "Frozen, 512/256",
+    "w5-disc-pr-ab48-s24": "The PRs' values",
     "a100-tuned-s24": "Tuned vLLM, 2,048/0",
     "a100-pr-ab48-2048-s24": "The PRs' values, 2,048/0",
-    "w5-disc-pr-ab48-s24": "The PRs' values",
     "a100-aprime-frozen-s32": "Frozen, 512/256",
     "a100-aprime-pr-ab48-s32": "The PRs' values",
 }

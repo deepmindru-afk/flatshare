@@ -348,8 +348,9 @@ def e2_point(host: Path, campaign: str, arm: str, seed: int, p95: float, rate: f
 
 
 def test_tuned_vllm_pairs_with_the_cores_rounds_by_the_agents_sample(tmp_path: Path) -> None:
-    # Tuned vLLM's rounds replay the samples of the core's first two: each round's row sets the four configurations
-    # side by side, in E2's order, and a configuration a round lacks leaves its cell empty.
+    # Tuned vLLM's rounds replay the samples of the core's first two: each round's row sets the configurations side by
+    # side, each stock engine beside the PRs' values at its step cap, and a configuration a round lacks leaves its cell
+    # empty.
     host = tmp_path / "host"
     for campaign, arm, seed, p95, rate in (
         ("a100-r1", "w5-disc-pr-ab48-s24", 11, 1663.4, 10125.2),
@@ -364,9 +365,9 @@ def test_tuned_vllm_pairs_with_the_cores_rounds_by_the_agents_sample(tmp_path: P
         + analysis.complete_points(host, "a100-tuned-r*")
     )
     assert lines == [
-        "| Agents' sample (seed) | Voice alone | Frozen, 512/256 | Tuned vLLM, 2,048/0 | The PRs' values |",
+        "| Agents' sample (seed) | Voice alone | Frozen, 512/256 | The PRs' values | Tuned vLLM, 2,048/0 |",
         "|---|---|---|---|---|",
-        "| 11 | 1,412 | 4,120 / 10,900 | 2,950 / 11,800 | 1,663 / 10,125 |",
+        "| 11 | 1,412 | 4,120 / 10,900 | 1,663 / 10,125 | 2,950 / 11,800 |",
         "| 12 |  | 4,400 / 10,800 |  |  |",
     ]
 
