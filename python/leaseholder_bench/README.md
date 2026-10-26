@@ -120,13 +120,20 @@ template. AIPerf substitutes `${VAR:default}` when it loads the file:
 | `LH_BENCH_RAW` | `false`; `true` also exports every request with its headers and payload |
 | `LH_BENCH_SEED` | 11 |
 
-Source `configs/aiperf.env` first. It disables AIPerf's dataset cache, which otherwise writes a
-second, memory-mapped copy of each dataset under `~/.cache/aiperf` (it filled green's disk once),
-keeps the session-id override off, and raises the dataset timeouts that the full corpus (about
-300 s to load and 17-22 GB of RAM) exceeds. AIPerf takes these settings only from the
-environment. The cache would not shorten a run anyway: AIPerf 0.13.0 caches only its own trace
-types, and `weka_trace_scaled` is not one, so every run builds its dataset (about 4 minutes on
-cyan).
+Source `configs/aiperf.env` first. It turns AIPerf's dataset cache on, keeps the session-id
+override off, and raises the dataset timeouts that the full corpus (about 300 s to load and
+17-22 GB of RAM) exceeds. AIPerf takes these settings only from the environment. The cache keeps
+the memory-mapped dataset a run builds, under `~/.cache/aiperf/dataset_mmap`, for any later run
+with the same corpus bytes, tokenizer, seed and dataset settings on the same AIPerf build, so the
+points of an E2 round, which replay one corpus with one seed, build their dataset once: on
+peacock the 48 long traces' dataset took 138 to 165 s to build and 5 s to load, byte for byte the
+same. AIPerf 0.13.0 caches only its own trace types. The plugin adds `weka_trace_scaled`, and
+keeps its datasets in a directory named by a hash of its own code and version
+(`leaseholder-<hash>`), which AIPerf's key does not cover, so a changed loader never loads a
+dataset an older one built (`aiperf_plugin.cache_datasets`). As for AIPerf's own trace types, a
+run then writes no `inputs.json`, which took 124 MB of each point's directory for the long
+traces. Nothing evicts an entry, 0.14 GB for the long traces and 0.33 GB for the whole corpus:
+delete the directory to reclaim them (the cache filled green's disk once).
 
 Things to know:
 
@@ -345,7 +352,10 @@ uv run --extra test pytest      # in python/leaseholder_bench
 They cover the scaling math and schema, the loader's prefix reproduction (both loaders, through
 AIPerf's own reconstruction with a tokenizer-free prompt generator), the plugin's headers and
 body as AIPerf's transport sends them, the wire names and class-to-priority mapping against
-`lh-proto`, the YAML template and the probes against in-process fake servers. `tests/test_e2.py`
+`lh-proto`, the YAML template and the probes against in-process fake servers.
+`tests/test_dataset_cache.py` builds an E2 point's dataset with AIPerf's own dataset manager on
+four committed traces: a hit replays a miss's dataset and an uncached build's byte for byte, and
+a changed plugin misses. `tests/test_e2.py`
 runs whole E2 points against a fake gateway and engine on
 loopback, a recording `systemctl` and stand-ins for AIPerf and the callers that run as real
 processes (`tests/fakes/`): the sequence, the units each arm restarts, the engine check, failures
