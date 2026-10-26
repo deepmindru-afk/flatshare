@@ -264,7 +264,9 @@ the copies run at a Gen3 x16 rate, 39% of the card's link (the box's PCIe 3.0 x8
 µs a token, by least squares), as Python's time is 0.60 of it. Placed on this host
 ([`forecast-80gb-on-host.md`](../benchmarks/a100/forecast-80gb-on-host.md), `make forecast-a100 GPU=a100-80gb
 HOST_JSON=...`), the forecast's E0 cells come within 9% of the measured GPU hits and 10% of the CPU restores at the
-mean, from 69% and 22% off before the run; recompute, which the host does not set, stays 17% off.
+mean, from 69% and 22% off before the run; recompute, which the host does not set, stays 17% off. The host leaves
+the running share where it was: placed on it, the forecast gives the core 11% and A' 18%, against 6% and 6.5%
+measured, so the host is not what the simulator misses there.
 
 ### On Google Colab
 

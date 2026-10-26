@@ -322,7 +322,8 @@ of the card's agent throughput, 2,048-token steps keep all of it 0.14–0.17 s o
 the SLO, against stock's 5,222 ms, at 98% of its throughput. The extra sessions made the agents fewer tokens a second
 than 24 made on the same sample, each waiting longer for KV, and left the measured running share at 6.5% beside either
 engine, where the forecast placed 32 sessions at 18%, the box's regime (17%): on this card the simulator overstates how
-often two calls run short of KV, in the core too (10% forecast, 6% measured).
+often two calls run short of KV, in the core too (10% forecast, 6% measured), and placed on the measured host it
+still gives 11% and 18%.
 
 | Probe | A100 SXM4 80 GB, measured | Forecast before the run [modeled] | This box |
 |---|---|---|---|
