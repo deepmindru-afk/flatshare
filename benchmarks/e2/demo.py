@@ -504,10 +504,11 @@ class Board:
         *,
         ha: str = "left",
         room: Box | None = None,
-        halo: bool = False,
+        halo: float = 0.0,
     ) -> Any:
         """A text at baseline ``y``, which must stay inside ``room`` (the canvas by default); with a
-        ``halo`` of the page's color, as the figures set a value that a rule may cross."""
+        ``halo`` of the page's color that many units wide, as the figures set a value that a rule may
+        cross (6, half of it each side of a stroke)."""
         artist = self.ax.text(
             x,
             y,
@@ -522,7 +523,7 @@ class Board:
         if halo:
             from matplotlib import patheffects
 
-            stroke = patheffects.withStroke(linewidth=self.lw(6), foreground=self.colors["page"])
+            stroke = patheffects.withStroke(linewidth=self.lw(halo), foreground=self.colors["page"])
             artist.set_path_effects([stroke])
         self.set_text(artist, text)
         self.texts.append((artist, room or (0.0, 0.0, self.across, self.units)))
@@ -1115,7 +1116,7 @@ class Frames:
                 wait = next(matched, None)
                 if wait is None:
                     continue
-                bx = cx - 1.5 - self.bar_width if side == 0 else cx + 1.5
+                bx = cx - 3 - self.bar_width if side == 0 else cx + 3
                 bar = board.bar(BARS[side])
                 value = board.text(
                     bx + self.bar_width / 2,
@@ -1124,7 +1125,7 @@ class Frames:
                     style.NOTE,
                     ha="center",
                     room=value_room,
-                    halo=True,
+                    halo=4.0,  # within the gap between a pair's bars, whatever the value's width
                 )
                 self.bars[side].append((wait, bar, value, bx))
                 self.dynamic += [bar, value]
@@ -1395,9 +1396,9 @@ def closing_card(
     if slo is not None:
         x = ax0 + alen * slo / marks_a[-1]
         board.line([x, x], [plot + 8, bottom], "orange", style.THIN, dashes=(5, 4))
-        board.text(x, plot, f"SLO {slo:.2f} s", style.NOTE, "orange", ha="center", halo=True)
+        board.text(x, plot, f"SLO {slo:.2f} s", style.NOTE, "orange", ha="center", halo=6.0)
     for x, baseline, text, ink in values:
-        board.text(x, baseline, text, style.NOTE, ink, halo=True)
+        board.text(x, baseline, text, style.NOTE, ink, halo=6.0)
     image = board.pixels()
     board.check()
     return image
