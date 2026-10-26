@@ -20,7 +20,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from leaseholder_bench.figure_style import LABEL, NARROW, NOTE, VALUE, WIDTH, Figure, measure
+from leaseholder_bench.figure_style import LABEL, NARROW, NOTE, VALUE, WIDTH, Figure, measure, wrap
 
 VOICE, AGENT = "green", "gray"
 """The voice turn's hue and the agents' (blue is the change's own: its components)."""
@@ -145,6 +145,10 @@ def make_room_panel(
     )
     s.bracket(*span(taken[0], taken[-1] + 1), y3 + height + 12, "voice turn")
     s.bracket(*span(taken[-1] + 1, POOL), y3 + height + 12, "free")
+    # Where the victim went (docs/ARCHITECTURE.md §2): its KV stays in the CPU tier for its resume.
+    note = f"{victims[0][0].upper()}{victims[0][1:]} waits; its KV stays in the CPU tier for its resume."
+    for k, line in enumerate(wrap(note, w - 52, NOTE)):
+        s.text(x0, y3 + height + 64 + 22 * k, line, size=NOTE, cls="mute")
 
 
 def hold_prefill_panel(
@@ -206,10 +210,12 @@ def hold_prefill_panel(
         x0, x0 + window_ms * unit - 1.2, y2 + height + 12, f"the reply's first {WINDOW} tokens"
     )
     s.bracket(x0 + window_ms * unit, x0 + span_ms * unit - 1.2, y2 + height + 12, "resumed")
-    # The time axis, from the reply's first step.
-    ay = y2 + height + 58
-    s.rule(x0, x0 + length, ay)
-    s.text(x0, ay + 24, "the engine's steps, in time from the reply's first", size=NOTE, cls="mute")
+    # The time axis, from the reply's first token.
+    ay = y2 + height + 62
+    s.time_axis(x0, x0 + length, ay)
+    caption = "time, one box per engine step, from the reply's first token"
+    for k, line in enumerate(wrap(caption, length, NOTE)):
+        s.text(x0, ay + 24 + 22 * k, line, size=NOTE, cls="mute")
 
 
 def strip(s: Figure, top: float) -> dict[str, tuple[float, float, float, float]]:
@@ -272,7 +278,8 @@ DESCRIPTION = (
     "from the KV pool beneath it. Panel b, #63350, a pool of 12 KV blocks: two agent requests hold 5 each and "
     f"2 are free, while a voice turn that needs {TURN} waits beside the pool; on stock vLLM it waits for an "
     "agent request to finish, while #63350 preempts the latest agent request, agent B, and the turn takes "
-    "4 of its blocks. Panel c, #63351, the engine's steps in time: without #63351 each step of the reply also "
+    "4 of its blocks; agent B waits, its KV kept in the CPU tier for its resume. Panel c, #63351, the "
+    "engine's steps in time, one box a step, from the reply's first token: without #63351 each step of the reply also "
     f"carries an agent's prefill chunk, so in the time #63351 gives the reply its first {WINDOW} tokens the "
     "reply gets 14 without it; after the window, agent prefill resumes. Blocks and steps are illustrative."
 )
@@ -281,7 +288,7 @@ DESCRIPTION = (
 def _wide(path: Path) -> Path:
     s = Figure(WIDTH, 760, "How #63350 and #63351 make room for a voice turn", DESCRIPTION)
     zooms = strip(s, 8)
-    py, ph = 330, 412
+    py, ph = 330, 440
     bx, bw = 24.0, 532.0
     cx = bx + bw + 32
     cw = WIDTH - 24 - cx
@@ -350,10 +357,10 @@ def _narrow(path: Path) -> Path:
     s.flow([(agents_x, sched_top + sched_h), (agents_x, tts_y - 22)], arrow=False)
     s.flow([(col, tts_y + h / 2), (col, back_y - h / 2)])
     py = back_y + h / 2 + 40
-    make_room_panel(s, x0, py, w, 412)
-    py += 412 + 24
-    hold_prefill_panel(s, x0, py, w, 412)
-    s.height = py + 412 + 12
+    make_room_panel(s, x0, py, w, 464)
+    py += 464 + 24
+    hold_prefill_panel(s, x0, py, w, 440)
+    s.height = py + 440 + 12
     return s.save(path)
 
 

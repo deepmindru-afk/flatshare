@@ -188,6 +188,7 @@ BASE_CSS = (
     ".page{fill:var(--page)}"
     f".grid{{fill:none;stroke:var(--grid);stroke-width:{THIN}}}"
     f".axis{{fill:none;stroke:var(--axis);stroke-width:{THIN}}}"
+    ".axis-head{fill:var(--axis)}"
     f".rule{{fill:none;stroke:var(--rule);stroke-width:{HAIR}}}"
     + "".join(
         f".g-{bar}{{fill:var(--{'page' if bar == 'open' else 'bar-' + bar});"
@@ -376,6 +377,42 @@ def measure(markup: str, size: float) -> float:
     return width
 
 
+def wrap(text: str, width: float, size: float) -> list[str]:
+    """``text`` in as few lines as fit ``width`` at ``size``, broken at spaces where the lines come
+    out most even, so that no line is left with a word or two alone."""
+    words = text.split()
+    greedy: list[str] = []
+    for word in words:
+        if greedy and measure(f"{greedy[-1]} {word}", size) <= width:
+            greedy[-1] += f" {word}"
+        else:
+            greedy.append(word)
+    lines = len(greedy)
+    if lines < 2:
+        return greedy
+
+    @cache
+    def span(i: int, j: int) -> float:
+        return measure(" ".join(words[i:j]), size)
+
+    @cache
+    def best(i: int, k: int) -> tuple[float, tuple[int, ...]]:
+        """The narrowest widest line for words[i:] in k lines, and where the lines break."""
+        if k == 1:
+            return (span(i, len(words)), ()) if span(i, len(words)) <= width else (math.inf, ())
+        found: tuple[float, tuple[int, ...]] = (math.inf, ())
+        for j in range(i + 1, len(words) - k + 2):
+            if span(i, j) > width:
+                break
+            rest, breaks = best(j, k - 1)
+            found = min(found, (max(span(i, j), rest), (j, *breaks)))
+        return found
+
+    _, breaks = best(0, lines)
+    edges = [0, *breaks, len(words)]
+    return [" ".join(words[a:b]) for a, b in itertools.pairwise(edges)]
+
+
 @dataclass(frozen=True)
 class Box:
     """A label's extent on the canvas, and what it says (for the checks' messages)."""
@@ -525,6 +562,15 @@ class Figure:
         """A vertical rule, as :meth:`rule`."""
         self.path(f"M{fmt(x)} {fmt(y0)}V{fmt(y1)}", cls)
         self.rules.append(((x, y0), (x, y1)))
+
+    def time_axis(self, x0: float, x1: float, y: float) -> None:
+        """A time axis: a thin rule from ``x0`` that ends in a small solid head at ``x1``."""
+        head, half = 7.0, 3.2
+        self.rule(x0, x1 - head + 1, y)
+        self.path(
+            f"M{fmt(x1)} {fmt(y)}L{fmt(x1 - head)} {fmt(y - half)}L{fmt(x1 - head)} {fmt(y + half)}Z",
+            "axis-head",
+        )
 
     # Charts -----------------------------------------------------------------------------------
 

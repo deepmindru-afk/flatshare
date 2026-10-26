@@ -16,7 +16,16 @@ from typing import Any
 
 from leaseholder_bench.e2.record import REPLY_TIMEOUT_MS
 from leaseholder_bench.e2.report import STACKED, arm_order, configurations
-from leaseholder_bench.figure_style import NARROW, NOTE, TITLE, VALUE, WIDTH, Figure, measure
+from leaseholder_bench.figure_style import (
+    NARROW,
+    NOTE,
+    TITLE,
+    VALUE,
+    WIDTH,
+    Figure,
+    measure,
+    wrap,
+)
 from leaseholder_stats import quantiles
 
 FAMILIES = (
@@ -50,17 +59,6 @@ def label(text: str) -> str:
     text = WORKLOAD_CLAUSES.sub("", text)
     first = text.split(" ", 1)[0]
     return text[:1].upper() + text[1:] if first.islower() else text
-
-
-def wrap(text: str, width: float, size: float) -> list[str]:
-    """``text`` in lines no wider than ``width`` at ``size``, broken at spaces."""
-    lines: list[str] = []
-    for word in text.split():
-        if lines and measure(f"{lines[-1]} {word}", size) <= width:
-            lines[-1] += f" {word}"
-        else:
-            lines.append(word)
-    return lines
 
 
 def ticks(top: float, length: float) -> list[float]:
@@ -113,6 +111,25 @@ def load_sweep(configurations: Sequence[Mapping[str, Any]]) -> bool:
 
 def _seconds(ms: float) -> str:
     return f"{ms / 1000:.2f}"
+
+
+def _name(s: Figure, right: float, y: float, name: str, note: str) -> float:
+    """A row's name, right-aligned at ``right`` from the label column's left edge (24) in lines that
+    break evenly, and its ``note`` in the soft ink: at the end of its last line where it fits, else
+    on a line of its own. Returns the lines' height."""
+    lines = wrap(name, right - 24, VALUE)
+    joined = bool(note) and (measure(lines[-1], VALUE) + 10 + measure(note, NOTE) <= right - 24)
+    for k, line in enumerate(lines):
+        last = k == len(lines) - 1
+        end = right - (measure(note, NOTE) + 10 if last and joined else 0)
+        s.text(end, y + 15 + 22 * k, line, size=VALUE, anchor="end")
+    height = 22.0 * len(lines)
+    if joined:
+        s.text(right, y + 15 + height - 22, note, size=NOTE, anchor="end", cls="soft")
+    elif note:
+        s.text(right, y + 15 + height, note, size=NOTE, anchor="end", cls="soft")
+        height += 20
+    return height
 
 
 def _panel_heads(s: Figure, cx: float, y: float, title: str, subtitle: str) -> None:
@@ -179,23 +196,17 @@ def plot(rows: Sequence[Mapping[str, Any]], path: Path, slo: float | None = None
         index, heading = _family(g["arm"])
         if index != family:
             family = index
-            y += 12 if placed else 0
+            y += 2 if placed else 0
             s.text(24, y + 15, heading, size=NOTE, cls="mute")
-            y += 30
-        lines = wrap(label(g["runs"][0]["label"]), right - 24, VALUE)
+            y += 26
         notes = []
         if len(g["runs"]) > 1:
             notes.append(f"{len(g['runs'])} runs")
         if g["failed_turns"]:
             notes.append(f"{g['failed_turns']} of {g['turns']} turns failed")
-        for k, line in enumerate(lines):
-            s.text(right, y + 15 + 22 * k, line, size=VALUE, anchor="end")
-        height = 22 * len(lines)
-        if notes:
-            s.text(right, y + 15 + height, ", ".join(notes), size=NOTE, anchor="end", cls="soft")
-            height += 20
+        height = _name(s, right, y, label(g["runs"][0]["label"]), ", ".join(notes))
         placed.append((y + max(height, 22) / 2 - 10, g))
-        y += max(height, 22) + 12
+        y += max(height, 22) + 10
     bottom = y + 2
     _axis(s, ax0, alen, marks_a, top + 8, bottom)
     _axis(s, bx0, blen, marks_b, top + 8, bottom)
@@ -289,18 +300,12 @@ def plot_waterfall(cells: Sequence[Mapping[str, Any]], path: Path) -> Path:
     for c in cells:
         if c["workload"] != workload:  # each run of one workload's rows under its heading
             workload = c["workload"]
-            y += 12 if placed else 0
+            y += 2 if placed else 0
             s.text(24, y + 15, workload, size=NOTE, cls="mute")
-            y += 30
-        lines = wrap(label(c["label"]), right - 24, VALUE)
-        for k, line in enumerate(lines):
-            s.text(right, y + 15 + 22 * k, line, size=VALUE, anchor="end")
-        height = 22 * len(lines)
-        if c["runs"] > 1:
-            s.text(right, y + 15 + height, f"{c['runs']} runs", size=NOTE, anchor="end", cls="soft")
-            height += 20
+            y += 26
+        height = _name(s, right, y, label(c["label"]), f"{c['runs']} runs" if c["runs"] > 1 else "")
         placed.append((y + max(height, 22) / 2 - 10, c))
-        y += max(height, 22) + 12
+        y += max(height, 22) + 10
     bottom = y + 2
     _axis(s, x0, length, marks, top_y, bottom)
     for bar_y, c in placed:
