@@ -133,7 +133,7 @@ The same caller on two engines while coding agents run: [`demo.py`](demo.py) ren
 benchmarks/e2/campaign.sh benchmarks/e2/demo.campaign
 ```
 
-Then, on a workstation with the two run directories fetched into one directory, `make demo-video` renders the video to `build/leaseholder-demo.mp4` (`DEMO_OUT`) and the README's animation to `docs/figures/e2-demo.webp`, with its dark theme and its phone layout (`e2-demo-dark.webp`, `e2-demo-narrow.webp`, `e2-demo-narrow-dark.webp`; `uv` installs the script's pinned numpy, matplotlib, Pillow, fontTools and imageio-ffmpeg, whose ffmpeg encodes; it takes about three minutes):
+Then, on a workstation with the two run directories fetched into one directory, `make demo-video` renders the video to `build/leaseholder-demo.mp4` (`DEMO_OUT`) and the README's animation to `docs/figures/e2-demo.webp`, with its dark theme and its phone layout (`e2-demo-dark.webp`, `e2-demo-narrow.webp`, `e2-demo-narrow-dark.webp`; `uv` installs the script's pinned numpy, matplotlib, Pillow, fontTools and imageio-ffmpeg, whose ffmpeg encodes; it takes three minutes on an Apple M-series laptop, and about twenty on an older x86 server):
 
 ```sh
 make demo-video DEMO=$LH_E2_RESULTS/demo
