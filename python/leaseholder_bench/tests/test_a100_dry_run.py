@@ -1108,7 +1108,9 @@ def test_the_backend_probe_runs_the_kv_case_on_flashinfer_once_the_engine_names_
 ) -> None:
     # probes.sh backend: the frozen engine with FlashInfer's attention, the KV case three times into runs/a100/backend,
     # once the engine's log at this start names FlashInfer; an engine that selected another backend stops the block
-    # before a run, so that no run is filed under the wrong backend.
+    # before a run, so that no run is filed under the wrong backend. vLLM 0.32 logs "Using X attention backend" only
+    # for a backend it selects; for the one --attention-backend sets, as here, FlashInfer names itself as it sets up
+    # (the A100 run's engine logged no other line of it, and the first version of the check refused it).
     hosts = tmp_path / "hosts"
     home = a100_host(hosts)
     env = dry_env(home, hosts, runtime)
@@ -1116,8 +1118,13 @@ def test_the_backend_probe_runs_the_kv_case_on_flashinfer_once_the_engine_names_
     fakes.mkdir()
     (fakes / "journalctl").write_text(
         "#!/bin/sh\n"
-        'echo "INFO [cuda.py:410] Using ${FAKE_BACKEND:-FLASHINFER} attention backend."\n'
-        'echo "INFO [kv_connector.py:40] Using LBHNC KV cache layout."\n'
+        "case ${FAKE_BACKEND:-} in\n"
+        '  "") echo "INFO [flashinfer.py:966] FlashInfer resolved query dtypes: prefill=torch.bfloat16, '
+        'decode=torch.bfloat16, decode_backend=flashinfer-native" ;;\n'
+        '  *) echo "INFO [cuda.py:506] Using $FAKE_BACKEND attention backend out of potential backends: '
+        "['FLASH_ATTN', 'FLASHINFER']\" ;;\n"
+        "esac\n"
+        'echo "INFO [utils.py:347] Using LBHNC KV cache layout."\n'
     )
     (fakes / "journalctl").chmod(0o755)
     env["PATH"] = os.pathsep.join([str(fakes), env["PATH"]])
@@ -1139,7 +1146,7 @@ def test_the_backend_probe_runs_the_kv_case_on_flashinfer_once_the_engine_names_
         "the engine selected Using FLASH_ATTN attention backend" in (out / "probes.log").read_text()
     )
     assert not list(out.glob("backend-kv-*"))
-    done = run("FLASHINFER")
+    done = run("")
     assert done.returncode == 0, done.stdout + done.stderr
     assert "variant.sh use frozen --attention-backend FLASHINFER" in lines(home / "variant.log")
     assert sorted(p.name for p in out.glob("backend-kv-*.txt")) == [
@@ -1148,4 +1155,9 @@ def test_the_backend_probe_runs_the_kv_case_on_flashinfer_once_the_engine_names_
         "backend-kv-3.txt",
     ]
     log = (out / "probes.log").read_text()
-    assert "engine: Using FLASHINFER attention backend Using LBHNC KV cache layout\n" in log
+    assert "engine: FlashInfer resolved query dtypes Using LBHNC KV cache layout\n" in log
+    # A FlashInfer that vLLM selected itself names itself as a selection: also FlashInfer.
+    for kv in out.glob("backend-kv-*.txt"):
+        kv.unlink()
+    selected = run("FLASHINFER")
+    assert selected.returncode == 0, selected.stdout + selected.stderr

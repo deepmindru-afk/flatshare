@@ -114,10 +114,14 @@ case $block in
   backend)
     started=$(date -u +%s)
     use frozen --attention-backend FLASHINFER
-    # The backend and the KV layout the engine selected at this start, as the preflight reads them.
+    # The backend and the KV layout the engine selected at this start, as the preflight reads them. vLLM 0.32 names an
+    # attention backend it selects ("Using X attention backend"), but for one --attention-backend sets, FlashInfer names
+    # itself as it sets up ("FlashInfer resolved query dtypes").
     selected=$(journalctl --user -u lh-engine.service --since "@$started" 2>/dev/null |
-      grep -oE "Using [A-Z_0-9]+ (attention backend|KV cache layout)" | tail -n 2 | tr '\n' ' ') || true
-    [[ $selected == *"Using FLASHINFER attention backend"* ]] ||
+      grep -oE "Using [A-Z_0-9]+ (attention backend|KV cache layout)|FlashInfer resolved query dtypes" |
+      sort -u | tr '\n' ' ') || true
+    [[ $selected == *"FLASHINFER attention backend"* || $selected == *"FlashInfer resolved query dtypes"* ]] &&
+      [[ $selected != *"Using FLASH_ATTN attention backend"* ]] ||
       { log "the engine selected ${selected:-no attention backend it logged}, not FlashInfer"; exit 1; }
     log "engine: ${selected% }"
     runs backend kv 3
