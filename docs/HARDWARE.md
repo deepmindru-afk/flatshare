@@ -1,6 +1,6 @@
 # Running Flatshare on other hardware
 
-Every measurement before 2026-10-26 ran on one RTX 5060 Ti 16 GB, the frozen box, with Gray, a second one, for the probes; that day an A100 SXM4 80 GB on Google Colab ran E2's core like for like ([what it measured](#what-it-measured-2026-10-26)). This page says what the deployment needs from a GPU node, how a node's files come from a hardware profile, what changes on a card or a host that is not the box's, how one host runs both the GPU servers and the control plane, and how the A100 run is laid out and what it measured. A number here is measured (on the box, Gray or the A100, with its source), modeled (flatshare-sim's forecast, [`benchmarks/a100/forecast.md`](../benchmarks/a100/forecast.md)) or an estimate, and says which.
+Every measurement before 2026-10-26 ran on one RTX 5060 Ti 16 GB, the frozen box, with Gray, a second one, for the first make-room probes; that day an A100 SXM4 80 GB on Google Colab ran E2's core like for like ([what it measured](#what-it-measured-2026-10-26)). This page says what the deployment needs from a GPU node, how a node's files come from a hardware profile, what changes on a card or a host that is not the box's, how one host runs both the GPU servers and the control plane, and how the A100 run is laid out and what it measured. A number here is measured (on the box, Gray or the A100, with its source), modeled (flatshare-sim's forecast, [`benchmarks/a100/forecast.md`](../benchmarks/a100/forecast.md)) or an estimate, and says which.
 
 ## What runs where
 

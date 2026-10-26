@@ -9,7 +9,7 @@ One RTX 5060 Ti 16 GB (sm_120) on PCIe Gen3 x8, in a host with two Xeon E5-2609 
 - **CPU tier:** vLLM's native `OffloadingConnector`, 20 GiB in `/dev/shm`, written through (generated tokens too).
 - **Audio on the same card:** Whisper large-v3-turbo (STT) on vLLM and Kokoro-82M (TTS), time-sliced with the LLM. This is the edge pattern; NVIDIA's single-GPU voice-agent profile co-locates the same three.
 
-A second, identical card (Gray) is deployed the same way, for the probes and the two-node points, which never ran ([below](#two-gpus-dedicate-or-pool)). No datacenter GPU was available: other hardware is placed on the results by a model, labeled as such.
+A second, identical card (Gray) is deployed the same way, for the probes and the two-node points, which never ran ([below](#two-gpus-dedicate-or-pool)). Other hardware is placed on the results by a model, labeled as such, except an A100 SXM4 80 GB, which ran E2's core like for like on 2026-10-26 ([below](#what-transfers-to-other-hardware)).
 
 ## What an agent turn costs to resume (E0)
 
@@ -116,7 +116,7 @@ The regime where a waiting voice turn is blocked by KV (#40004) follows how long
 
 ## Two GPUs: dedicate or pool
 
-Three configurations of two GPU nodes were planned: a voice node and an agent node (dedicate); two mixed nodes with least-loaded placement; two mixed nodes with Flatshare's placement, which sends a new call to the node with the fewest calls and a new agent session to the node holding the least background KV. They never ran: another user's work has held the second card since 2026-10-23, and none is free before v1.0. The gateway's placement of sessions on several nodes, which keeps each on its node, and the harness's points on two nodes were built for them, and are parked on the `two-node` branch ([EXPERIMENTS.md](EXPERIMENTS.md#e2-voice-under-agent-load)).
+Three configurations of two GPU nodes were planned: a voice node and an agent node (dedicate); two mixed nodes with least-loaded placement; two mixed nodes with Flatshare's placement, which sends a new call to the node with the fewest calls and a new agent session to the node holding the least background KV. They never ran: another user's work has held the second card since 2026-10-23, and none was free before v1.0. The gateway's placement of sessions on several nodes, which keeps each on its node, and the harness's points on two nodes were built for them, and are parked on the `two-node` branch ([EXPERIMENTS.md](EXPERIMENTS.md#e2-voice-under-agent-load)).
 
 ## How the runs were made
 
