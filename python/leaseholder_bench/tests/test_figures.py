@@ -1,6 +1,7 @@
 """The docs' figures: what their style refuses to draw, the contrast of its inks, and that every SVG under
 docs/figures is what its generator draws today from the committed records (`make figures` rewrites them), so a
-change to a generator, a record or figure.toml fails here until the figures are drawn again."""
+change to a generator, a record or figure.toml fails here until the figures are drawn again; and the README's
+animation, which make demo-video draws from recorded calls outside the tree."""
 
 from __future__ import annotations
 
@@ -144,6 +145,33 @@ def test_every_svg_under_docs_figures_is_what_its_generator_draws(drawn: dict[st
         name for name, path in drawn.items() if path.read_bytes() != (DOCS / name).read_bytes()
     ]
     assert not stale, f"run make figures and commit what it draws: {stale}"
+
+
+def test_the_readme_animation_is_a_looping_webp_in_each_theme_and_layout() -> None:
+    """docs/figures/e2-demo.webp, its dark theme and its phone layout, which make demo-video draws
+    from the demo campaign's recorded calls (a release's raw records, not this tree's): the same
+    frames in each theme, at twice the width the README shows each layout at, small enough to show
+    inline."""
+    from PIL import Image
+
+    seen = {}
+    for name, theme in (
+        ("e2-demo", style.LIGHT),
+        ("e2-demo-dark", style.DARK),
+        ("e2-demo-narrow", style.LIGHT),
+        ("e2-demo-narrow-dark", style.DARK),
+    ):
+        path = DOCS / f"{name}.webp"
+        assert path.stat().st_size < 8_000_000, name
+        with Image.open(path) as image:
+            assert image.format == "WEBP" and image.is_animated, name
+            assert image.info.get("loop") == 0, name  # it loops
+            seen[name] = (image.size, image.n_frames)
+            page = tuple(int(theme["page"][k : k + 2], 16) for k in (1, 3, 5))
+            assert image.convert("RGB").getpixel((2, 2)) == page, name  # its own page
+    assert seen["e2-demo"] == seen["e2-demo-dark"] and seen["e2-demo"][0] == (1680, 588)
+    assert seen["e2-demo-narrow"] == seen["e2-demo-narrow-dark"]
+    assert seen["e2-demo-narrow"][0][0] == 680 and seen["e2-demo-narrow"][1] == seen["e2-demo"][1]
 
 
 def test_the_figures_set_their_type_in_its_sizes_and_never_in_bold(drawn: dict[str, Path]) -> None:

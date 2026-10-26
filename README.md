@@ -10,11 +10,17 @@ runs, their prefill shares every step of its reply. Two changes to the scheduler
 [#63350](https://github.com/vllm-project/vllm/pull/63350) and [#63351](https://github.com/vllm-project/vllm/pull/63351),
 bring it to 2.24 s, 0.20 s over its SLO, while the agents keep 97% of their throughput.
 
-![The same caller's second turn on each engine beside 24 coding-agent sessions: vLLM with the two PRs answers after 1.9 s, tuned vLLM after 9.6 s](docs/figures/e2-demo.gif)
+<picture>
+  <source media="(max-width: 767px) and (prefers-color-scheme: dark)" srcset="docs/figures/e2-demo-narrow-dark.webp">
+  <source media="(max-width: 767px)" srcset="docs/figures/e2-demo-narrow.webp">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/e2-demo-dark.webp">
+  <img src="docs/figures/e2-demo.webp" width="100%" alt="The same caller's first measured turn on two engines beside 24 coding-agent sessions on one RTX 5060 Ti, drawn as it plays on one time axis: the caller's line, the wait for the reply as a growing bar with a clock, and the agent's reply. With #63350 and #63351 the reply comes 1.9 s after the line ends, before the dashed SLO rule at 2.03 s; on tuned vLLM 0.32 it comes after 9.6 s">
+</picture>
 
-*The same caller's second turn on each engine, beside the same agents (recorded 2026-10-25): the two PRs answer after
-1.9 s, tuned vLLM after 9.6 s; over both calls of each run, their V2V p95 was 2.2 and 11.2 s. The 170-second video, with
-sound, is in the [v1.0 release](https://github.com/StevenWang-CY/leaseholder/releases/tag/v1.0).*
+*The same caller's first measured turn on each engine, beside the same agents (recorded 2026-10-25), as it plays: with
+the two PRs the reply comes 1.9 s after the caller's line ends, on tuned vLLM after 9.6 s; over both calls of each run,
+their V2V p95 was 2.2 and 11.2 s. The video of ten turns, with sound, is in the
+[v1.0 release](https://github.com/StevenWang-CY/leaseholder/releases/tag/v1.0).*
 
 <picture>
   <source media="(max-width: 767px)" srcset="docs/figures/e2-voice-p95-narrow.svg">
