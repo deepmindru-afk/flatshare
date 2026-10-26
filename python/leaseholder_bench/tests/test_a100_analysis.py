@@ -432,7 +432,7 @@ def test_the_host_section_reads_e0_against_the_link_and_the_cpu_against_the_boxs
     record = {
         "cpu": "Intel(R) Xeon(R) CPU @ 2.20GHz",
         "python_ms": {"p50": 190.0},
-        "gpu": {"pcie.link.gen.max": "4", "pcie.link.width.current": "16"},
+        "gpu": {"pcie.link.gen.current": "4", "pcie.link.width.current": "16"},
         "link": [
             {"direction": "h2d", "page_bytes": 32768, "gb_per_s": 10.5},
             {"direction": "h2d", "page_bytes": None, "gb_per_s": 12.1},
@@ -452,6 +452,11 @@ def test_the_host_section_reads_e0_against_the_link_and_the_cpu_against_the_boxs
     assert "the forecast took 5.91 µs a token (25.0 GB/s)" in text
     assert "(PCIe Gen4 x16 as the card negotiates it; the box's PCIe 3.0 x8), in GB/s:" in text
     assert "| pages of 32 KiB | 10.50 | 5.44 |" in lines and "| one copy | 12.10 | 6.76 |" in lines
+    assert lines[-1] == (
+        "One copy reached 12.10 GB/s, 38% of the 31.5 GB/s each way that the card's link carries; the box's reached "
+        "6.76, 86% of its link's 7.9. A rate well under the card's own link is set by a narrower hop between the "
+        "card and the host's memory."
+    )
     assert analysis.host_lines({"link_error": "RuntimeError: no GPU"}, None, "") == [
         "- **The link** was not measured: RuntimeError: no GPU"
     ]

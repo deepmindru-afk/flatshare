@@ -96,10 +96,13 @@ BOX_HOST = {
     "cpu": "Xeon E5-2609 v4 at 1.70 GHz",
     "python_ms": 381.1,
     "link": "PCIe 3.0 x8",
+    "lanes": (3, 8),
     "h2d_gb_per_s": {32 * 1024: 5.44, 64 * 1024: 6.03, 16 * 144 * 1024: 6.74, None: 6.76},
 }
 """The box's host, measured by bench_host.py on Phastform (2026-10-26, its GPU units stopped): the CPU at the fixed
 Python workload and the link from pinned host memory to the card, by page size (None: the bytes as one copy)."""
+PCIE_LANE_GB_PER_S = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938}
+"""A PCIe lane's rate each way by generation, in GB/s, after its line code (8b/10b to Gen2, 128b/130b from Gen3)."""
 KV_BYTES_PER_TOKEN = 36 * 8 * 128 * 2 * 2
 """Qwen3-4B's KV a token at BF16: 36 layers of 8 KV heads of 128, K and V (144 KiB)."""
 POINTS = {
@@ -603,10 +606,10 @@ def host_lines(record: dict[str, Any], e0: dict[str, Any] | None, forecast_text:
     link = {row["page_bytes"]: row for row in record.get("link", []) if row["direction"] == "h2d"}
     if link:
         gpu = record.get("gpu", {})
+        gen, width = gpu.get("pcie.link.gen.current", "?"), gpu.get("pcie.link.width.current", "?")
         lines += [
             "",
-            f"The link, pinned host memory to the card (PCIe Gen{gpu.get('pcie.link.gen.max', '?')} "
-            f"x{gpu.get('pcie.link.width.current', '?')} as the card negotiates it; "
+            f"The link, pinned host memory to the card (PCIe Gen{gen} x{width} as the card negotiates it; "
             f"the box's {BOX_HOST['link']}), in GB/s:",
             "",
             "| Copies | This host | The box |",
@@ -617,6 +620,19 @@ def host_lines(record: dict[str, Any], e0: dict[str, Any] | None, forecast_text:
                 for page, row in sorted(link.items(), key=lambda kv: kv[0] or 1 << 40)
             ),
         ]
+        one = link.get(None)
+        if one and str(gen).isdigit() and str(width).isdigit() and int(gen) in PCIE_LANE_GB_PER_S:
+            rate = PCIE_LANE_GB_PER_S[int(gen)] * int(width)
+            box_gen, box_width = BOX_HOST["lanes"]
+            box_rate = PCIE_LANE_GB_PER_S[box_gen] * box_width
+            box_one = BOX_HOST["h2d_gb_per_s"][None]
+            lines += [
+                "",
+                f"One copy reached {one['gb_per_s']:.2f} GB/s, {one['gb_per_s'] / rate:.0%} of the {rate:.1f} GB/s "
+                f"each way that the card's link carries; the box's reached {box_one:.2f}, "
+                f"{box_one / box_rate:.0%} of its link's {box_rate:.1f}. A rate well under the card's own link is set "
+                "by a narrower hop between the card and the host's memory.",
+            ]
     elif record.get("link_error"):
         lines.append(f"- **The link** was not measured: {record['link_error']}")
     return lines
