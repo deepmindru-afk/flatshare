@@ -283,10 +283,12 @@ the lower in every one of five rounds, by 109–1,413 ms, but met the SLO in onl
 replies hold it for longer. With 4 and 6 callers, each against its own SLO (voice alone with as many callers plus 250
 ms: 2,044 ms and 2,135 ms), the PRs' p95 was 2,250–2,415 ms and 2,360–2,468 ms, over the SLO in every round by a median
 of 0.27 s and 0.26 s, against 0.20 s with two. The hold grew to 53% and 64% of the engine's steps, and the agents'
-throughput fell to 3,055 and 2,716 tokens a second, against 3,203 with two calls. A model on vLLM's real scheduler
-places the limit near one realtime reply a second in aggregate, where the cap holds the background tier nearly always
-([how it fails](PRODUCTION.md#how-it-fails)). On an A100 at a datacenter batch, 256 requests in flight with 26 of them
-at priority 0 in closed loop, the hold took the priority 2 requests' TTFT p99 from 1.1 s to 8.0 s (§5.7).
+throughput fell to 3,055 and 2,716 tokens a second, against 3,203 with two calls. On vLLM's real scheduler, on CPU,
+replies at least the window long stop the agents' prefill once each one's window, about 49 steps, overlaps the next: a
+reply every 50 steps left the agents 9% of stock's prompt tokens, one every 40 none. At this box's 16–20 ms steps under
+the cap, that limit is about one realtime reply a second in aggregate ([how it fails](PRODUCTION.md#how-it-fails)). On
+an A100 at a datacenter batch, 256 requests in flight with 26 of them at priority 0 in closed loop, the hold took the
+priority 2 requests' TTFT p99 from 1.1 s to 8.0 s (§5.7).
 
 ### 5.7 Another GPU
 
