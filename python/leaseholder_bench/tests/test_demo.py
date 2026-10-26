@@ -247,7 +247,9 @@ def test_no_text_leaves_its_room_or_overlaps_another(
     # Another GPU's report of the same two points: a group of its own, against its own SLO.
     on = ", NVIDIA A100-SXM4-80GB, 1 warm-up turn"
     a100 = demo.Summary.read(frontier(tmp_path / "a100.csv", on, 3.0), ["frozen", "a9"])
-    assert a100.gpu == "A100-SXM4-80GB" and a100.tokens == (2700.0, 2640.0)
+    assert a100.gpu == "A100 SXM4 80 GB" and a100.tokens == (2700.0, 2640.0)
+    assert demo.shown("NVIDIA GeForce RTX 5060 Ti") == "RTX 5060 Ti"
+    assert demo.shown("NVIDIA H100 80GB HBM3") == "H100 80 GB HBM3"
     for theme in ("light", "dark"):
         demo.closing_card(summary, timeline, also=[a100], width=1280, theme=theme)
     # The check refuses a text out of its room.

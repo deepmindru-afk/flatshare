@@ -61,6 +61,7 @@ import csv
 import importlib.util
 import json
 import math
+import re
 import statistics
 import subprocess
 import sys
@@ -175,8 +176,8 @@ class Call:
     sessions: int
     """The coding-agent sessions beside the calls."""
     gpu: str | None
-    """The GPU the point ran on, as its samples name it, or the box's where they name none on the
-    box's profile; None off it."""
+    """The GPU the point ran on, as its samples name it in the docs' spelling (``shown``), or the
+    box's where they name none on the box's profile; None off it."""
 
     @classmethod
     def load(cls, run_dir: Path, caller: int = 0, label: str | None = None) -> Call:
@@ -204,15 +205,22 @@ class Call:
         return next((k for k, turn in enumerate(self.turns) if not turn.get("warmup")), 0)
 
 
+def shown(gpu: str) -> str:
+    """A GPU's name as nvidia-smi gives it, in the docs' spelling: without the vendor's prefixes,
+    spaced, its memory in GB apart (NVIDIA A100-SXM4-80GB as A100 SXM4 80 GB)."""
+    name = gpu.removeprefix("NVIDIA ").removeprefix("GeForce ").replace("-", " ")
+    return re.sub(r"(\d)GB\b", r"\1 GB", name)
+
+
 def gpu_name(samples: Path) -> str | None:
-    """The GPU campaign.sh's samples name in their last field (from 2026-10-25 on), without the
-    vendor's prefixes; None without the samples or where they name none."""
+    """The GPU campaign.sh's samples name in their last field (from 2026-10-25 on), ``shown``;
+    None without the samples or where they name none."""
     if not samples.exists():
         return None
     for line in samples.read_text().splitlines():
         last = line.rsplit(",", 1)[-1].strip()
         if last.startswith("NVIDIA"):
-            return last.removeprefix("NVIDIA ").removeprefix("GeForce ")
+            return shown(last)
     return None
 
 
@@ -380,8 +388,7 @@ class Summary:
     tokens: tuple[float | None, float | None]
     """Each one's median of the agents' tokens/s over the calls' first 240 s (None unmeasured)."""
     gpu: str | None = None
-    """The GPU the workload names, without the vendor's prefixes; None on the box, whose
-    workloads name none."""
+    """The GPU the workload names, ``shown``; None on the box, whose workloads name none."""
 
     @classmethod
     def read(cls, path: Path, points: Sequence[str]) -> Summary:
@@ -416,7 +423,7 @@ class Summary:
             (p95[0], p95[1]),
             (len(found[0]), len(found[1])),
             (tokens[0], tokens[1]),
-            named[0].removeprefix("NVIDIA ").removeprefix("GeForce ") if named else None,
+            shown(named[0]) if named else None,
         )
 
 
