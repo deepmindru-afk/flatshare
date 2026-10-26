@@ -754,6 +754,34 @@ def test_a_start_whose_server_dies_fails_at_once_not_at_its_timeout(host: dict) 
     assert "exited before http://127.0.0.1:9/health was healthy" in journal
 
 
+@pytest.mark.parametrize(
+    ("wrapper", "lines"),
+    [("taskset", "CPUAffinity=0\n"), ("numactl", "NUMAPolicy=preferred\nNUMAMask=0\n")],
+    ids=["taskset", "numactl"],
+)
+def test_a_start_fails_whose_command_is_not_there_though_a_wrapper_runs_it(
+    host: dict, wrapper: str, lines: str
+) -> None:
+    # CPUAffinity= runs a unit's commands through taskset, NUMAPolicy= through numactl, which exec a command only once
+    # they run themselves: one that is not there was then the wrapper's exit, a started unit's (a Type=simple unit has
+    # started once its main process runs), and the start succeeded, the unit failing after it. The command is now found
+    # first, and its absence fails the start, as the exec of the command alone fails it.
+    if not shutil.which(wrapper):
+        pytest.skip(f"the host has no {wrapper}")
+    (host["units"] / "wrapped.service").write_text(
+        f"[Service]\nExecStart=%h/no-such-server --port 1\n{lines}"
+    )
+    try:
+        done = ctl(host, "--user", "start", "wrapped.service")
+        assert done.returncode == 1 and "Job for wrapped.service failed" in done.stderr, done
+        assert ctl(host, "--user", "is-active", "wrapped.service").stdout.strip() == "failed"
+        journal = ctl(host, "-u", "wrapped", "-o", "cat", tool="journalctl").stdout
+        missing = f"{host['home']}/no-such-server: [Errno 2] No such file or directory"
+        assert missing in journal, journal
+    finally:
+        ctl(host, "--user", "stop", "wrapped.service")
+
+
 @pytest.mark.skipif(
     not Path("/proc/sys/kernel/random/boot_id").exists(), reason="reads /proc (Linux)"
 )

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import errno
 import fcntl
 import json
 import os
@@ -279,6 +280,19 @@ def command(line: str, env: dict[str, str], name: str) -> tuple[list[str], bool]
     return argv, ignore
 
 
+def executable(name: str, env: dict[str, str], cwd: str) -> str:
+    """The file that the exec of a command NAME runs, found as Popen and execvp(3) find it: a name with a slash from
+    the working directory, a bare one on the command's PATH. Where there is none, it raises the error that exec fails
+    with: ENOENT, or EACCES for a file that is there but cannot be executed."""
+    places = [name] if "/" in name else [os.path.join(d, name) for d in os.get_exec_path(env)]
+    paths = [os.path.join(cwd, place) for place in places]
+    for path in paths:
+        if os.access(path, os.X_OK) and not os.path.isdir(path):
+            return path
+    code = errno.EACCES if any(os.path.exists(path) for path in paths) else errno.ENOENT
+    raise OSError(code, os.strerror(code), name)
+
+
 def cpus(text: str) -> set[int]:
     chosen: set[int] = set()
     for part in text.replace(",", " ").split():
@@ -506,15 +520,16 @@ class Runner:
     def spawn(self, unit: Unit, line: str, env: dict[str, str]) -> tuple[subprocess.Popen, bool]:
         """Start one of the unit's commands in a process group of its own, its output into the journal."""
         argv, ignore = command(line, env, unit.name)
+        wrapper: list[str] = []
         if affinity := unit.last("CPUAffinity"):
             if shutil.which("taskset"):
-                argv = ["taskset", "-c", ",".join(map(str, sorted(cpus(affinity)))), *argv]
+                wrapper = ["taskset", "-c", ",".join(map(str, sorted(cpus(affinity))))]
             else:
                 self.say(f"CPUAffinity={affinity} not applied: the host has no taskset")
         policy, mask = unit.last("NUMAPolicy"), unit.last("NUMAMask")
         if policy == "preferred" and mask:
             if shutil.which("numactl"):
-                argv = ["numactl", f"--preferred={min(cpus(mask))}", "--", *argv]
+                wrapper = ["numactl", f"--preferred={min(cpus(mask))}", "--", *wrapper]
             else:
                 self.say(
                     f"NUMAPolicy=preferred NUMAMask={mask} not applied: the host has no numactl"
@@ -522,11 +537,17 @@ class Runner:
         workdir = specifiers(unit.last("WorkingDirectory"), unit.name)
         if workdir.startswith("-"):
             workdir = workdir[1:] if Path(workdir[1:]).is_dir() else ""
+        cwd = workdir or str(home())
         try:
+            # A wrapper execs the command only once it runs itself: a command that is not there was then the
+            # wrapper's exit, which a Type=simple or exec unit's start took for a started unit's. Found first, as
+            # its exec alone would find it, it fails as that exec does.
+            if wrapper:
+                executable(argv[0], env, cwd)
             process = subprocess.Popen(
-                argv,
+                [*wrapper, *argv],
                 env=env,
-                cwd=workdir or str(home()),
+                cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
