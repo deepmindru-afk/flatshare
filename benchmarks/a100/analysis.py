@@ -16,9 +16,17 @@ which.
    GPU, CPU and computed shares of the prompt tokens.
 3. The probes (probe_results.py): every run, then the KV case's wait and the prefill case's token gap on stock and on
    the PRs' values, and the calls' tail at each stock setting, beside the forecast and the box.
-4. E2 within the A100: `lh-bench e2 report` over the core's points (results/e2/a100-r1 to -r5) into OUT/e2, its frontier
-   quoted, and each configuration's measured running share against the forecast's.
-5. Across cards: the regime coordinates the box measured and the forecast gives the A100, beside the A100's measured
+4. E2 within the A100: `lh-bench e2 report` over the core's points and tuned vLLM's (results/e2/a100-r1 to -r5,
+   a100-tuned-r1 and -r2) into OUT/e2, its frontier quoted, the points by round (each round one sample of the agents,
+   which tuned vLLM's rounds share with the core's first two), and each configuration's measured running share
+   against the forecast's.
+5. A': the same over its points (results/e2/a100-aprime-r1, -r2) and the core's voice alone, the SLO's reference on
+   this card, into OUT/e2-aprime, against the forecast's A' cell.
+6. The scheduler at a batch of 256 (runs/a100/batch, batch.sh): each engine's throughput, TPOT and TTFT by priority,
+   the batch it held, and make-room's per-token cost against the frozen engine's.
+7. The host around the card (runs/a100/host/host.json, bench_host.py): its CPU and its link against the box's, read
+   with E0's GPU hit (the host's work on a prompt) and its CPU restore beyond it (the transfer).
+8. Across cards: the regime coordinates the box measured and the forecast gives the A100, beside the A100's measured
    running share, labeled different hardware.
 
 `calibration-check` is P-1's prep 6: report's calibration code on the box's three W2 operating points (the
@@ -47,6 +55,9 @@ FORECAST = HERE / "forecast.md"
 FORECAST_80GB = HERE / "forecast-80gb.md"
 """The forecast for the A100 SXM4 80 GB (make forecast-a100 GPU=a100-80gb)."""
 DASH = "\u2013"  # the range dash, as calibration.py writes it
+CORE = "A: the core, the box's pool"
+APRIME = "A': the box's pool, more agents"
+"""The forecast's scenarios the run measures: the core and A', by their names in its table."""
 
 
 def _module(name: str, path: Path):
@@ -81,6 +92,25 @@ BOX = {
     "prefill_pr_gap_ms": "17 ms (Gray)",
 }
 """The box's probe results, measured (docs/BENCHMARKS.md; benchmarks/results/2026-10-23-make-room-probes)."""
+BOX_HOST = {
+    "cpu": "Xeon E5-2609 v4 at 1.70 GHz",
+    "python_ms": 381.1,
+    "link": "PCIe 3.0 x8",
+    "h2d_gb_per_s": {32 * 1024: 5.44, 64 * 1024: 6.03, 16 * 144 * 1024: 6.74, None: 6.76},
+}
+"""The box's host, measured by bench_host.py on Phastform (2026-10-26, its GPU units stopped): the CPU at the fixed
+Python workload and the link from pinned host memory to the card, by page size (None: the bytes as one copy)."""
+KV_BYTES_PER_TOKEN = 36 * 8 * 128 * 2 * 2
+"""Qwen3-4B's KV a token at BF16: 36 layers of 8 KV heads of 128, K and V (144 KiB)."""
+POINTS = {
+    "w5-a1-voice": "Voice alone",
+    "w5-disc-frozen-s24": "Frozen, 512/256",
+    "a100-tuned-s24": "Tuned vLLM, 2,048/0",
+    "w5-disc-pr-ab48-s24": "The PRs' values",
+    "a100-aprime-frozen-s32": "Frozen, 512/256",
+    "a100-aprime-pr-ab48-s32": "The PRs' values",
+}
+"""E2's points on the A100, by their arm file's name, in the order the tables give them."""
 
 
 def gpu_name(host: Path) -> str | None:
@@ -145,13 +175,14 @@ def forecast_probes(text: str, card: str) -> dict[str, str]:
     }
 
 
-def forecast_core(text: str, card: str) -> dict[str, str]:
-    """The forecast's core scenario on its card, central: its running share, busy and stalled shares."""
+def forecast_core(text: str, card: str, scenario: str = CORE) -> dict[str, str]:
+    """A scenario's cell on the forecast's card, central (the core's by default): its running share, busy and stalled
+    shares."""
     for line in text.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) >= 11 and cells[:2] == ["A: the core, the box's pool", f"{card} (central)"]:
+        if len(cells) >= 11 and cells[:2] == [scenario, f"{card} (central)"]:
             return {"running": cells[8].split(" / ")[0], "busy": cells[9], "stalled": cells[10]}
-    raise ValueError(f"the forecast has no central core cell for the {card}")
+    raise ValueError(f"the forecast has no central cell of {scenario!r} for the {card}")
 
 
 @dataclass(frozen=True)
@@ -163,13 +194,19 @@ class Forecast:
     costs: dict[str, dict[str, float]]
     probes: dict[str, str]
     core: dict[str, str]
+    aprime: dict[str, str]
 
 
 def read_forecast(path: Path) -> Forecast:
     text = path.read_text()
     card = forecast_card(text)
     return Forecast(
-        path, card, forecast_costs(text), forecast_probes(text, card), forecast_core(text, card)
+        path,
+        card,
+        forecast_costs(text),
+        forecast_probes(text, card),
+        forecast_core(text, card),
+        forecast_core(text, card, APRIME),
     )
 
 
@@ -348,6 +385,208 @@ def running_shares(points: list[Path]) -> dict[str, list[float]]:
     return shares
 
 
+def complete_points(host: Path, campaigns: str) -> list[Path]:
+    """The complete E2 points of the campaigns the glob names (run.json's status), as campaign.sh leaves them: a point
+    in progress, or stopped, has a run.json too."""
+    points = []
+    for run in sorted(host.glob(f"results/e2/{campaigns}/*/run.json")):
+        try:
+            if json.loads(run.read_text()).get("status") == "complete":
+                points.append(run.parent)
+        except (OSError, json.JSONDecodeError):
+            continue
+    return points
+
+
+def e2_lines(
+    points: list[Path], out: Path, lh_bench: Path | None, forecast_running: str, scenario: str
+) -> list[str]:
+    """E2's points: lh-bench e2 report's frontier over them (with lh-bench), the points by round, and each
+    configuration's measured running share against the forecast's for the scenario."""
+    lines = []
+    if lh_bench is not None:
+        subprocess.run(
+            [str(lh_bench), "e2", "report", *map(str, points), "--out", str(out)],
+            check=True,
+            capture_output=True,
+        )
+        lines += [(out / "frontier.md").read_text().strip(), ""]
+    if table := rounds_table(points):
+        lines += [
+            "Each round's points, the V2V p95 (ms) / the agents' tokens a second over the calls' first 240 s:",
+            "",
+            *table,
+            "",
+        ]
+    lines += [
+        "The measured running share (the time free KV was under two calls' 2,048 tokens while agents ran), "
+        f"against the forecast's {forecast_running} (central) for {scenario} [modeled]:",
+        "",
+    ]
+    lines += [
+        f"- {label}: {', '.join(f'{100 * s:.0f}%' for s in values)}"
+        for label, values in running_shares(points).items()
+    ] or ["- Not measured: no point's summary.json has a running share (kv.running_share)."]
+    return lines
+
+
+def rounds_table(points: list[Path]) -> list[str]:
+    """The points by round, each configuration's V2V p95 and the agents' tokens a second over the calls' first 240 s
+    (summary.json), a round being one sample of the agents (run.json's agents seed): the pairs E2's design compares."""
+    rounds: dict[int, dict[str, str]] = {}
+    for point in points:
+        try:
+            run = json.loads((point / "run.json").read_text())
+            summary = json.loads((point / "summary.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        label, seed = POINTS.get(run.get("arm", {}).get("name", "")), run.get("agents_seed")
+        p95 = ((summary.get("voice") or {}).get("v2v_ms") or {}).get("p95")
+        if label is None or seed is None or p95 is None:
+            continue
+        rate = ((summary.get("background") or {}).get("fixed_window") or {}).get("tokens_per_s")
+        rounds.setdefault(seed, {})[label] = f"{p95:,.0f}" + (f" / {rate:,.0f}" if rate else "")
+    labels = [
+        label
+        for label in dict.fromkeys(POINTS.values())
+        if any(label in r for r in rounds.values())
+    ]
+    if not rounds:
+        return []
+    return [
+        "| Agents' sample (seed) | " + " | ".join(labels) + " |",
+        "|---" * (len(labels) + 1) + "|",
+        *(
+            f"| {seed} | " + " | ".join(rounds[seed].get(label, "") for label in labels) + " |"
+            for seed in sorted(rounds)
+        ),
+    ]
+
+
+def batch_lines(batch: Path) -> list[str]:
+    """The batch arm (batch.sh): each engine's two clients at 256 requests in flight, from vllm bench serve's results
+    and the engine's sampled running requests, and make-room's per-token cost beside the frozen engine's."""
+    names = (
+        ("frozen", "frozen"),
+        ("off", "make-room, switches off"),
+        ("on", "make-room, the PRs' values"),
+    )
+    rows, tpot = [], {}
+    for name, label in names:
+        try:
+            p0, p2 = (json.loads((batch / f"{name}-p{p}.json").read_text()) for p in (0, 2))
+            running = json.loads((batch / f"{name}-running.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        tpot[name] = p2["median_tpot_ms"]
+        rows.append(
+            f"| {label} | {p0['output_throughput'] + p2['output_throughput']:,.0f} | "
+            f"{p2['median_tpot_ms']:.2f} / {p2['p99_tpot_ms']:.2f} | {p0['median_tpot_ms']:.2f} / "
+            f"{p0['p99_tpot_ms']:.2f} | {p0['median_ttft_ms']:,.0f} / {p0['p99_ttft_ms']:,.0f} | "
+            f"{running['running_p50']:g} / {running['running_max']:g} |"
+        )
+    if not rows:
+        return ["Not measured: no batch arm (runs/a100/batch)."]
+    lines = [
+        "| Engine | Output tokens/s | Priority 2: TPOT p50 / p99 (ms) | Priority 0: TPOT p50 / p99 (ms) | "
+        "Priority 0: TTFT p50 / p99 (ms) | Running p50 / max |",
+        "|---|---:|---:|---:|---:|---:|",
+        *rows,
+    ]
+    if "frozen" in tpot and len(tpot) > 1:
+        lines += [
+            "",
+            "Per output token at a batch of 256, against the frozen engine's: "
+            + "; ".join(
+                f"{dict(names)[n]} {tpot[n] / tpot['frozen']:.3f}" for n in tpot if n != "frozen"
+            )
+            + ". The scheduler's added cost is what it shows above 1.000.",
+        ]
+    return lines
+
+
+def e0_slopes(cells: dict[str, dict[str, float]]) -> dict[str, float]:
+    """E0's per-token terms, in µs a prompt token, between its shortest and longest prompt: the GPU hit's (the
+    host's work on a prompt, tokenizing and hashing it, with no prefill), and the CPU restore's beyond it (the
+    transfer)."""
+    tokens = sorted(int(t) for t in cells["gpu"])
+    lo, hi = str(tokens[0]), str(tokens[-1])
+    span = (tokens[-1] - tokens[0]) / 1e3
+    gpu = (cells["gpu"][hi] - cells["gpu"][lo]) / span
+    return {"gpu_hit": gpu, "transfer": (cells["cpu"][hi] - cells["cpu"][lo]) / span - gpu}
+
+
+def forecast_e0_box(text: str) -> dict[str, dict[str, float]]:
+    """The box's measured E0 cells (ms) as the forecast's E0 table gives them, by kind and prompt tokens."""
+    section = text.split("## E0's cells", 1)[1].split("\n## ", 1)[0]
+    cells: dict[str, dict[str, float]] = {"gpu": {}, "cpu": {}}
+    for line in section.splitlines():
+        parts = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(parts) == 7 and parts[0].replace(",", "").isdigit():
+            tokens = parts[0].replace(",", "")
+            cells["gpu"][tokens] = float(parts[1].replace(",", ""))
+            cells["cpu"][tokens] = float(parts[3].replace(",", ""))
+    return cells
+
+
+def host_lines(record: dict[str, Any], e0: dict[str, Any] | None, forecast_text: str) -> list[str]:
+    """The host around the card against the box's: the CPU at bench_host.py's Python workload and in E0's GPU hit,
+    and the link, at the CPU tier's page sizes, against E0's restore and the forecast's link."""
+    lines = []
+    if python := record.get("python_ms"):
+        ratio = BOX_HOST["python_ms"] / python["p50"]
+        lines.append(
+            f"- **The CPU.** {record.get('cpu', 'This host')} runs bench_host.py's Python workload in "
+            f"{python['p50']:.1f} ms, the box's {BOX_HOST['cpu']} in {BOX_HOST['python_ms']:.1f}: "
+            f"{ratio:.2f} times as fast."
+        )
+    if e0 is not None:
+        ours, box = e0_slopes(e0), e0_slopes(forecast_e0_box(forecast_text))
+        lines.append(
+            f"- **E0's GPU hit grows with the prompt** by {ours['gpu_hit']:.2f} ms every 1,000 tokens on this host "
+            f"and {box['gpu_hit']:.2f} on the box ({box['gpu_hit'] / ours['gpu_hit']:.2f} times): the host's work on "
+            "a prompt (tokenizing it, hashing its blocks), with no prefill, which the forecast scaled with the card."
+        )
+        per_token = ours["transfer"]  # µs a token: ms every 1,000 tokens
+        card = forecast_card(forecast_text)
+        modeled = re.search(
+            rf"\| {re.escape(card)} \| central \| [^\n]*? \| [\d.]+ ms \+ ([\d.]+) µs/token \|",
+            forecast_text,
+        )
+        lines.append(
+            f"- **E0's CPU restore beyond the GPU hit** takes {per_token:.2f} µs a token on this host, "
+            f"{KV_BYTES_PER_TOKEN / per_token / 1e3:.2f} GB/s of KV, and {box['transfer']:.2f} on the box "
+            f"({KV_BYTES_PER_TOKEN / box['transfer'] / 1e3:.2f} GB/s)"
+            + (
+                f"; the forecast took {float(modeled[1]):.2f} µs a token "
+                f"({KV_BYTES_PER_TOKEN / float(modeled[1]) / 1e3:.1f} GB/s), the card's link as its "
+                "datasheet gives it [modeled]."
+                if modeled
+                else "."
+            )
+        )
+    link = {row["page_bytes"]: row for row in record.get("link", []) if row["direction"] == "h2d"}
+    if link:
+        gpu = record.get("gpu", {})
+        lines += [
+            "",
+            f"The link, pinned host memory to the card (PCIe Gen{gpu.get('pcie.link.gen.max', '?')} "
+            f"x{gpu.get('pcie.link.width.current', '?')} as the card negotiates it; "
+            f"the box's {BOX_HOST['link']}), in GB/s:",
+            "",
+            "| Copies | This host | The box |",
+            "|---|---:|---:|",
+            *(
+                f"| {'one copy' if page is None else f'pages of {page // 1024:,} KiB'} | "
+                f"{row['gb_per_s']:.2f} | {BOX_HOST['h2d_gb_per_s'].get(page, float('nan')):.2f} |"
+                for page, row in sorted(link.items(), key=lambda kv: kv[0] or 1 << 40)
+            ),
+        ]
+    elif record.get("link_error"):
+        lines.append(f"- **The link** was not measured: {record['link_error']}")
+    return lines
+
+
 def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | None) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     sim = calibration.Sim(binary, corpus, out)
@@ -396,31 +635,43 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
     else:
         lines.append("Not measured: no probe block (runs/a100/block1-3).")
     lines += ["", "## 4. E2 within the A100", ""]
-    # The core's rounds alone (a100-r1 to -r5): the optional arms' campaigns begin a100- too (a100-resubmit-r3 ...).
-    points = sorted(p.parent for p in host.glob("results/e2/a100-r[0-9]*/*/run.json"))
+    # The core's rounds (a100-r1 to -r5) and tuned vLLM's (a100-tuned-r1, -r2), which replay the samples of the core's
+    # rounds 1 and 2; the other optional arms' campaigns begin a100-r too (a100-resubmit-r3 ...), and A' has its own.
+    core_points = complete_points(host, "a100-r[0-9]*")
+    points = core_points + complete_points(host, "a100-tuned-r*")
     if points:
-        shares = running_shares(points)
-        if lh_bench is not None:
-            subprocess.run(
-                [str(lh_bench), "e2", "report", *map(str, points), "--out", str(out / "e2")],
-                check=True,
-                capture_output=True,
-            )
-            lines += [(out / "e2" / "frontier.md").read_text().strip(), ""]
-        lines += [
-            "The measured running share (the time free KV was under two calls' 2,048 tokens while agents ran), "
-            f"against the forecast's {core['running']} (central) for the core [modeled]:",
-            "",
-        ]
-        lines += [
-            f"- {label}: {', '.join(f'{100 * s:.0f}%' for s in values)}"
-            for label, values in shares.items()
-        ] or ["- Not measured: no point's summary.json has a running share (kv.running_share)."]
+        lines += e2_lines(points, out / "e2", lh_bench, core["running"], "the core")
     else:
         lines.append("Not measured: no E2 point (results/e2/a100-r1 to -r5).")
+    lines += ["", "## 5. A': the box's pool, more agents", ""]
+    aprime = complete_points(host, "a100-aprime-r*")
+    if aprime:
+        # The SLO's reference is voice alone on this card: the core's points of it.
+        alone = [p for p in core_points if p.name == "w5-a1-voice"]
+        lines += e2_lines(
+            alone + aprime,
+            out / "e2-aprime",
+            lh_bench,
+            forecast.aprime["running"],
+            "A', 32 sessions",
+        )
+    else:
+        lines.append("Not measured: no A' point (results/e2/a100-aprime-r1, -r2).")
+    lines += ["", "## 6. The scheduler at a batch of 256", ""]
+    lines += batch_lines(runs / "batch")
+    lines += ["", "## 7. The host around the card", ""]
+    try:
+        record = json.loads((runs / "host" / "host.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        record = None
+    if record is None:
+        lines.append("Not measured: no host check (runs/a100/host/host.json, bench_host.py).")
+    else:
+        cells = json.loads(e0.read_text())["p50_ms"] if e0.exists() else None
+        lines += host_lines(record, cells, forecast.path.read_text())
     lines += [
         "",
-        "## 5. Across cards (different hardware)",
+        "## 8. Across cards (different hardware)",
         "",
         "The core scenario's regime coordinates: the box measured (E2 W5, docs/BENCHMARKS.md) a saturated card, 99% "
         f"of agent requests waiting for blocks and a running share of 17%; the forecast puts the {forecast.card} at "

@@ -146,12 +146,16 @@ def test_a_report_says_what_its_records_lack(tmp_path: Path) -> None:
     assert "## 2. The calibration table\n\nNot measured." in text
     assert "| block1/frozen-kv-1 | kv | 1600 | 1700 |" in text
     assert "## 4. E2 within the A100\n\nNot measured: no E2 point" in text
-    assert "## 5. Across cards (different hardware)" in text
+    assert "## 5. A': the box's pool, more agents\n\nNot measured: no A' point" in text
+    assert "## 6. The scheduler at a batch of 256\n\nNot measured: no batch arm" in text
+    assert "## 7. The host around the card\n\nNot measured: no host check" in text
+    assert "## 8. Across cards (different hardware)" in text
 
 
 def test_the_core_section_reads_the_core_rounds_alone(tmp_path: Path) -> None:
-    # §4 is the core's E2 within the A100: its rounds a100-r1 to -r5, not the optional arms' campaigns, whose names
-    # also begin a100-r (a100-resubmit-r3 to -r5); A' (a100-aprime-*) and C' have their own.
+    # §4 is the core's E2 within the A100: its rounds a100-r1 to -r5 (and tuned vLLM's), not the other optional arms'
+    # campaigns, whose names also begin a100-r (a100-resubmit-r3 to -r5); A' (a100-aprime-*) has its own section, and
+    # a point not complete (one in progress, or stopped) is read nowhere.
     host = tmp_path / "host"
     probe_runs(host / "runs" / "a100")
     for campaign, label, share in (
@@ -159,9 +163,11 @@ def test_the_core_section_reads_the_core_rounds_alone(tmp_path: Path) -> None:
         ("a100-r2", "frozen", 0.14),
         ("a100-resubmit-r3", "stock, preempt-resubmit", 0.50),
         ("a100-aprime-r1", "the box's pool", 0.18),
+        ("a100-r3", "in progress", 0.30),
     ):
         point = host / "results" / "e2" / campaign / "w5-disc-frozen-s24"
-        write(point / "run.json", json.dumps({"arm": {"label": label}}))
+        status = "running" if label == "in progress" else "complete"
+        write(point / "run.json", json.dumps({"status": status, "arm": {"label": label}}))
         write(point / "summary.json", json.dumps({"kv": {"running_share": share}}))
     text = analysis.report(
         host, tmp_path / "corpus", tmp_path / "no-lh-sim", tmp_path / "out", None
@@ -169,6 +175,12 @@ def test_the_core_section_reads_the_core_rounds_alone(tmp_path: Path) -> None:
     section = text.split("## 4. E2 within the A100", 1)[1].split("## 5.", 1)[0]
     assert "- frozen: 12%, 14%" in section
     assert "preempt-resubmit" not in section and "the box's pool" not in section
+    assert "in progress" not in text
+    aprime = text.split("## 5. A'", 1)[1].split("## 6.", 1)[0]
+    assert (
+        "- the box's pool: 18%" in aprime
+        and "against the forecast's 18% (central) for A'" in aprime
+    )
 
 
 def test_the_tail_line_names_each_stock_setting_by_its_cap_and_threshold(tmp_path: Path) -> None:
@@ -247,7 +259,7 @@ def test_a_report_compares_against_its_cards_forecast_and_says_which(
     host_json(host, gpu)
     probe_runs(host / "runs" / "a100")
     point = host / "results" / "e2" / "a100-r1" / "w5-disc-frozen-s24"
-    write(point / "run.json", json.dumps({"arm": {"label": "frozen"}}))
+    write(point / "run.json", json.dumps({"status": "complete", "arm": {"label": "frozen"}}))
     write(point / "summary.json", json.dumps({"kv": {"running_share": 0.11}}))
     f = analysis.read_forecast(A100 / forecast)
     text = analysis.report(
@@ -285,3 +297,117 @@ def test_records_without_a_card_compare_against_the_40gb_forecast(tmp_path: Path
         "It compares against benchmarks/a100/forecast.md, the forecast for the A100 40 GB: the records have no "
         "node/host.json naming their card."
     ) in text
+
+
+def e2_point(host: Path, campaign: str, arm: str, seed: int, p95: float, rate: float) -> None:
+    """A complete E2 point as campaign.sh leaves it: its arm file's name and agents seed, and its summary's voice
+    p95 and the agents' tokens a second over the calls' first 240 s."""
+    point = host / "results" / "e2" / campaign / arm
+    write(
+        point / "run.json",
+        json.dumps({"status": "complete", "arm": {"name": arm, "label": arm}, "agents_seed": seed}),
+    )
+    write(
+        point / "summary.json",
+        json.dumps(
+            {
+                "voice": {"v2v_ms": {"p95": p95}},
+                "background": {"fixed_window": {"tokens_per_s": rate}},
+            }
+        ),
+    )
+
+
+def test_tuned_vllm_pairs_with_the_cores_rounds_by_the_agents_sample(tmp_path: Path) -> None:
+    # Tuned vLLM's rounds replay the samples of the core's first two: each round's row sets the four configurations
+    # side by side, in E2's order, and a configuration a round lacks leaves its cell empty.
+    host = tmp_path / "host"
+    for campaign, arm, seed, p95, rate in (
+        ("a100-r1", "w5-disc-pr-ab48-s24", 11, 1663.4, 10125.2),
+        ("a100-r1", "w5-a1-voice", 11, 1412.0, 0),
+        ("a100-r1", "w5-disc-frozen-s24", 11, 4120.0, 10900.0),
+        ("a100-tuned-r1", "a100-tuned-s24", 11, 2950.0, 11800.0),
+        ("a100-r2", "w5-disc-frozen-s24", 12, 4400.0, 10800.0),
+    ):
+        e2_point(host, campaign, arm, seed, p95, rate)
+    lines = analysis.rounds_table(
+        analysis.complete_points(host, "a100-r[0-9]*")
+        + analysis.complete_points(host, "a100-tuned-r*")
+    )
+    assert lines == [
+        "| Agents' sample (seed) | Voice alone | Frozen, 512/256 | Tuned vLLM, 2,048/0 | The PRs' values |",
+        "|---|---|---|---|---|",
+        "| 11 | 1,412 | 4,120 / 10,900 | 2,950 / 11,800 | 1,663 / 10,125 |",
+        "| 12 |  | 4,400 / 10,800 |  |  |",
+    ]
+
+
+def test_the_batch_section_sets_make_rooms_per_token_cost_beside_the_frozen_engines(
+    tmp_path: Path,
+) -> None:
+    batch = tmp_path / "batch"
+    for name, tpot in (("frozen", 20.0), ("off", 20.1), ("on", 20.4)):
+        for priority, throughput in ((0, 1000.0), (2, 9000.0)):
+            write(
+                batch / f"{name}-p{priority}.json",
+                json.dumps(
+                    {
+                        "output_throughput": throughput,
+                        "median_tpot_ms": tpot,
+                        "p99_tpot_ms": tpot * 1.5,
+                        "median_ttft_ms": 80.0,
+                        "p99_ttft_ms": 400.0,
+                    }
+                ),
+            )
+        write(
+            batch / f"{name}-running.json",
+            json.dumps({"running_p50": 256.0, "running_max": 256.0}),
+        )
+    lines = analysis.batch_lines(batch)
+    assert "| frozen | 10,000 | 20.00 / 30.00 | 20.00 / 30.00 | 80 / 400 | 256 / 256 |" in lines
+    assert lines[-1] == (
+        "Per output token at a batch of 256, against the frozen engine's: make-room, switches off 1.005; "
+        "make-room, the PRs' values 1.020. The scheduler's added cost is what it shows above 1.000."
+    )
+    assert analysis.batch_lines(tmp_path / "none") == [
+        "Not measured: no batch arm (runs/a100/batch)."
+    ]
+
+
+def test_the_host_section_reads_e0_against_the_link_and_the_cpu_against_the_boxs(
+    tmp_path: Path,
+) -> None:
+    # E0's GPU hit grows with the prompt by the host's own work on it, and the CPU restore beyond the GPU hit is the
+    # transfer: here 1.83 and 12.84 µs a token, so 11.49 GB/s of 144 KiB a token, against the box's cells in the
+    # forecast's E0 table (3.61 and 23.70) and the forecast's own link.
+    e0 = {
+        "gpu": {"1024": 18.27, "31744": 74.57},
+        "cpu": {"1024": 32.09, "31744": 482.72},
+    }
+    record = {
+        "cpu": "Intel(R) Xeon(R) CPU @ 2.20GHz",
+        "python_ms": {"p50": 190.0},
+        "gpu": {"pcie.link.gen.max": "4", "pcie.link.width.current": "16"},
+        "link": [
+            {"direction": "h2d", "page_bytes": 32768, "gb_per_s": 10.5},
+            {"direction": "h2d", "page_bytes": None, "gb_per_s": 12.1},
+            {"direction": "d2h", "page_bytes": None, "gb_per_s": 12.9},
+        ],
+    }
+    lines = analysis.host_lines(record, e0, analysis.FORECAST_80GB.read_text())
+    text = "\n".join(lines)
+    assert (
+        "in 190.0 ms, the box's Xeon E5-2609 v4 at 1.70 GHz in 381.1: 2.01 times as fast." in text
+    )
+    assert "by 1.83 ms every 1,000 tokens on this host and 3.61 on the box (1.97 times)" in text
+    assert (
+        "takes 12.84 µs a token on this host, 11.49 GB/s of KV, and 23.70 on the box (6.22 GB/s)"
+        in text
+    )
+    assert "the forecast took 5.91 µs a token (25.0 GB/s)" in text
+    assert "(PCIe Gen4 x16 as the card negotiates it; the box's PCIe 3.0 x8), in GB/s:" in text
+    assert "| pages of 32 KiB | 10.50 | 5.44 |" in lines and "| one copy | 12.10 | 6.76 |" in lines
+    assert analysis.host_lines({"link_error": "RuntimeError: no GPU"}, None, "") == [
+        "- **The link** was not measured: RuntimeError: no GPU"
+    ]
