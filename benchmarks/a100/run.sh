@@ -14,7 +14,8 @@
 #   10    the GPU units stopped; the records stay for deploy/a100/pull.sh
 # The optional arms (docs/HARDWARE.md, the optional arms), by name, in its order: cprime (cprime.sh), branches
 # (branches.sh run, once branches.sh stage has built the two envs), resubmit (the stock engine behind the gateway's
-# preempt-resubmit, seeds 13 to 15), batch (batch.sh) and aprime (the box's pool at 32 sessions, two rounds).
+# preempt-resubmit, seeds 13 to 15), batch (batch.sh), aprime (the box's pool at 32 sessions, two rounds) and tuned (the
+# stock engine at the A100's best step cap in the probes, 2,048/0, on the samples of the core's rounds 1 and 2).
 # --until HH:MM (UTC; tomorrow's when today's has passed) starts no block that the page's estimate says cannot end
 # before then, and hands the deadline, once computed, as an epoch, to each campaign and to cprime.sh, which then start
 # no point that cannot. --estimate BLOCK=MINUTES puts another estimate in the page's place for BLOCK (a block or an
@@ -35,7 +36,7 @@ while [[ ${1:-} == --* ]]; do
       cap=$2
       ;;
     --estimate)
-      [[ ${2:-} =~ ^(10|[0-9]|cprime|branches|resubmit|batch|aprime)=[1-9][0-9]*$ ]] || usage
+      [[ ${2:-} =~ ^(10|[0-9]|cprime|branches|resubmit|batch|aprime|tuned)=[1-9][0-9]*$ ]] || usage
       estimates+=" $2"
       ;;
     *) usage ;;
@@ -71,7 +72,8 @@ minutes() {
   fi
   case $1 in
     0) echo 44 ;; 1) echo 25 ;; 2) echo 26 ;; 3) echo 17 ;; 4) echo 29 ;; 5) echo 17 ;; 6 | 7 | 8 | 9) echo 28 ;;
-    10) echo 10 ;; cprime) echo 95 ;; branches) echo 45 ;; resubmit) echo 36 ;; batch) echo 15 ;; aprime) echo 80 ;;
+    10) echo 10 ;; cprime) echo 95 ;; branches) echo 45 ;; resubmit) echo 36 ;; batch) echo 15 ;; aprime) echo 56 ;;
+    tuned) echo 28 ;;
     *) echo 0 ;;
   esac
 }
@@ -164,6 +166,7 @@ block() { # block NAME: run one block unless it is done
     batch) bash "$here/batch.sh" ;;
     resubmit) for n in 3 4 5; do campaign "$here/a100-resubmit-r$n.campaign"; done ;;
     aprime) for n in 1 2; do campaign "$here/a100-aprime-r$n.campaign"; done ;;
+    tuned) for n in 1 2; do campaign "$here/a100-tuned-r$n.campaign"; done ;;
     *) log "no block $name"; exit 2 ;;
   esac
   date -u +%FT%TZ >"$runs/blocks/$name.done"
