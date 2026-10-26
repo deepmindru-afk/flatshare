@@ -286,8 +286,11 @@ step_reproduce() {
   corpus_dir=$peacock_corpus
   if ! "${ssh_cmd[@]}" "$peacock" "test -d $peacock_corpus"; then
     log "reproduce: no $peacock_corpus on $peacock: copying this workstation's weka-x32 there"
-    rsync -aL -e "$REHEARSAL_SSH" "$data/weka-x32/" "$peacock:$there/corpus/weka-x32/"
     corpus_dir=$there/corpus/weka-x32
+    # Its parent first: GNU rsync makes a destination's last directory alone (macOS's openrsync makes them all).
+    "${ssh_cmd[@]}" "$peacock" "mkdir -p $there/corpus" &&
+      rsync -aL -e "$REHEARSAL_SSH" "$data/weka-x32/" "$peacock:$corpus_dir/" ||
+      die "reproduce: this workstation's weka-x32 was not copied to $peacock (above)"
   fi
   "${ssh_cmd[@]}" "$peacock" "cd $there/src && export PATH=\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH &&
     make reproduce-a100 RECORDS=../records CORPUS=\$HOME/$corpus_dir" || die "reproduce: make reproduce-a100 failed (above)"

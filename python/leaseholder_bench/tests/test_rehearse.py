@@ -564,6 +564,25 @@ def test_a_failed_command_ends_its_step_and_init_wants_its_probe_answered(world:
     assert not (state / "cleanup.done").exists()
 
 
+def test_reproduce_copies_this_workstations_corpus_to_a_peacock_that_has_none(world: dict) -> None:
+    # Where peacock has no weka-x32 at REHEARSAL_PEACOCK_CORPUS, reproduce copies this workstation's into its own
+    # directory there and runs make over that. pull done, with the records it pulled, is what reproduce asks for.
+    hosts, work = world["hosts"], world["work"]
+    write(work / "hosts" / "phastform" / "runs" / "a100" / "blocks.log", "run: blocks 0 1 4\n")
+    write(world["state"] / "pull.done", "pulled\n")
+    (work / "data").mkdir()
+    (work / "data" / "weka-x32").symlink_to(world["tmp"] / "corpus" / "weka-x32")
+    done = rehearse(world, "reproduce", REHEARSAL_PEACOCK_CORPUS="leaseholder-data/none")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (
+        "no leaseholder-data/none on peacock: copying this workstation's weka-x32 there"
+        in done.stdout
+    )
+    copied = hosts / "peacock" / "leaseholder-rehearsal-reproduce" / "corpus" / "weka-x32"
+    assert len(list(copied.glob("trace-*.json"))) == 50
+    assert f"CORPUS={copied}" in (hosts / "peacock" / "make.log").read_text()
+
+
 @PROC
 def test_cleanup_ends_the_rehearsals_processes_whatever_their_titles(world: dict) -> None:
     # AIPerf's and vLLM's processes set their titles, which blanks the HOME=~/a100-rehearsal that leftovers finds the
