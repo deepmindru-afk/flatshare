@@ -39,16 +39,18 @@ within it, and the agents keep 98% of their tokens a second. Over both calls of 
 | + #63351: agent prefill sits out the reply's first 16 tokens | 3,094 ms | +1,060 ms | 3,298 | 71 s |
 | + #63351 with a 48-token window: **the configuration to deploy** | **2,236 ms** | +202 ms | 3,203 | 72 s |
 
-Medians of five rounds (10 runs for tuned vLLM and 15 for the last row, which more than one campaign ran), each round on
-its own sample of the agents' traces with every configuration in a rotated order. The SLO is voice alone plus 250 ms at
-p95. The PRs' rows ran as Flatshare's make-room variant on vLLM 0.32.0 with the PRs' switch values, which schedules as
-the PRs' diff, ported to 0.32.0, did before their revision of 2026-10-25; that revision ends the window's hold a step
-sooner, a step only replies at least the window long reach ([after
-W5](docs/BENCHMARKS.md#after-w5-the-first-tokens-in-flight)). The agents' tokens/s count the first 240 s of the calls.
-These agents wait about a minute for a first token: the regime this change is for ([is
-yours?](docs/PRODUCTION.md#is-your-deployment-in-this-regime)). On the final code, five more rounds on W5's own samples
-gave the last row 2.27 s, round by round −45 to +77 ms from W5's ([FB](benchmarks/results/2026-10-25-e2-fb)). Every run
-and range is in [BENCHMARKS.md](docs/BENCHMARKS.md#voice-under-agent-load-e2).
+Medians of five rounds, each on its own sample of the agents' traces with every configuration in a rotated order (10
+runs for tuned vLLM and 15 for the last row, which more than one campaign ran). The SLO is voice alone plus 250 ms at
+p95, and the agents' tokens/s count the calls' first 240 s. These agents wait about a minute for a first token: the
+regime this change is for ([is yours?](docs/PRODUCTION.md#is-your-deployment-in-this-regime)). Every run and range is in
+[BENCHMARKS.md](docs/BENCHMARKS.md#voice-under-agent-load-e2).
+
+- **The variant and the PRs.** The PRs' rows ran as Flatshare's make-room variant on vLLM 0.32.0 with the PRs' switch
+  values, which schedules as the PRs' diff, ported to 0.32.0, did before their revision of 2026-10-25; that revision
+  ends the window's hold a step sooner, a step only replies at least the window long reach
+  ([after W5](docs/BENCHMARKS.md#after-w5-the-first-tokens-in-flight)).
+- **On the final code**, five more rounds on W5's own samples gave the last row 2.27 s, round by round −45 to +77 ms
+  from W5's ([FB](benchmarks/results/2026-10-25-e2-fb)).
 
 | The same two calls and 24 sessions on an A100 SXM4 80 GB | Voice p95 | Over the SLO | Agents' tokens/s | Agents' TTFT p50 |
 |---|---:|---:|---:|---:|
@@ -58,13 +60,15 @@ and range is in [BENCHMARKS.md](docs/BENCHMARKS.md#voice-under-agent-load-e2).
 | vLLM 0.32 at its default 2,048-token steps, the card's best | 3,663 ms | +1,994 ms | 14,536 | 1.5 s |
 | + #63350 and #63351 | 1,826 ms | +157 ms | 14,635 | 1.5 s |
 
-The A100 ran the box's model, pool, CPU tier and agents, on W5's five samples of the agents' traces (medians of five
-rounds; of two, on the first two samples, at 2,048-token steps). At the box's 512-token steps the PRs' p95 was under the
-card's SLO in every round, the agents' tokens/s 94–111% of tuned vLLM's round by round, and with 32 sessions at that
-pool 1.62 s against 5.22 s, in one round. At vLLM's default 2,048-token steps, which give this card's agents 1.4 times
-the tokens a second on the same samples, the PRs kept all of them and halved the p95, to 0.14 and 0.17 s over the SLO:
-what the larger steps add is the wait for the steps already in flight when a voice turn arrives, which no scheduling
-rule takes back ([the A100 run](docs/HARDWARE.md#what-it-measured-2026-10-26)).
+The A100 ran the box's model, pool, CPU tier and agents on W5's five samples of the agents' traces: medians of five
+rounds, and of two, on the first two samples, at 2,048-token steps ([the A100
+run](docs/HARDWARE.md#what-it-measured-2026-10-26)).
+
+- **At the box's 512-token steps** the PRs' p95 was under the card's SLO in every round, with the agents' tokens/s at
+  94–111% of tuned vLLM's round by round; with 32 sessions at that pool, 1.62 s against 5.22 s, in one round.
+- **At vLLM's default 2,048-token steps**, which give this card's agents 1.4 times the tokens a second on the same
+  samples, the PRs kept all of them and halved the p95, to 0.14 and 0.17 s over the SLO. What the larger steps add is
+  the wait for the steps already in flight when a voice turn arrives, which no scheduling rule takes back.
 
 ## What it shows
 
@@ -113,8 +117,8 @@ rule takes back ([the A100 run](docs/HARDWARE.md#what-it-measured-2026-10-26)).
   forecast written before that run placed the KV case's first token at 1.33–1.37 s on stock vLLM and 126–145 ms with the
   PRs, and the card measured 1.75 s and 175 ms: its decode attention reads KV at 42% of its bandwidth, where the box's
   reaches 77% ([the A100 run](docs/HARDWARE.md#what-it-measured-2026-10-26)). At the box's pool the A100's agents leave
-  two calls short of KV 6% of the time, against the box's 17%. Other cards are placed by the same model ([what
-  transfers](docs/METHODS.md#what-transfers-to-other-hardware)).
+  two calls short of KV 6% of the time, where the simulator gives the box 17%. Other cards are placed by the same model
+  ([what transfers](docs/METHODS.md#what-transfers-to-other-hardware)).
 
 ## Try it on vLLM 0.32
 
@@ -213,9 +217,14 @@ make perf-make-room TORCH_PYTHON=PY  # the change's cost a scheduler step on CPU
 make compat-upstream                 # the PRs against vLLM's main, make-room's patches against vLLM's newest release
 make reproduce-e2                    # E2's tables and figures from the committed records (W4)
 make reproduce-e2-w5                 # the same for W5's records
+make reproduce-e2-a100               # the same for the A100 run's records
+make reproduce-a100 RECORDS=DIR CORPUS=DIR
+                                     # the A100 run's analysis from its raw records (v1.1's asset)
 make reproduce-e1 CORPUS=DIR         # E1's tables with flatshare-sim, from the 32x corpus
 make forecast-a100 CORPUS=DIR        # flatshare-sim's forecast for the A100 run, benchmarks/a100/forecast.md
 ```
+
+## Name
 
 The project was called Leaseholder through v1.1, after its original design, in which the gateway held leases on
 sessions' KV; E1 and E2 showed the engine had to carry the realtime tier, and that design was dropped
