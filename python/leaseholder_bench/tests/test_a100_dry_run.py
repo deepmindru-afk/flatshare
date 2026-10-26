@@ -1073,3 +1073,51 @@ def test_bootstrap_installs_as_root_without_sudo(ubuntu: dict) -> None:
     refused = bootstrap(ubuntu, "apt_install iproute2 || echo refused", FAKE_UID="1000")
     assert refused.returncode == 0 and refused.stdout.strip().endswith("refused")
     assert len(lines(log)) == 2  # sudo -n fails: nothing installed
+
+
+def test_the_backend_probe_runs_the_kv_case_on_flashinfer_once_the_engine_names_it(
+    tmp_path: Path, runtime: Path
+) -> None:
+    # probes.sh backend: the frozen engine with FlashInfer's attention, the KV case three times into runs/a100/backend,
+    # once the engine's log at this start names FlashInfer; an engine that selected another backend stops the block
+    # before a run, so that no run is filed under the wrong backend.
+    hosts = tmp_path / "hosts"
+    home = a100_host(hosts)
+    env = dry_env(home, hosts, runtime)
+    fakes = tmp_path / "bin"
+    fakes.mkdir()
+    (fakes / "journalctl").write_text(
+        "#!/bin/sh\n"
+        'echo "INFO [cuda.py:410] Using ${FAKE_BACKEND:-FLASHINFER} attention backend."\n'
+        'echo "INFO [kv_connector.py:40] Using LBHNC KV cache layout."\n'
+    )
+    (fakes / "journalctl").chmod(0o755)
+    env["PATH"] = os.pathsep.join([str(fakes), env["PATH"]])
+    probes = REPO / "benchmarks" / "a100" / "probes.sh"
+    out = home / "leaseholder" / "runs" / "a100" / "backend"
+
+    def run(backend: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(probes), "backend"],
+            env=env | {"FAKE_BACKEND": backend},
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+    refused = run("FLASH_ATTN")
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert (
+        "the engine selected Using FLASH_ATTN attention backend" in (out / "probes.log").read_text()
+    )
+    assert not list(out.glob("backend-kv-*"))
+    done = run("FLASHINFER")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "variant.sh use frozen --attention-backend FLASHINFER" in lines(home / "variant.log")
+    assert sorted(p.name for p in out.glob("backend-kv-*.txt")) == [
+        "backend-kv-1.txt",
+        "backend-kv-2.txt",
+        "backend-kv-3.txt",
+    ]
+    log = (out / "probes.log").read_text()
+    assert "engine: Using FLASHINFER attention backend Using LBHNC KV cache layout\n" in log

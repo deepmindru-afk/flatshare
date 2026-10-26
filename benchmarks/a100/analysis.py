@@ -322,6 +322,7 @@ def probe_lines(runs: Path, forecast: Forecast | None = None) -> list[str]:
     kv_stock = [r.ttft_ms for r in probes("block1", "frozen-kv")]
     kv_pr = [r.ttft_ms for r in probes("block3", "pr-kv")]
     kv_2048 = [r.ttft_ms for r in probes("block2", "stock2048-kv")]
+    kv_flashinfer = [r.ttft_ms for r in probes("backend", "backend-kv")]
     pf_stock = [g for r in probes("block1", "frozen-prefill") if (g := gap(r)) is not None]
     pf_pr = [g for r in probes("block3", "pr-prefill") if (g := gap(r)) is not None]
     lines += [
@@ -330,6 +331,11 @@ def probe_lines(runs: Path, forecast: Forecast | None = None) -> list[str]:
         f"| KV case, stock: the voice turn's wait | {median_range(kv_stock)} | {f['kv_stock']} "
         f"| {BOX['kv_stock_ms']} |",
         f"| KV case, stock at 2,048/0 | {median_range(kv_2048)} | | |",
+        *(
+            [f"| KV case, stock on FlashInfer's attention | {median_range(kv_flashinfer)} | | |"]
+            if kv_flashinfer
+            else []
+        ),
         f"| KV case, the PRs' values: first token | {median_range(kv_pr)} | {f['kv_pr']} | {BOX['kv_pr_ms']} |",
         f"| Prefill case, stock: the reply's token gap (1st to 16th) | {median_range(pf_stock)} | "
         f"{f['prefill_stock']} | {BOX['prefill_stock_gap_ms']} |",
