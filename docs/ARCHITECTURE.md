@@ -2,7 +2,7 @@
 
 Flatshare runs a realtime voice agent beside background LLM work on one GPU. The part that makes this work is a change to vLLM's scheduler: a waiting realtime request can take KV from running background requests, and background prefill sits out the realtime reply's first tokens. It is proposed upstream as [#63350](https://github.com/vllm-project/vllm/pull/63350) and [#63351](https://github.com/vllm-project/vllm/pull/63351) and runs on vLLM 0.32 as the engine variant `make-room` (§2). Around it are the deployment it was measured on (§3), the harness that measured it against everything an operator can deploy today (§4) and a KV-cache simulator (§5). Two mechanisms were built, measured and not adopted (§6), and the rest of the original design was dropped (§7).
 
-This document describes what is built, as of v1.1 (2026-10-26). [PRODUCTION.md](PRODUCTION.md) gives the configuration to deploy, [BENCHMARKS.md](BENCHMARKS.md) the numbers, and [PRIOR-ART.md](PRIOR-ART.md) what is ours and what is not.
+This document describes what is built, as of v1.2 (2026-10-26). [PRODUCTION.md](PRODUCTION.md) gives the configuration to deploy, [BENCHMARKS.md](BENCHMARKS.md) the numbers, and [PRIOR-ART.md](PRIOR-ART.md) what is ours and what is not.
 
 ## 1. The problem in the engine
 
