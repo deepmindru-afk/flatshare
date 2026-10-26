@@ -52,8 +52,8 @@ The profile's "auto" values, in `deploy/profile.py`:
 | Compute capability and precision path | sm75-sm89: W8A16 through Marlin at the BF16 rate; the per-token cost is the BF16 path's, comparisons across cards only in regime coordinates. The row names the kernel the engine's first start selected (before it, the one expected): another than Marlin below sm90 is named as such | below sm75 |
 | BF16 | sm75: FP16 activations; numerics differ from the box | |
 | Attention backend and KV layout | not FlashAttention or FlashInfer on LBHNC (the engine log): attention's cost | |
-| Driver and install path | cu130 with the compatibility libraries, or the cu129 lock: another CUDA runtime under the same vLLM and torch | the venv's build is not the one the driver needs |
-| torch on the GPU (`--gpu`) | | `torch.cuda.init()` fails with the engine's environment (errors 803, 804) |
+| Driver and install path | cu130 with the compatibility libraries, or the cu129 lock: another CUDA runtime under the same vLLM and torch | the venv's build is not the one the driver needs; or the driver's libraries are in a directory the linker does not search and a GPU unit does not name it on `LD_LIBRARY_PATH` |
+| torch on the GPU (`--gpu`) | | `torch.cuda.init()` fails with the engine's environment (errors 803, 804; or no driver, where the engine's environment does not reach the driver's `libcuda.so.1`) |
 | FlashInfer's JIT | | its sampler does not build (the engine would fail at its first start; `VLLM_USE_FLASHINFER_SAMPLER=0` in a drop-in is the degraded way out), or was built for another compiler or card than the units name now (staged before the card was visible, the `gpu` stage can change both; it builds the sampler again: `host.py jit-check --if-stale`) |
 | Host compilers | | no `cc` or `c++`: Triton builds its launchers with a C compiler, `nvcc` needs a C++ one |
 | Python headers | | the engine venv's Python has no `Python.h`, which Triton compiles its launcher against at the engine's first start (a system Python 3.12 without its `-dev` package, Ubuntu 24.04's): `stage` makes the venvs from uv's own Python |
