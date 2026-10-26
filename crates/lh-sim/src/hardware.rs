@@ -197,6 +197,23 @@ pub const A100_40GB: Gpu = Gpu {
     fa2_efficiency: Some((0.73, 0.50)),
 };
 
+/// NVIDIA's A100 datasheet (JUN21, the 40 GB card's source,
+/// <https://nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf>),
+/// its "A100 80GB SXM" column: 80 GB of HBM2e at 2,039 GB/s (the 80 GB PCIe card's is 1,935), and
+/// the 40 GB cards' 312 BF16 TFLOPS dense (624 with sparsity), no FP8 and PCIe Gen4 at 64 GB/s. It
+/// is sm80, so Marlin and FlashAttention 2's range on the A100 carry over: its profile is the 40 GB
+/// card's with the memory and the bandwidth changed, and every cost follows from them by the 40 GB
+/// card's rules. HBM2e keeps ECC in bits of its own: an A100-SXM4-80GB's `nvidia-smi` shows
+/// 81,920 MiB (<https://github.com/NVIDIA/DCGM/issues/93>). The A100 run drew this card; the E1 map
+/// does not place it ([`GPUS`]).
+pub const A100_80GB: Gpu = Gpu {
+    name: "a100-80gb",
+    title: "A100 SXM4 80 GB",
+    memory_mib: 80 << 10,
+    bandwidth_gb_s: 2_039.0,
+    ..A100_40GB
+};
+
 /// NVIDIA's H100 datasheet, SXM (<https://www.nvidia.com/en-us/data-center/h100/>): 80 GB at 3.35 TB/s,
 /// 3,958 FP8 and 1,979 BF16 TFLOPS with sparsity, halved, and PCIe Gen5 at 128 GB/s (x16, both ways).
 pub const H100_SXM: Gpu = Gpu {
@@ -214,8 +231,12 @@ pub const H100_SXM: Gpu = Gpu {
     fa2_efficiency: None,
 };
 
-/// The profiles, the box first.
+/// The profiles the E1 map places (`lh-sim hardware`'s default), the box first.
 pub const GPUS: [Gpu; 4] = [RTX_5060_TI, L4, A100_40GB, H100_SXM];
+
+/// Every profile a command takes by name: the map's, and the A100 80 GB SXM4, which `forecast` models
+/// for the run on it (`benchmarks/a100/forecast-80gb.md`).
+pub const CARDS: [Gpu; 5] = [RTX_5060_TI, L4, A100_40GB, A100_80GB, H100_SXM];
 
 /// A model as the cost model scales it: what a decode step reads, what a computed token and an
 /// attention pair compute, and its KV. The box's measured terms are for [`QWEN3_4B_FP8`]; another
@@ -603,8 +624,8 @@ impl FromStr for Gpu {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, String> {
-        GPUS.into_iter().find(|g| g.name == s).ok_or_else(|| {
-            let names: Vec<_> = GPUS.iter().map(|g| g.name).collect();
+        CARDS.into_iter().find(|g| g.name == s).ok_or_else(|| {
+            let names: Vec<_> = CARDS.iter().map(|g| g.name).collect();
             format!("unknown GPU {s:?} (the GPUs are {})", names.join(", "))
         })
     }
@@ -977,6 +998,7 @@ mod tests {
         let replay = ReplayConfig::default();
         assert_eq!(b.run_config(replay.clone()), RunConfig::frozen_box(replay));
         assert!(b.measured() && !L4.measured() && !A100_40GB.measured() && !H100_SXM.measured());
+        assert!(!A100_80GB.measured());
         assert_eq!((b.label(), H100_SXM.label()), ("measured", "modeled"));
         // Every scaling gives the box its own costs for its own model, except for the overhead kept,
         // which is the same term split in two.
@@ -1250,12 +1272,20 @@ mod tests {
 
     #[test]
     fn gpus_parse_by_name() {
-        for g in GPUS {
+        for g in CARDS {
             assert_eq!(g.name.parse::<Gpu>(), Ok(g));
         }
+        // The map's cards are every card but the A100 80 GB.
+        assert_eq!(
+            CARDS
+                .iter()
+                .filter(|g| !GPUS.contains(g))
+                .collect::<Vec<_>>(),
+            [&A100_80GB]
+        );
         let err = "a100".parse::<Gpu>().unwrap_err();
         assert!(
-            err.contains("rtx-5060-ti, l4, a100-40gb, h100-sxm"),
+            err.contains("rtx-5060-ti, l4, a100-40gb, a100-80gb, h100-sxm"),
             "{err}"
         );
         for m in MODELS {
@@ -1298,6 +1328,72 @@ mod tests {
     }
 
     #[test]
+    fn the_a100_80gb_is_the_40gb_with_its_memory_and_bandwidth() {
+        // Every field but the name, the memory and the bandwidth is the 40 GB card's.
+        assert_eq!(
+            Gpu {
+                name: A100_40GB.name,
+                title: A100_40GB.title,
+                memory_mib: A100_40GB.memory_mib,
+                bandwidth_gb_s: A100_40GB.bandwidth_gb_s,
+                ..A100_80GB
+            },
+            A100_40GB
+        );
+        assert_eq!(
+            (A100_80GB.memory_mib, A100_80GB.bandwidth_gb_s),
+            (81_920, 2_039.0)
+        );
+        // The bandwidth terms shrink by 1,555 / 2,039: the fixed step from 3.33 to 2.54 ms, a KV
+        // token read from 123.7 to 94.3 ns. The linear layers, attention and the restore stay.
+        let close = |x: f64, y: f64| (x / y - 1.0).abs() < 1e-12;
+        let ratio = A100_40GB.bandwidth_gb_s / A100_80GB.bandwidth_gb_s;
+        for s in [Scaling::MAP, Scaling::LOW] {
+            let (a40, a80) = (
+                A100_40GB.step_cost_with(&QWEN3_4B_FP8, s),
+                A100_80GB.step_cost_with(&QWEN3_4B_FP8, s),
+            );
+            assert!(close(a80.step_ms, a40.step_ms * ratio), "{}", a80.step_ms);
+            assert!(close(a80.ns_per_context, a40.ns_per_context * ratio));
+            assert_eq!(
+                (a80.us_per_token, a80.ns_per_pair),
+                (a40.us_per_token, a40.ns_per_pair)
+            );
+        }
+        let a80 = A100_80GB.step_cost();
+        assert!((a80.step_ms - 2.5399).abs() < 1e-4 && (a80.ns_per_context - 94.324).abs() < 1e-3);
+        assert_eq!(
+            A100_80GB.tier_cost().cpu_restore,
+            A100_40GB.tier_cost().cpu_restore
+        );
+        // The forecast's central setting keeps the box's 1.7 ms of overhead beside the faster read:
+        // 3.88 ms against the 40 GB card's 4.55; FlashAttention 2's range is the A100's.
+        let central = A100_80GB.step_cost_with(&QWEN3_4B_FP8, Scaling::central(&A100_80GB));
+        assert!(
+            (central.step_ms - 3.879_07).abs() < 1e-4,
+            "{}",
+            central.step_ms
+        );
+        assert_eq!(Scaling::high(&A100_80GB), Scaling::high(&A100_40GB));
+        // 80 GiB, the H100's: 31,402 blocks of the 4B (502,432 tokens) and 23,718 of the 14B
+        // (379,488), and the 32x corpus replays at 4x, as on the H100.
+        assert_eq!(A100_80GB.pool_tokens(&QWEN), 502_432);
+        assert_eq!(A100_80GB.pool_tokens(&QWEN), H100_SXM.pool_tokens(&QWEN));
+        assert_eq!(A100_80GB.model_pool_tokens(&QWEN3_14B_FP8), 379_488);
+        assert_eq!(fitted_token_scale(&A100_80GB, &QWEN, 31_144, 32), Some(8));
+        // Its row of the profiles' table.
+        let row = profiles(&[A100_80GB]);
+        assert!(
+            row.contains(
+                "| A100 SXM4 80 GB | modeled | 80 GiB | 2,039 GB/s | none / 312.0 TFLOPS \
+                 | Marlin W8A16, 1.42× a BF16 GEMM | PCIe 4.0 x16, 31.5 GB/s | 502,432 tokens \
+                 | 2.54 ms | 41.33 µs | 2.15 ns | 94.3 ns | 10.3 ms + 5.91 µs/token |"
+            ),
+            "{row}"
+        );
+    }
+
+    #[test]
     fn a_model_scales_the_terms_by_its_bytes_and_flops() {
         let close = |x: f64, y: f64| (x / y - 1.0).abs() < 1e-5;
         // Qwen3-14B-FP8 on the box: 14.77 GB a step, 3.6 times the FLOPs a token, 1.39 times the
@@ -1317,7 +1413,7 @@ mod tests {
         // No card with the box's footprint and the 14B's weights has room on 16 GiB.
         assert_eq!(RTX_5060_TI.model_pool_tokens(&QWEN3_14B_FP8), 0);
         // The 4B's pool is every card's own pool.
-        for g in GPUS {
+        for g in CARDS {
             assert_eq!(g.model_pool_tokens(&QWEN3_4B_FP8), g.pool_tokens(&QWEN));
         }
         // A 31,744-token cold prompt of the 14B on the A100 (central) takes 2.4 times the 4B's: 3.6

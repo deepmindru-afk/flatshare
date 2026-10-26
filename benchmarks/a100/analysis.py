@@ -4,10 +4,13 @@ deploy/a100/pull.sh copies them.
     python3 benchmarks/a100/analysis.py report HOST_DIR --corpus WEKA_X32 --lh-sim LH_SIM --out OUT [--lh-bench BIN]
     python3 benchmarks/a100/analysis.py calibration-check EXPORTS --corpus WEKA_X32 --lh-sim LH_SIM --out OUT
 
-`report` writes OUT/a100.md (`make reproduce-a100`), each section from what HOST_DIR holds and saying what it lacks:
+`report` writes OUT/a100.md (`make reproduce-a100`), each section from what HOST_DIR holds and saying what it lacks,
+against the forecast for the card the records name (node/host.json's GPU): benchmarks/a100/forecast-80gb.md for an
+A100 80 GB, benchmarks/a100/forecast.md (the A100 40 GB's, the card the kit was built for) otherwise; a100.md says
+which.
 1. The step model: crates/lh-sim/scripts/fit_step_cost.py on the calibration point (runs/a100/calibration-s16) with
    the card's own E0 (runs/a100/block1/frozen-e0), each fitted term beside the forecast's central value and range
-   (benchmarks/a100/forecast.md) as a ratio, and the largest miss with what it is likely to mean.
+   as a ratio, and the largest miss with what it is likely to mean.
 2. The calibration table: lh-sim with those costs (and E0's tier fits) against the measured point, as the box's
    (crates/lh-sim/scripts/calibration.py, whose functions it uses): requests, resume TTFT p50 / p90 / p99 and the
    GPU, CPU and computed shares of the prompt tokens.
@@ -32,6 +35,7 @@ import re
 import statistics
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +43,9 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 SCRIPTS = REPO / "crates" / "lh-sim" / "scripts"
 FORECAST = HERE / "forecast.md"
+"""The forecast for the A100 40 GB, the card the kit was built for (make forecast-a100)."""
+FORECAST_80GB = HERE / "forecast-80gb.md"
+"""The forecast for the A100 SXM4 80 GB (make forecast-a100 GPU=a100-80gb)."""
 DASH = "\u2013"  # the range dash, as calibration.py writes it
 
 
@@ -76,20 +83,108 @@ BOX = {
 """The box's probe results, measured (docs/BENCHMARKS.md; benchmarks/results/2026-10-23-make-room-probes)."""
 
 
+def gpu_name(host: Path) -> str | None:
+    """The card the records name: node/host.json's GPU, as nvidia-smi gives it ("NVIDIA A100-SXM4-80GB")."""
+    try:
+        return json.loads((host / "node" / "host.json").read_text())["gpu"]["name"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+
+
+def forecast_for(gpu: str | None) -> Path:
+    """The forecast for the card: forecast-80gb.md for an A100 80 GB, forecast.md (the A100 40 GB's) otherwise."""
+    name = (gpu or "").upper().replace(" ", "")
+    return FORECAST_80GB if "A100" in name and "80GB" in name else FORECAST
+
+
+def forecast_card(text: str) -> str:
+    """The card a forecast is for, as its title names it ("A100 40 GB")."""
+    title = re.match(r"# Forecast: the (.+) against the frozen box\n", text)
+    if title is None:
+        raise ValueError("the forecast has no title naming its card")
+    return title.group(1)
+
+
 def forecast_costs(text: str) -> dict[str, dict[str, float]]:
-    """The forecast's A100 costs for the core's model, by setting (low, central, high), in the fit's units."""
+    """The forecast's costs on its card for the core's model, by setting (low, central, high), in the fit's units."""
+    card = forecast_card(text)
     section = text.split("## Step and tier costs, Qwen3-4B-Instruct-2507-FP8", 1)[1].split(
         "\n## ", 1
     )[0]
     out: dict[str, dict[str, float]] = {}
     for line in section.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) >= 6 and cells[0] == "A100 40 GB" and cells[1] in ("low", "central", "high"):
+        if len(cells) >= 6 and cells[0] == card and cells[1] in ("low", "central", "high"):
             values = [float(re.match(r"[\d.]+", c).group().replace(",", "")) for c in cells[2:6]]
             out[cells[1]] = dict(zip((name for name, *_ in TERMS), values, strict=True))
     if set(out) != {"low", "central", "high"}:
-        raise ValueError(f"{FORECAST} has no low, central and high A100 cost rows")
+        raise ValueError(f"the forecast has no low, central and high cost rows for the {card}")
     return out
+
+
+def forecast_probes(text: str, card: str) -> dict[str, str]:
+    """The forecast's probe cases on its card, each "central ms (low-high)" as the forecast writes them."""
+    on = rf"On the {re.escape(card)}: "
+    kv = re.search(
+        on
+        + rf"(\S+) ms \(low{DASH}high (\S+)\)\. make-room's first token, [^:]*: (\S+) ms \((\S+)\)\.",
+        text,
+    )
+    prefill = re.search(on + r"(\S+) ms \((\S+)\) and (\S+) ms \((\S+)\), with the chunks", text)
+    if kv is None or prefill is None:
+        raise ValueError(f"the forecast has no KV case or prefill case for the {card}")
+
+    def pair(m: re.Match[str], i: int) -> str:
+        return f"{m.group(i)} ms ({m.group(i + 1)})"
+
+    return {
+        "kv_stock": pair(kv, 1),
+        "kv_pr": pair(kv, 3),
+        "prefill_stock": pair(prefill, 1),
+        "prefill_pr": pair(prefill, 3),
+    }
+
+
+def forecast_core(text: str, card: str) -> dict[str, str]:
+    """The forecast's core scenario on its card, central: its running share, busy and stalled shares."""
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 11 and cells[:2] == ["A: the core, the box's pool", f"{card} (central)"]:
+            return {"running": cells[8].split(" / ")[0], "busy": cells[9], "stalled": cells[10]}
+    raise ValueError(f"the forecast has no central core cell for the {card}")
+
+
+@dataclass(frozen=True)
+class Forecast:
+    """What the report sets beside the measurements, from one forecast."""
+
+    path: Path
+    card: str
+    costs: dict[str, dict[str, float]]
+    probes: dict[str, str]
+    core: dict[str, str]
+
+
+def read_forecast(path: Path) -> Forecast:
+    text = path.read_text()
+    card = forecast_card(text)
+    return Forecast(
+        path, card, forecast_costs(text), forecast_probes(text, card), forecast_core(text, card)
+    )
+
+
+def forecast_line(gpu: str | None, forecast: Forecast) -> str:
+    """Which forecast the report compares against, and why."""
+    which = f"It compares against {_shown(forecast.path)}, the forecast for the {forecast.card}"
+    if gpu is None:
+        return which + ": the records have no node/host.json naming their card."
+    if forecast.path == FORECAST_80GB:
+        return which + f", as node/host.json names the card {gpu}."
+    return which + f", as node/host.json names the card {gpu}, not an A100 80 GB."
+
+
+def _shown(path: Path) -> str:
+    return str(path.relative_to(REPO)) if path.is_relative_to(REPO) else str(path)
 
 
 def fit(export: Path, log: Path, e0: Path | None, out: Path) -> tuple[dict[str, Any], str]:
@@ -172,7 +267,11 @@ def median_range(values: list[float]) -> str:
     return f"{statistics.median(values):,.0f} ms ({min(values):,.0f}{DASH}{max(values):,.0f}, {len(values)} runs)"
 
 
-def probe_lines(runs: Path) -> list[str]:
+def probe_lines(runs: Path, forecast: Forecast | None = None) -> list[str]:
+    """The probes' runs, and the cases beside the forecast (the A100 40 GB's unless given) and the box."""
+    forecast = forecast or read_forecast(FORECAST)
+    f = forecast.probes
+
     def probes(block: str, prefix: str) -> list[Any]:
         return [
             r for r in results.runs(runs, block, prefix).values() if isinstance(r, results.Probe)
@@ -189,15 +288,15 @@ def probe_lines(runs: Path) -> list[str]:
     pf_stock = [g for r in probes("block1", "frozen-prefill") if (g := gap(r)) is not None]
     pf_pr = [g for r in probes("block3", "pr-prefill") if (g := gap(r)) is not None]
     lines += [
-        f"| Case | A100 40 GB, measured | Forecast, central (low{DASH}high) [modeled] | The box [measured] |",
+        f"| Case | {forecast.card}, measured | Forecast, central (low{DASH}high) [modeled] | The box [measured] |",
         "|---|---|---|---|",
-        f"| KV case, stock: the voice turn's wait | {median_range(kv_stock)} | 1,636{DASH}1,688 ms (1,411{DASH}1,695) "
+        f"| KV case, stock: the voice turn's wait | {median_range(kv_stock)} | {f['kv_stock']} "
         f"| {BOX['kv_stock_ms']} |",
         f"| KV case, stock at 2,048/0 | {median_range(kv_2048)} | | |",
-        f"| KV case, the PRs' values: first token | {median_range(kv_pr)} | 134{DASH}158 ms (117{DASH}158) | {BOX['kv_pr_ms']} |",
-        f"| Prefill case, stock: the reply's token gap (1st to 16th) | {median_range(pf_stock)} | 33.5 ms "
-        f"(26.5{DASH}36.1) | {BOX['prefill_stock_gap_ms']} |",
-        f"| Prefill case, the PRs' values: the token gap | {median_range(pf_pr)} | 6.6 ms (4.9{DASH}6.6) "
+        f"| KV case, the PRs' values: first token | {median_range(kv_pr)} | {f['kv_pr']} | {BOX['kv_pr_ms']} |",
+        f"| Prefill case, stock: the reply's token gap (1st to 16th) | {median_range(pf_stock)} | "
+        f"{f['prefill_stock']} | {BOX['prefill_stock_gap_ms']} |",
+        f"| Prefill case, the PRs' values: the token gap | {median_range(pf_pr)} | {f['prefill_pr']} "
         f"| {BOX['prefill_pr_gap_ms']} |",
     ]
     # The time-equivalent caps' runs, by cap and threshold (stock1536-768-tail-N); vLLM's default is stock2048-.
@@ -253,12 +352,14 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
     out.mkdir(parents=True, exist_ok=True)
     sim = calibration.Sim(binary, corpus, out)
     runs = host / "runs" / "a100"
-    forecast = forecast_costs(FORECAST.read_text())
+    gpu = gpu_name(host)
+    forecast = read_forecast(forecast_for(gpu))
+    core = forecast.core
     lines = [
-        "# The A100 40 GB run against its forecast",
+        f"# The {forecast.card} run against its forecast",
         "",
         f"From {host}. Every A100 number here is measured on the A100 unless it says modeled (the forecast, "
-        "benchmarks/a100/forecast.md) or names the box.",
+        f"{_shown(forecast.path)}) or names the box. {forecast_line(gpu, forecast)}",
         "",
         "## 1. The step model",
         "",
@@ -275,7 +376,7 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
         sim.replay_log("calibration-s16-replay-log", export)
         steps, fitted = fit(export, log, e0, out / "steps.json")
         steps_path = out / "steps.json"
-        lines += step_model_lines(steps, forecast)
+        lines += step_model_lines(steps, forecast.costs)
         lines += ["", "The fit's own account:", "", "```", fitted.strip(), "```"]
     else:
         lines.append(
@@ -291,7 +392,7 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
         lines.append("Not computed." if measured_point else "Not measured.")
     lines += ["", "## 3. The probes", ""]
     if any((runs / block).is_dir() for block in ("block1", "block2", "block3")):
-        lines += probe_lines(runs)
+        lines += probe_lines(runs, forecast)
     else:
         lines.append("Not measured: no probe block (runs/a100/block1-3).")
     lines += ["", "## 4. E2 within the A100", ""]
@@ -308,7 +409,7 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
             lines += [(out / "e2" / "frontier.md").read_text().strip(), ""]
         lines += [
             "The measured running share (the time free KV was under two calls' 2,048 tokens while agents ran), "
-            "against the forecast's 13% (central) for the core [modeled]:",
+            f"against the forecast's {core['running']} (central) for the core [modeled]:",
             "",
         ]
         lines += [
@@ -322,9 +423,10 @@ def report(host: Path, corpus: Path, binary: Path, out: Path, lh_bench: Path | N
         "## 5. Across cards (different hardware)",
         "",
         "The core scenario's regime coordinates: the box measured (E2 W5, docs/BENCHMARKS.md) a saturated card, 99% "
-        "of agent requests waiting for blocks and a running share of 17%; the forecast puts the A100 at 76% busy, "
-        "57% stalled and 13% [modeled]. Each card's distance to its own SLO (its voice alone + 250 ms) is in §4 for "
-        "the A100 and in docs/BENCHMARKS.md for the box; the two are compared in these coordinates only.",
+        f"of agent requests waiting for blocks and a running share of 17%; the forecast puts the {forecast.card} at "
+        f"{core['busy']} busy, {core['stalled']} stalled and {core['running']} [modeled]. Each card's distance to its "
+        "own SLO (its voice alone + 250 ms) is in §4 for the A100 and in docs/BENCHMARKS.md for the box; the two are "
+        "compared in these coordinates only.",
     ]
     path = out / "a100.md"
     path.write_text("\n".join(lines) + "\n")

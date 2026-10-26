@@ -748,11 +748,17 @@ pub fn reading(gpu: &Gpu, cells: &[Cell], placed: &[Placed]) -> String {
 
 /// The whole report for `gpu`.
 pub fn report(gpu: &Gpu, cells: &[Cell], placed: &[Placed], seeds: &[u64]) -> String {
+    // The make target that writes it: the A100 40 GB's is the default.
+    let target = if gpu.name == hardware::A100_40GB.name {
+        "make forecast-a100".to_string()
+    } else {
+        format!("make forecast-a100 GPU={}", gpu.name)
+    };
     let mut text = String::new();
     writeln!(
         text,
         "# Forecast: the {} against the frozen box\n\n\
-         Written by `lh-sim forecast` (`make forecast-a100`) from the box's measured costs, the \
+         Written by `lh-sim forecast` (`{target}`) from the box's measured costs, the \
          card's published peaks and the path vLLM 0.32.0 takes for the box's checkpoint on it ({}; \
          `crates/lh-sim/src/hardware.rs`). Every number for the {} is modeled; the box's are \
          measured where they say so. Three settings bound it: **low**, the peaks' ratios alone with \
@@ -801,7 +807,7 @@ pub fn report(gpu: &Gpu, cells: &[Cell], placed: &[Placed], seeds: &[u64]) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hardware::{A100_40GB, L4};
+    use crate::hardware::{A100_40GB, A100_80GB, L4};
 
     #[test]
     fn the_box_forecasts_its_own_measurements() {
@@ -918,5 +924,61 @@ mod tests {
         let probes = probes_section(&A100_40GB);
         assert!(probes.contains("1,536 tokens (central"), "{probes}");
         assert!(probes.contains("on Gray 4,923–5,077 ms"), "{probes}");
+    }
+
+    #[test]
+    fn the_a100_80gbs_forecast_is_the_40gbs_with_its_bandwidth_and_pools() {
+        // The step costs: the fixed step and the KV reads by the bandwidth, the rest the 40 GB card's.
+        let t = costs_table(&A100_80GB, &QWEN3_4B_FP8);
+        for row in [
+            "| A100 SXM4 80 GB | the E1 map's | 2.54 ms | 41.33 µs | 2.15 ns | 94.3 ns |",
+            "| A100 SXM4 80 GB | low | 2.54 ms | 29.19 µs | 2.15 ns | 94.3 ns |",
+            "| A100 SXM4 80 GB | central | 3.88 ms | 41.33 µs | 2.59 ns | 94.3 ns |",
+            "| A100 SXM4 80 GB | high | 3.88 ms | 41.33 µs | 3.78 ns | 94.3 ns |",
+        ] {
+            assert!(t.contains(row), "{row}\n{t}");
+        }
+        assert!(t.contains("| 10.3 ms + 5.91 µs/token | 3,123 ms |"), "{t}");
+        // E0's cells at 31,744 tokens: a GPU hit, a restore and a recompute, each a little faster.
+        let e0 = e0_table(&A100_80GB);
+        assert!(
+            e0.contains(
+                "| 31,744 | 156 | 131 (130–132) | 903 | 324 (322–324) | 10,239 | 3,169 (2,459–3,788) |"
+            ),
+            "{e0}"
+        );
+        // The KV case's wait is two 18k decodes at a time: 7.5 ms on this card against the 40 GB
+        // card's 9.2, so stock waits 1.3-1.4 s; the caps are the 40 GB card's.
+        let central = Costs::of(&A100_80GB, &QWEN3_4B_FP8, Scaling::central(&A100_80GB));
+        assert!((two_decodes_ms(&central.steps) - 7.45).abs() < 0.01);
+        let probes = probes_section(&A100_80GB);
+        for text in [
+            "On the A100 SXM4 80 GB: 1,328–1,369 ms (low–high 1,082–1,377).",
+            "an idle pool: 126–145 ms (109–146).",
+            "On the A100 SXM4 80 GB: 32.8 ms (25.7–35.4) and 5.6 ms (3.7–5.6)",
+            "1,536 tokens (central, 127 ms)",
+        ] {
+            assert!(probes.contains(text), "{text}\n{probes}");
+        }
+        // The core's cells are at the box's pool, as on the 40 GB card; C' and D at the card's own.
+        let cells = cells(&A100_80GB);
+        let names: Vec<_> = cells
+            .iter()
+            .map(|c| (c.scenario, c.sessions, c.pool_tokens))
+            .collect();
+        assert_eq!(names[2], ("A: the core, the box's pool", 24, 36_400));
+        assert_eq!(cells[2].label, "A100 SXM4 80 GB (central)");
+        assert!(names.contains(&("C': Qwen3-14B-FP8 at its own pool", 40, 379_488)));
+        assert!(names.contains(&("D: Qwen3-4B at the card's own pool", 24, 502_432)));
+        // The report names the make target that writes it.
+        let text = report(&A100_80GB, &cells, &[], &[11]);
+        assert!(
+            text.starts_with(
+                "# Forecast: the A100 SXM4 80 GB against the frozen box\n\nWritten by `lh-sim \
+                 forecast` (`make forecast-a100 GPU=a100-80gb`)"
+            ),
+            "{text}"
+        );
+        assert!(report(&A100_40GB, &[], &[], &[11]).contains("(`make forecast-a100`) from"));
     }
 }

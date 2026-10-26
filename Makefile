@@ -153,16 +153,20 @@ reproduce-e1:
 	@ls $(E1_REPORT)/*.md
 
 # The A100 run's forecast, benchmarks/a100/forecast.md, from the 32x corpus (outside the repository) and its 48
-# traces with the largest contexts, E2's discriminating corpus, which long_traces.py links into FORECAST_LONG. Usage:
-# make forecast-a100 CORPUS=<the 32x corpus directory>.
+# traces with the largest contexts, E2's discriminating corpus, which long_traces.py links into FORECAST_LONG. GPU names
+# the card (lh-sim's profile): GPU=a100-80gb writes benchmarks/a100/forecast-80gb.md, for the A100 SXM4 80 GB, which
+# analysis.py reads for records whose card is one. Usage: make forecast-a100 CORPUS=<the 32x corpus directory>
+# [GPU=a100-80gb].
 FORECAST_LONG ?= build/weka-x32-long
+GPU ?= a100-40gb
+FORECAST_MD = benchmarks/a100/forecast$(if $(filter-out a100-40gb,$(GPU)),-$(GPU:a100-%=%)).md
 forecast-a100:
-	@test -n "$(CORPUS)" || { echo "usage: make forecast-a100 CORPUS=<the 32x corpus directory>" >&2; exit 2; }
+	@test -n "$(CORPUS)" || { echo "usage: make forecast-a100 CORPUS=<the 32x corpus directory> [GPU=a100-80gb]" >&2; exit 2; }
 	cargo build --release --locked -p lh-sim
 	uv run -q --no-project python benchmarks/e2/long_traces.py $(CORPUS) $(FORECAST_LONG) 48 >/dev/null
 	@mkdir -p benchmarks/a100
-	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu a100-40gb --markdown benchmarks/a100/forecast.md >/dev/null
-	@ls benchmarks/a100/forecast.md
+	$(E1_SIM) forecast $(CORPUS) $(FORECAST_LONG) --gpu $(GPU) --markdown $(FORECAST_MD) >/dev/null
+	@ls $(FORECAST_MD)
 
 # The A100 run's analysis (benchmarks/a100/analysis.py; docs/HARDWARE.md, the analysis) from a single host's records
 # as deploy/a100/pull.sh copies them, and the 32x corpus, into build/reproduce-a100/a100.md, with the bench venv for

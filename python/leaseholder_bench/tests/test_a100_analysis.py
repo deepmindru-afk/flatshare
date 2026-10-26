@@ -180,3 +180,108 @@ def test_the_tail_line_names_each_stock_setting_by_its_cap_and_threshold(tmp_pat
     assert f"stock, 2,048/0 1,600 ms (1,500{DASH}1,700, 2 runs)" in text
     assert f"stock, 1,536/768 1,500 ms (1,400{DASH}1,600, 2 runs)" in text
     assert f"stock, 2,048/1,024 1,200 ms (1,100{DASH}1,300, 2 runs)" in text
+
+
+def host_json(host: Path, gpu: str) -> None:
+    """The node record pull.sh copies, with the card as nvidia-smi names it."""
+    write(host / "node" / "host.json", json.dumps({"hostname": "a100", "gpu": {"name": gpu}}))
+
+
+@pytest.mark.parametrize(
+    ("gpu", "forecast", "card"),
+    [
+        ("NVIDIA A100-SXM4-80GB", "forecast-80gb.md", "A100 SXM4 80 GB"),
+        ("NVIDIA A100 80GB PCIe", "forecast-80gb.md", "A100 SXM4 80 GB"),
+        ("NVIDIA A100-SXM4-40GB", "forecast.md", "A100 40 GB"),
+        ("NVIDIA A100-PCIE-40GB", "forecast.md", "A100 40 GB"),
+        ("NVIDIA H100 80GB HBM3", "forecast.md", "A100 40 GB"),
+        (None, "forecast.md", "A100 40 GB"),
+    ],
+)
+def test_the_forecast_is_the_one_for_the_card_the_records_name(
+    tmp_path: Path, gpu: str | None, forecast: str, card: str
+) -> None:
+    host = tmp_path / "host"
+    if gpu is not None:
+        host_json(host, gpu)
+    assert analysis.gpu_name(host) == gpu
+    path = analysis.forecast_for(analysis.gpu_name(host))
+    assert path == A100 / forecast
+    assert analysis.read_forecast(path).card == card
+
+
+def test_each_forecast_reads_back_its_own_cards_numbers() -> None:
+    f40, f80 = (
+        analysis.read_forecast(analysis.FORECAST),
+        analysis.read_forecast(analysis.FORECAST_80GB),
+    )
+    # The 80 GB card's bandwidth terms are smaller and its compute terms the 40 GB card's.
+    assert f80.costs["central"] == {
+        "step_ms": 3.88,
+        "us_per_token": 41.33,
+        "ns_per_pair": 2.59,
+        "ns_per_context": 94.3,
+    }
+    assert f80.costs["low"]["step_ms"] == 2.54 and f40.costs["low"]["step_ms"] == 3.33
+    assert f80.probes == {
+        "kv_stock": f"1,328{DASH}1,369 ms (1,082{DASH}1,377)",
+        "kv_pr": f"126{DASH}145 ms (109{DASH}146)",
+        "prefill_stock": f"32.8 ms (25.7{DASH}35.4)",
+        "prefill_pr": f"5.6 ms (3.7{DASH}5.6)",
+    }
+    assert f40.probes["kv_stock"] == f"1,636{DASH}1,688 ms (1,411{DASH}1,695)"
+    assert f80.core == {"running": "10%", "busy": "71%", "stalled": "50%"}
+    assert f40.core == {"running": "13%", "busy": "76%", "stalled": "57%"}
+    with pytest.raises(ValueError):
+        analysis.forecast_core(analysis.FORECAST.read_text(), "A100 SXM4 80 GB")
+
+
+@pytest.mark.parametrize(
+    ("gpu", "forecast"),
+    [("NVIDIA A100-SXM4-80GB", "forecast-80gb.md"), ("NVIDIA A100-SXM4-40GB", "forecast.md")],
+)
+def test_a_report_compares_against_its_cards_forecast_and_says_which(
+    tmp_path: Path, gpu: str, forecast: str
+) -> None:
+    host = tmp_path / "host"
+    host_json(host, gpu)
+    probe_runs(host / "runs" / "a100")
+    point = host / "results" / "e2" / "a100-r1" / "w5-disc-frozen-s24"
+    write(point / "run.json", json.dumps({"arm": {"label": "frozen"}}))
+    write(point / "summary.json", json.dumps({"kv": {"running_share": 0.11}}))
+    f = analysis.read_forecast(A100 / forecast)
+    text = analysis.report(
+        host, tmp_path / "corpus", tmp_path / "no-lh-sim", tmp_path / "out", None
+    ).read_text()
+    assert text.startswith(f"# The {f.card} run against its forecast\n")
+    assert f"It compares against benchmarks/a100/{forecast}, the forecast for the {f.card}" in text
+    assert f"node/host.json names the card {gpu}" in text
+    assert f"| Case | {f.card}, measured |" in text
+    assert (
+        f"| KV case, stock: the voice turn's wait | 1,650 ms (1,600{DASH}1,700, 3 runs) | {f.probes['kv_stock']} |"
+        in text
+    )
+    assert f"| 150 ms (140{DASH}160, 3 runs) | {f.probes['kv_pr']} |" in text
+    assert f"against the forecast's {f.core['running']} (central) for the core" in text
+    assert (
+        f"the forecast puts the {f.card} at {f.core['busy']} busy, {f.core['stalled']} stalled and "
+        f"{f.core['running']} [modeled]"
+    ) in text
+    # Neither card's report quotes the other's forecast.
+    other = analysis.read_forecast(
+        analysis.FORECAST if forecast == "forecast-80gb.md" else analysis.FORECAST_80GB
+    )
+    assert other.probes["kv_stock"] not in text and other.card not in text
+
+
+def test_records_without_a_card_compare_against_the_40gb_forecast(tmp_path: Path) -> None:
+    host = tmp_path / "host"
+    probe_runs(host / "runs" / "a100")
+    text = analysis.report(
+        host, tmp_path / "corpus", tmp_path / "no-lh-sim", tmp_path / "out", None
+    ).read_text()
+    assert text.startswith("# The A100 40 GB run against its forecast\n")
+    assert (
+        "It compares against benchmarks/a100/forecast.md, the forecast for the A100 40 GB: the records have no "
+        "node/host.json naming their card."
+    ) in text

@@ -338,7 +338,8 @@ struct HardwareArgs {
     /// --token-scale scales no pool: each GPU has its own.
     #[command(flatten)]
     replay: ReplayArgs,
-    /// GPUs: rtx-5060-ti (the frozen box, measured), l4, a100-40gb and h100-sxm (modeled).
+    /// GPUs: rtx-5060-ti (the frozen box, measured), l4, a100-40gb and h100-sxm (modeled), and
+    /// a100-80gb (modeled), which the map leaves out.
     #[arg(
         long,
         value_delimiter = ',',
@@ -385,7 +386,7 @@ struct ForecastArgs {
     /// E2's discriminating corpus, the 48 traces of the 32x corpus with the largest contexts
     /// (`benchmarks/e2/long_traces.py` links them).
     long: PathBuf,
-    /// The GPU.
+    /// The GPU: a100-40gb, or a100-80gb (the A100 SXM4 80 GB, which the A100 run drew).
     #[arg(long, default_value = "a100-40gb")]
     gpu: Gpu,
     /// Seeds: E2's five rounds replay agent seeds 11 to 15.
@@ -1096,6 +1097,14 @@ mod tests {
         );
         assert!(parse(&["forecast", "WHOLE"]).is_err());
         assert!(parse(&["forecast", "WHOLE", "LONG", "--gpu", "a100"]).is_err());
+        // The A100 80 GB SXM4, the card the run drew, by name.
+        match parse(&["forecast", "WHOLE", "LONG", "--gpu", "a100-80gb"])
+            .unwrap()
+            .command
+        {
+            Command::Forecast(f) => assert_eq!(f.gpu, hardware::A100_80GB),
+            _ => panic!("not the forecast command"),
+        }
     }
 
     #[test]
