@@ -31,6 +31,7 @@ Flatshare's realtime voice plane on LiveKit Agents 1.8.8 ([ARCHITECTURE §4.2](.
 | `FLATSHARE_TURN_DETECTION` | `model` (default) or `vad` |
 | `FLATSHARE_PREEMPTIVE_GENERATION` | `true` (default) or `false` |
 | `FLATSHARE_EVENTS` | `on` (default): lifecycle events to the control plane through `FLATSHARE_LLM_UDS`; `off` |
+| `FLATSHARE_LLM_MODEL` | The model the agent's requests name (default the box's, `Qwen/Qwen3-4B-Instruct-2507-FP8`). An engine that serves another model answers a request for any other with 404: the `qwen3-14b` worker variant names Qwen3-14B-FP8, for the A100 kit's optional arm C' |
 
 Experiments change two settings. LiveKit's end-of-turn model waits up to the endpointing maximum (3 s) when it judges a line unfinished: on the synthesized callers that happened on about one turn in six, and put a 3 s mode in voice-to-voice latency unrelated to serving. Experiments therefore run with `FLATSHARE_TURN_DETECTION=vad`. That variant is `deploy/cyan/variants/vad-turns`: a turn ends a fixed delay after the end of speech (VAD plus LiveKit's 0.5 s minimum), the same for every arm. LiveKit's preemptive generation, on by default, starts the reply from the final transcript before the end of the turn is confirmed; `FLATSHARE_PREEMPTIVE_GENERATION=false` (the variant `deploy/cyan/variants/no-preemptive-generation`, which `flatshare-bench e2 run` links for an arm that asks for it) turns it off, one of E2's factors.
 
