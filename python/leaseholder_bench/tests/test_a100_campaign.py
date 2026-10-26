@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import itertools
+import json
 import os
 import re
 import subprocess
@@ -107,6 +108,11 @@ def test_a_prime_is_the_cores_arms_at_32_sessions() -> None:
     seeds = [campaign(A100 / f"a100-aprime-r{n}.campaign")[0] for n in (1, 2)]
     resubmit = [campaign(A100 / f"a100-resubmit-r{n}.campaign")[0] for n in (3, 4, 5)]
     assert seeds == [11, 12] and resubmit == [13, 14, 15]
+    # Each round pairs the two engines on its sample; voice alone, the SLO's reference, is the core's five points on
+    # the same host, which lh-bench e2 report reads for every point of that hardware.
+    for n in (1, 2):
+        arms = {arm.name for arm in campaign(A100 / f"a100-aprime-r{n}.campaign")[1]}
+        assert arms == {"a100-aprime-frozen-s32.toml", "a100-aprime-pr-ab48-s32.toml"}, n
 
 
 PROBE_LINE = (
@@ -237,6 +243,26 @@ def test_bench_marlin_imports_without_a_gpu_and_writes_its_rows(tmp_path: Path) 
     # 2 x 16 x 6,144 x 2,560 FLOP in 30 µs, a call's GPU time in a CUDA graph.
     assert lines[1] == "qkv,6144,2560,16,marlin,30.00,16.8,cuda-graph,"
     assert lines[3].startswith("qkv,6144,2560,16,deepgemm,,,,RuntimeError")
+
+
+def test_bench_host_gives_the_cpus_number_without_a_gpu_and_reads_a_rate_in_gb_per_s(
+    tmp_path: Path,
+) -> None:
+    bench = _module("lh_a100_bench_host", A100 / "bench_host.py")
+    # The engine's page, one layer's K or V of a 16-token block (8 heads of 128 at BF16), and a block of all 36 layers.
+    assert bench.PAGES == (32 * 1024, 64 * 1024, 16 * 144 * 1024)
+    assert bench.python_work() == bench.python_work()  # the same work on every host
+    assert bench.main(["--no-gpu", "--reps", "2", "--out", str(tmp_path)]) == 0
+    record = json.loads((tmp_path / "host.json").read_text())
+    assert record["python_ms"]["reps"] == 2 and record["python_ms"]["p50"] > 0
+    assert "link" not in record and "gpu" not in record
+    # 256 MiB in 20 ms is 13.42 GB/s, decimal, as PCIe's rates are given.
+    row = bench.Row("h2d", 32 * 1024, 8192, 256 * 2**20, 20.0)
+    assert round(row.gb_per_s, 2) == 13.42
+    assert bench.describe(row) == "link h2d: 256 MiB as 8,192 pages of 32 KiB: 20.00 ms, 13.42 GB/s"
+    assert bench.describe(bench.Row("d2h", None, 1, 256 * 2**20, 20.0)).startswith(
+        "link d2h: 256 MiB as one copy:"
+    )
 
 
 class _Cuda:

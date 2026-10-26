@@ -782,6 +782,26 @@ def test_the_batch_arm_holds_its_whole_batch_in_the_pool_and_records_that_it_for
         vllm.chmod(0o755)
         env = dry_env(home, hosts, run)
         batch = REPO / "benchmarks" / "a100" / "batch.sh"
+        # The clients' tokenizer is the engine's snapshot in the hub cache, at engine.yaml's revision: offline, the
+        # model's name resolves to nothing where the download was by commit (no refs/main).
+        env["HF_HUB_CACHE"] = str(home / "hub")
+        revision = re.search(
+            r"^revision: (\S+)$", (home / "leaseholder" / "node" / "engine.yaml").read_text(), re.M
+        )
+        assert revision, "engine.yaml pins no revision"
+        snapshot = home / "hub" / f"models--{MODEL.replace('/', '--')}" / "snapshots" / revision[1]
+        refused = subprocess.run(
+            ["bash", str(batch), "--rounds", "1"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert f"no tokenizer for {MODEL} at {revision[1]} in {home / 'hub'}" in refused.stdout
+        assert not lines(home / "vllm.log")  # no engine switched, no client started
+        snapshot.mkdir(parents=True)
+        (snapshot / "tokenizer_config.json").write_text("{}\n")
         done = subprocess.run(
             ["bash", str(batch), "--rounds", "1"],
             env=env,
@@ -794,6 +814,7 @@ def test_the_batch_arm_holds_its_whole_batch_in_the_pool_and_records_that_it_for
         assert len(calls) == 6  # two clients on each of three engines
         for call in calls:
             assert "--random-input-len 48 --random-output-len 64 " in call, call
+            assert f"--tokenizer {snapshot} " in call, call
         out = home / "leaseholder" / "runs" / "a100" / "batch"
         for name in ("frozen", "off", "on"):
             running = json.loads((out / f"{name}-running.json").read_text())
