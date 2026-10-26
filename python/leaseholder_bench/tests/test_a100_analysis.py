@@ -371,33 +371,47 @@ def test_tuned_vllm_pairs_with_the_cores_rounds_by_the_agents_sample(tmp_path: P
     ]
 
 
-def test_the_batch_section_sets_make_rooms_per_token_cost_beside_the_frozen_engines(
-    tmp_path: Path,
-) -> None:
+def test_the_batch_section_sets_make_rooms_output_beside_the_frozen_engines(tmp_path: Path) -> None:
+    # More requests running at once lengthen each one's time per token while the engine makes more tokens a second,
+    # so the section reads the code path's cost from the output (the A100's "off" engine: 215 running against 201,
+    # TPOT 6% longer, output 2% higher).
     batch = tmp_path / "batch"
-    for name, tpot in (("frozen", 20.0), ("off", 20.1), ("on", 20.4)):
-        for priority, throughput in ((0, 1000.0), (2, 9000.0)):
+    for name, tpot, output, ttft99 in (
+        ("frozen", 29.0, 9000.0, 1100.0),
+        ("off", 30.8, 9180.0, 1200.0),
+        ("on", 28.6, 10350.0, 8000.0),
+    ):
+        for priority, share, p99 in ((0, 0.1, 500.0), (2, 0.9, ttft99)):
             write(
                 batch / f"{name}-p{priority}.json",
                 json.dumps(
                     {
-                        "output_throughput": throughput,
+                        "output_throughput": output * share,
                         "median_tpot_ms": tpot,
                         "p99_tpot_ms": tpot * 1.5,
                         "median_ttft_ms": 80.0,
-                        "p99_ttft_ms": 400.0,
+                        "p99_ttft_ms": p99,
                     }
                 ),
             )
+        running = {"frozen": 201.0, "off": 215.0, "on": 154.0}[name]
         write(
             batch / f"{name}-running.json",
-            json.dumps({"running_p50": 256.0, "running_max": 256.0}),
+            json.dumps({"running_p50": running, "running_max": 256.0}),
         )
     lines = analysis.batch_lines(batch)
-    assert "| frozen | 10,000 | 20.00 / 30.00 | 20.00 / 30.00 | 80 / 400 | 256 / 256 |" in lines
+    assert (
+        "| frozen | 9,000 | 80 / 500 | 29.00 / 43.50 | 80 / 1,100 | 29.00 / 43.50 | 201 / 256 |"
+        in lines
+    )
+    assert (
+        "| make-room, the PRs' values | 10,350 | 80 / 500 | 28.60 / 42.90 | 80 / 8,000 |"
+        in lines[-3]
+    )
     assert lines[-1] == (
-        "Per output token at a batch of 256, against the frozen engine's: make-room, switches off 1.005; "
-        "make-room, the PRs' values 1.020. The scheduler's added cost is what it shows above 1.000."
+        "Output tokens a second at the batch, against the frozen engine's: make-room, switches off 1.020; "
+        "make-room, the PRs' values 1.150. With its switches off make-room schedules as vLLM does, so a ratio "
+        "under 1.000 there is its code path's cost per step."
     )
     assert analysis.batch_lines(tmp_path / "none") == [
         "Not measured: no batch arm (runs/a100/batch)."

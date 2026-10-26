@@ -23,7 +23,7 @@ which.
 5. A': the same over its points (results/e2/a100-aprime-r1, -r2) and the core's voice alone, the SLO's reference on
    this card, into OUT/e2-aprime, against the forecast's A' cell.
 6. The scheduler at a batch of 256 (runs/a100/batch, batch.sh): each engine's throughput, TPOT and TTFT by priority,
-   the batch it held, and make-room's per-token cost against the frozen engine's.
+   the batch it held, and each make-room engine's output tokens a second against the frozen engine's.
 7. The host around the card (runs/a100/host/host.json, bench_host.py): its CPU and its link against the box's, read
    with E0's GPU hit (the host's work on a prompt) and its CPU restore beyond it (the transfer).
 8. Across cards: the regime coordinates the box measured and the forecast gives the A100, beside the A100's measured
@@ -489,42 +489,50 @@ def rounds_table(points: list[Path]) -> list[str]:
 
 def batch_lines(batch: Path) -> list[str]:
     """The batch arm (batch.sh): each engine's two clients at 256 requests in flight, from vllm bench serve's results
-    and the engine's sampled running requests, and make-room's per-token cost beside the frozen engine's."""
+    and the engine's sampled running requests, and each make-room engine's output tokens a second against the frozen
+    engine's. With its switches off make-room schedules as vLLM does, so its ratio is its code path's cost per step; with
+    the PRs' values the schedule itself changes, which each priority's latency shows."""
     names = (
         ("frozen", "frozen"),
         ("off", "make-room, switches off"),
         ("on", "make-room, the PRs' values"),
     )
-    rows, tpot = [], {}
+    rows, output = [], {}
     for name, label in names:
         try:
             p0, p2 = (json.loads((batch / f"{name}-p{p}.json").read_text()) for p in (0, 2))
             running = json.loads((batch / f"{name}-running.json").read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        tpot[name] = p2["median_tpot_ms"]
+        output[name] = p0["output_throughput"] + p2["output_throughput"]
         rows.append(
-            f"| {label} | {p0['output_throughput'] + p2['output_throughput']:,.0f} | "
-            f"{p2['median_tpot_ms']:.2f} / {p2['p99_tpot_ms']:.2f} | {p0['median_tpot_ms']:.2f} / "
-            f"{p0['p99_tpot_ms']:.2f} | {p0['median_ttft_ms']:,.0f} / {p0['p99_ttft_ms']:,.0f} | "
-            f"{running['running_p50']:g} / {running['running_max']:g} |"
+            f"| {label} | {output[name]:,.0f} | "
+            + " | ".join(
+                f"{c['median_ttft_ms']:,.0f} / {c['p99_ttft_ms']:,.0f} | "
+                f"{c['median_tpot_ms']:.2f} / {c['p99_tpot_ms']:.2f}"
+                for c in (p0, p2)
+            )
+            + f" | {running['running_p50']:g} / {running['running_max']:g} |"
         )
     if not rows:
         return ["Not measured: no batch arm (runs/a100/batch)."]
     lines = [
-        "| Engine | Output tokens/s | Priority 2: TPOT p50 / p99 (ms) | Priority 0: TPOT p50 / p99 (ms) | "
-        "Priority 0: TTFT p50 / p99 (ms) | Running p50 / max |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Engine | Output tokens/s | Priority 0: TTFT p50 / p99 (ms) | Priority 0: TPOT p50 / p99 (ms) | "
+        "Priority 2: TTFT p50 / p99 (ms) | Priority 2: TPOT p50 / p99 (ms) | Running p50 / max |",
+        "|---|---:|---:|---:|---:|---:|---:|",
         *rows,
     ]
-    if "frozen" in tpot and len(tpot) > 1:
+    if "frozen" in output and len(output) > 1:
         lines += [
             "",
-            "Per output token at a batch of 256, against the frozen engine's: "
+            "Output tokens a second at the batch, against the frozen engine's: "
             + "; ".join(
-                f"{dict(names)[n]} {tpot[n] / tpot['frozen']:.3f}" for n in tpot if n != "frozen"
+                f"{dict(names)[n]} {output[n] / output['frozen']:.3f}"
+                for n in output
+                if n != "frozen"
             )
-            + ". The scheduler's added cost is what it shows above 1.000.",
+            + ". With its switches off make-room schedules as vLLM does, so a ratio under 1.000 there is its code "
+            "path's cost per step.",
         ]
     return lines
 
