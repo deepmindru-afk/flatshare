@@ -34,8 +34,7 @@ uv sync --python 3.12 --extra test      # in python/flatshare_bench: its own .ve
 On macOS, use Python 3.13 (`--python 3.13`): `flatshare-bench e2 run` needs `os.waitid`, which macOS has from
 3.13 on. On 3.12 it refuses to start, and its tests skip with that reason.
 
-[The quickstart](#quickstart-cyan) replays a subset of the traces through AIPerf against the mock server, end to
-end.
+[The quickstart](#quickstart-cyan) replays a subset of the traces through AIPerf to the mock server.
 
 ## Trace scaling
 
