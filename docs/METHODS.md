@@ -127,7 +127,7 @@ Three configurations of two GPU nodes were planned: a voice node and an agent no
 
 ## Limitations
 
-- One model (Qwen3-4B-FP8), one GPU model, one host; synthesized callers and fixed endpointing.
+- One model (Qwen3-4B-FP8); one GPU model and one host for every experiment but the A100 run, which repeated E2's core on one A100 SXM4 80 GB; synthesized callers and fixed endpointing.
 - 50 turns a point: a p95 lies between the third- and fourth-largest turn, so single runs differ by a few hundred milliseconds; a configuration near the SLO moves about 150 ms from run to run, one that misses it up to 1.9 s, and SGLang 7 s.
 - The agent traces are block-scaled 32×, which keeps their reuse structure and changes their timing.
 - W2–W4 count every turn, the first of each call included, which is slower under load: without it, the standard scenario's p95 at 16 agent sessions drops from 2,323 to 2,186 ms for the frozen box. W5's calls open with an unmeasured warm-up turn. Background goodput is counted over the calls, whose duration differs by configuration, and over their first 240 s, the same span for every point.

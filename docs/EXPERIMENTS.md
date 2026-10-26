@@ -1,6 +1,6 @@
 # Experiments
 
-How Flatshare's measurements were made. Every experiment runs on one frozen box (the same model, precision, memory split and SLO) and compares against tuned vLLM and against what engines and routers already ship. The numbers are in [BENCHMARKS.md](BENCHMARKS.md), the story in [METHODS.md](METHODS.md), and the terms (arms, campaigns, W0 to W8) in [GLOSSARY.md](GLOSSARY.md).
+How Flatshare's measurements were made. Every experiment runs on one frozen box (the same model, precision, memory split and SLO), E2's core on an A100 SXM4 80 GB as well, and compares against tuned vLLM and against what engines and routers already ship. The numbers are in [BENCHMARKS.md](BENCHMARKS.md), the story in [METHODS.md](METHODS.md), and the terms (arms, campaigns, W0 to W8) in [GLOSSARY.md](GLOSSARY.md).
 
 | # | Experiment | Question | State |
 |---|---|---|---|
