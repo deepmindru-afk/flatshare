@@ -953,7 +953,8 @@ def test_an_estimate_given_for_a_block_starts_it_where_the_pages_would_miss_the_
 ) -> None:
     # A deadline 17 minutes away is short of block 4's 29-minute estimate: the block does not start. With
     # --estimate 4=15 it starts, and campaign.sh's own budgets run its first point (15 minutes: W5's agent point and
-    # an engine switch) but not the next, voice alone, which this host has measured at 20 minutes before: the run
+    # an engine switch) but not the next, voice alone, which this host has measured at 20 minutes before, with a switch
+    # it has measured at 2 (the longest of its kind, which a fake switch's own second or so does not move): the run
     # stops before its deadline, exit 0, the block undone. The single-host rehearsal runs block 4 so on the box.
     hosts = tmp_path / "hosts"
     home = a100_host(hosts)
@@ -976,7 +977,7 @@ def test_an_estimate_given_for_a_block_starts_it_where_the_pages_would_miss_the_
     assert "block 4: about 29 minutes would end after" in (runs / "blocks.log").read_text()
     assert not (results / "a100-r1").exists()
     results.mkdir(parents=True)
-    (results / "durations.tsv").write_text("voice 1200\n")
+    (results / "durations.tsv").write_text("voice 1200\nswitch 120\n")
     done = run("--estimate", "4=15", "4")
     assert done.returncode == 0, done.stdout + done.stderr
     log = (runs / "blocks.log").read_text()
