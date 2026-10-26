@@ -671,7 +671,7 @@ host memory), the release's kit ([HARDWARE.md](HARDWARE.md#the-a100-run)): E2's 
 its revision, its 5 GiB pool, 512/256 and 20 GiB CPU tier, 24 sessions of the long traces and two callers, W5's arm
 files and samples of the agents; only the card, its precision path (Marlin's W8A16, no FP8 units) and the host change.
 Records: [`benchmarks/results/2026-10-26-a100`](../benchmarks/results/2026-10-26-a100/README.md); the analysis against
-the forecast written before the run is its `a100.md`.
+the forecast written before the run is its [`a100.md`](../benchmarks/results/2026-10-26-a100/a100.md).
 
 **E2, by round.** The V2V p95 (ms) and the agents' tokens a second over the calls' first 240 s, each round on W5's
 sample of the agents for its number; voice alone sets the SLO at 1,419 + 250 = 1,669 ms. No turn of the 750 failed.
@@ -715,12 +715,13 @@ samples, its TTFT p50 1.0 and 2.0 s against frozen's 6.5 and 5.8 s; the PRs' val
 No turn of the 100 failed. With 24 sessions on the same sample the agents made 10,749 and 10,125 tokens a second; the
 forecast placed 32 sessions at a running share of 18% (fitted: 15%) [modeled].
 
-**The probes** (blocks 1 to 3; each run's numbers in `a100.md`): the KV case's wait on stock vLLM 1,721–1,750 ms at
-512/256 and 1,620–1,645 ms at vLLM's default 2,048/0, and the first token with the PRs' values 150–176 ms; the prefill
-case's token gap, 1st to 16th, 32 ms on stock vLLM and 7 ms with the PRs' values; the calls' first-token p95 beside 12
-agents 3,102–3,126 ms at 512/256, 2,518–2,535 ms at 2,048/0, 3,446–3,687 ms at 1,536/768 and 167–179 ms with the PRs'
-values, over 57–75 turns a run, none failed. With FlashInfer's attention in place of FlashAttention 2 (the backend
-arm, after the core), the KV case's wait on stock vLLM at 512/256 was 1,580–1,607 ms, 8% shorter at the median.
+**The probes** (blocks 1 to 3; each run's numbers in [`a100.md`](../benchmarks/results/2026-10-26-a100/a100.md)): the KV
+case's wait on stock vLLM 1,721–1,750 ms at 512/256 and 1,620–1,645 ms at vLLM's default 2,048/0, and the first token
+with the PRs' values 150–176 ms; the prefill case's token gap, 1st to 16th, 32 ms on stock vLLM and 7 ms with the PRs'
+values; the calls' first-token p95 beside 12 agents 3,102–3,126 ms at 512/256, 2,518–2,535 ms at 2,048/0, 3,446–3,687 ms
+at 1,536/768 and 167–179 ms with the PRs' values, over 57–75 turns a run, none failed. With FlashInfer's attention in
+place of FlashAttention 2 (the backend arm, after the core), the KV case's wait on stock vLLM at 512/256 was
+1,580–1,607 ms, 8% shorter at the median.
 
 **E0** (block 1, 3 repetitions, p50 in ms):
 
