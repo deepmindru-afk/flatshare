@@ -72,11 +72,17 @@ VOICE_EVENTS = VOICE / "src" / "leaseholder_voice" / "events.py"
 GATEWAY_METRICS = REPO / "crates" / "lh-gateway" / "metrics.txt"
 """The gateway's exposition under the lifecycle policy, every family it registers (``make metrics``
 writes it, and the gateway's tests check it is current)."""
-# The committed E2 records: W4's, W5's re-measure, FB's rounds on the final code, and the Marlin dry run's point.
+# The committed E2 records: W4's, W5's re-measure, FB's rounds on the final code, the Marlin dry run's point, and
+# the A100 run's points (beside its other records, under e2/).
 RESULTS = REPO / "benchmarks" / "results" / "2026-10-23-e2"
 W5_RESULTS = REPO / "benchmarks" / "results" / "2026-10-24-e2-w5"
 FB_RESULTS = REPO / "benchmarks" / "results" / "2026-10-25-e2-fb"
 MARLIN_RESULTS = REPO / "benchmarks" / "results" / "2026-10-25-marlin-dry" / "session2"
+A100_RESULTS = REPO / "benchmarks" / "results" / "2026-10-26-a100"
+A100_E2 = A100_RESULTS / "e2"
+# The A100 report's points, as the Makefile's E2_A100_POINTS names them: the core's rounds and the arms paired with
+# its first two; A' (32 sessions) is a workload of its own, which make reproduce-a100 reports.
+A100_REPORTED = ("a100-r", "a100-tuned-r", "a100-prtuned-r")
 
 
 def record(end: float, *, phase: str = "profiling", ttft: float = 100.0, **extra: Any) -> str:
@@ -1245,7 +1251,7 @@ def unredacted(data: Any) -> list[str]:
 
 @pytest.mark.parametrize(
     "results",
-    [RESULTS, W5_RESULTS, FB_RESULTS, MARLIN_RESULTS],
+    [RESULTS, W5_RESULTS, FB_RESULTS, MARLIN_RESULTS, A100_E2],
     ids=lambda p: str(p.relative_to(REPO / "benchmarks" / "results")),
 )
 def test_the_committed_records_are_complete_and_hold_no_credential(results: Path) -> None:
@@ -1268,9 +1274,13 @@ def test_the_committed_records_give_their_committed_report(tmp_path: Path) -> No
     # (make reproduce-e2 E2_REPORT=<its report/> rewrites it), so that a change to the report's code
     # shows in what it changes there.
     reports = sorted(REPO.glob("benchmarks/results/*/report"))
-    assert {RESULTS / "report", W5_RESULTS / "report"} <= set(reports)
+    assert {RESULTS / "report", W5_RESULTS / "report", A100_RESULTS / "report"} <= set(reports)
     for committed in reports:
-        dirs = sorted(run.parent for run in committed.parent.glob("*/*/run.json"))
+        if committed.parent == A100_RESULTS:
+            runs = [run for c in A100_REPORTED for run in A100_E2.glob(f"{c}[0-9]/*/run.json")]
+        else:
+            runs = list(committed.parent.glob("*/*/run.json"))
+        dirs = sorted(run.parent for run in runs)
         rows, incomplete = load_points(dirs)
         assert dirs and not incomplete
         out = tmp_path / committed.parent.name
@@ -1282,7 +1292,7 @@ def test_the_committed_records_give_their_committed_report(tmp_path: Path) -> No
 
 @pytest.mark.parametrize(
     "results",
-    [RESULTS, W5_RESULTS, FB_RESULTS, MARLIN_RESULTS],
+    [RESULTS, W5_RESULTS, FB_RESULTS, MARLIN_RESULTS, A100_E2],
     ids=lambda p: str(p.relative_to(REPO / "benchmarks" / "results")),
 )
 def test_a_committed_record_exports_to_itself(tmp_path: Path, results: Path) -> None:
