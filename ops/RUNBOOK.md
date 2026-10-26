@@ -119,7 +119,7 @@ journalctl --user -u flatshare-voice-worker -f          # JSON logs; "registered
 - An `Environment=FLATSHARE_LLM_UDS=%t/flatshare/phastform-engine.sock` drop-in sends the LLM straight to the engine, bypassing the gateway.
 - `deploy/cyan/variants/no-preemptive-generation/flatshare-voice-worker.conf` turns LiveKit's preemptive generation off (`FLATSHARE_PREEMPTIVE_GENERATION=false`), for E2's factor.
 - `deploy/cyan/variants/no-events/flatshare-voice-worker.conf` stops the worker's lifecycle events (`FLATSHARE_EVENTS=off`), for arm 9's ablation; the turn lines stay.
-- `deploy/cyan/variants/qwen3-14b/flatshare-voice-worker.conf` has the agent's requests name Qwen3-14B-FP8 (`FLATSHARE_LLM_MODEL`), for an engine that serves it in place of the box's model: the A100 kit's optional arm C' (`benchmarks/a100/cprime.sh` links it and removes it).
+- `deploy/cyan/variants/qwen3-14b/flatshare-voice-worker.conf` makes the agent's requests name Qwen3-14B-FP8 (`FLATSHARE_LLM_MODEL`), for an engine that serves it in place of the box's model: the A100 kit's optional arm C' (`benchmarks/a100/cprime.sh` links it and removes it).
 
 **Lifecycle events.** Each session's end logs its counts (`journalctl --user -u flatshare-voice-worker | grep '"session ended"'`: `events_sent`, `events_dropped`, `events_failed`), and the gateway counts what it received in `flatshare_gateway_events_total{source="voice-worker"}`. With the LLM on an engine's socket (the bypass) the worker sends none.
 
