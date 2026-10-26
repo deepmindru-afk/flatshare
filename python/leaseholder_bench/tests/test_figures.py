@@ -18,6 +18,7 @@ REPO = Path(__file__).resolve().parents[3]
 DOCS = REPO / "docs" / "figures"
 W4 = REPO / "benchmarks" / "results" / "2026-10-23-e2"
 W5 = REPO / "benchmarks" / "results" / "2026-10-24-e2-w5"
+A100 = REPO / "benchmarks" / "results" / "2026-10-26-a100"
 SIZES = {style.TITLE, style.LABEL, style.VALUE, style.NOTE}
 """The type's sizes, one per role; a sub- or superscript sets its role's size at 72%."""
 
@@ -127,6 +128,16 @@ def drawn(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     rows, incomplete = load_points(sorted(run.parent for run in W5.glob("*/*/run.json")))
     assert rows and not incomplete
     write_report(rows, out / "w5", dots=read_dots(W5 / "figure.toml"))
+    # make e2-gpus-figure: the rows the A100's figure.toml names, from W5's records and the A100's core, tuned vLLM's
+    # and the PRs' values' at its step cap.
+    a100 = sorted(
+        run.parent
+        for campaign in ("a100-r", "a100-tuned-r", "a100-prtuned-r")
+        for run in A100.glob(f"e2/{campaign}[0-9]/*/run.json")
+    )
+    rows, incomplete = load_points(sorted(run.parent for run in W5.glob("*/*/run.json")) + a100)
+    assert rows and not incomplete
+    write_report(rows, out / "gpus", dots=read_dots(A100 / "figure.toml"))
     # make method-figure.
     diagrams.render(out)
     return {
@@ -134,6 +145,8 @@ def drawn(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "e2-waterfall.svg": out / "e2" / "waterfall.svg",
         "e2-voice-p95.svg": out / "w5" / "voice-p95.svg",
         "e2-voice-p95-narrow.svg": out / "w5" / "voice-p95-narrow.svg",
+        "e2-voice-p95-gpus.svg": out / "gpus" / "voice-p95.svg",
+        "e2-voice-p95-gpus-narrow.svg": out / "gpus" / "voice-p95-narrow.svg",
         "method.svg": out / "method.svg",
         "method-narrow.svg": out / "method-narrow.svg",
     }

@@ -18,10 +18,18 @@ E2_REPORT ?= build/reproduce-e2
 # W5's re-measure, whose report reads its own voice-alone runs for the SLO.
 E2_W5_RESULTS := benchmarks/results/2026-10-24-e2-w5
 E2_W5_REPORT ?= build/reproduce-e2-w5
+# The A100 run's E2 points (benchmarks/a100/run.sh on Google Colab, 2026-10-26), under e2/ beside its other records:
+# the core's five rounds, and tuned vLLM's two and the PRs' values' at its step cap, which pair with the core's first two:
+# the paired design reproduce-e2-a100 reports. A' (32 sessions) is a workload of its own, which make reproduce-a100
+# reports from the raw records.
+E2_A100_RESULTS := benchmarks/results/2026-10-26-a100
+E2_A100_POINTS = $(wildcard $(foreach c,a100-r a100-tuned-r a100-prtuned-r,$(E2_A100_RESULTS)/e2/$(c)[0-9]/*/run.json))
+E2_A100_REPORT ?= build/reproduce-e2-a100
 
 .PHONY: check lint lint-rust lint-python fmt test test-rust test-vllm test-make-room test-trace test-make-room-ci \
   test-python schema metrics \
-  reproduce-e1 reproduce-calibration reproduce-e2 reproduce-e2-w5 figures e2-figures e2-w5-figure method-figure \
+  reproduce-e1 reproduce-calibration reproduce-e2 reproduce-e2-w5 reproduce-e2-a100 figures e2-figures e2-w5-figure \
+  e2-gpus-figure method-figure \
   demo-video forecast-a100 forecast-fitted profiles reproduce-a100 check-a100-calibration
 
 check: lint test
@@ -233,6 +241,12 @@ reproduce-e2:
 reproduce-e2-w5:
 	@$(MAKE) --no-print-directory reproduce-e2 E2_RESULTS=$(E2_W5_RESULTS) E2_REPORT=$(E2_W5_REPORT)
 
+# The same of the A100's core, tuned vLLM and the PRs' values at its step cap, from the A100 run's records
+# (benchmarks/results/2026-10-26-a100).
+reproduce-e2-a100:
+	@cd python/leaseholder_bench && uv run -q lh-bench e2 report \
+	  $(abspath $(dir $(E2_A100_POINTS))) --out $(abspath $(E2_A100_REPORT))
+
 # E2's figures in the docs, docs/figures/e2-frontier.svg and e2-waterfall.svg, from the records of the configurations an
 # operator could deploy (the ablations left out), each with all its runs. The README's animation is demo.py's
 # (demo-video).
@@ -257,19 +271,31 @@ e2-w5-figure:
 	cp build/e2-w5-figure/voice-p95.svg docs/figures/e2-voice-p95.svg
 	cp build/e2-w5-figure/voice-p95-narrow.svg docs/figures/e2-voice-p95-narrow.svg
 
+# The README's chart of both GPUs, docs/figures/e2-voice-p95-gpus.svg and its phone layout e2-voice-p95-gpus-narrow.svg:
+# the rows the A100 run's figure.toml names, W5's from the box's records and the A100's from its own, each group
+# against its own voice alone's SLO (the A100 ran the box's arm files, so each group names the GPU its points ran on).
+e2-gpus-figure:
+	@cd python/leaseholder_bench && uv run -q lh-bench e2 report \
+	  $(abspath $(dir $(wildcard $(E2_W5_RESULTS)/*/*/run.json) $(E2_A100_POINTS))) \
+	  --dots $(abspath $(E2_A100_RESULTS)/figure.toml) --out $(abspath build/e2-gpus-figure) >/dev/null
+	@mkdir -p docs/figures
+	cp build/e2-gpus-figure/voice-p95.svg docs/figures/e2-voice-p95-gpus.svg
+	cp build/e2-gpus-figure/voice-p95-narrow.svg docs/figures/e2-voice-p95-gpus-narrow.svg
+
 # The README's method figure, docs/figures/method.svg and its phone layout method-narrow.svg: the voice agent and the
 # coding agents on one GPU, and the two scheduler rules of #63350 and #63351, drawn by leaseholder_bench.diagrams.
 method-figure:
 	cd python/leaseholder_bench && uv run -q python -m leaseholder_bench.diagrams $(abspath docs/figures)
 
 # Every figure under docs/figures that its records or its code draw; the bench's tests check each is current.
-figures: e2-figures e2-w5-figure method-figure
+figures: e2-figures e2-w5-figure e2-gpus-figure method-figure
 
 # The demo video, DEMO_OUT, and the README's animation, docs/figures/e2-demo.webp with its dark theme and its phone
 # layout (e2-demo-dark.webp, e2-demo-narrow.webp, e2-demo-narrow-dark.webp), from the calls that demo.campaign's two
 # points saved (the v1.0 release's leaseholder-raw-records-demo.tar.gz has them): make demo-video DEMO=<the directory
 # of DEMO_POINTS>. demo.py draws them (benchmarks/e2/README.md, The demo video) with the names the README's chart gives
-# the two configurations, and W5's report for the SLO and the closing card.
+# the two configurations, W5's report for the SLO and the closing card, and the A100's (reproduce-e2-a100's, committed
+# as its report/) for the card's second group: the same two configurations on the A100.
 DEMO_POINTS := w5-disc-frozen-s24 w5-disc-pr-ab48-s24
 DEMO_OUT ?= build/leaseholder-demo.mp4
 demo-video:
@@ -277,6 +303,7 @@ demo-video:
 	@mkdir -p $(dir $(DEMO_OUT)) docs/figures
 	uv run -q benchmarks/e2/demo.py $(addprefix $(abspath $(DEMO))/,$(DEMO_POINTS)) \
 	  --labels "Tuned vLLM 0.32" "#63350 and #63351" --summary $(E2_W5_RESULTS)/report/frontier.csv \
+	  --also $(E2_A100_RESULTS)/report/frontier.csv \
 	  --heading "A voice agent and coding agents on one GPU" --turns 10 --out $(DEMO_OUT) \
 	  --excerpt docs/figures/e2-demo
 
