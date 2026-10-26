@@ -135,7 +135,7 @@ At 16 agent sessions, every arm (V2V p50 / p95 / p99 in ms; the realtime first b
 
 What the standard scenario says:
 - **At 8 agent sessions every vLLM arm measured in W2 holds the voice SLO** (1,871–1,886 ms against 1,994). SGLang does not (3,228 ms).
-- **At 16, the realistic operating point, none clearly does, and the arms are within noise of each other.** The best stock cell, `--max-num-seqs 12`, SMG and the static cap of 2 land at 2,104–2,215 ms, 110–221 ms above the SLO; `--max-num-queued-tokens` refuses work, voice turns included (2 of 50 failed), and lands above it too (2,133 ms). No gateway policy or engine knob separates itself from tuned vLLM here.
+- **At 16, the realistic operating point, none clearly does, and the arms are within noise of each other.** The frozen box, the best stock cell, `--max-num-seqs 12`, SMG and the static cap of 2 land at 2,104–2,215 ms, 110–221 ms above the SLO; `--max-num-queued-tokens` refuses work, voice turns included (2 of 50 failed), and lands above it too (2,133 ms). No gateway policy or engine knob separates itself from tuned vLLM here.
 - **The step cap shows in the realtime first byte, not in V2V.** At 24 agent sessions, priority scheduling alone gives a first-byte p95 of 2,243 ms and the 512/256 step cap 542 ms, but V2V p95 is 4,360 against 3,865 ms: the rest of the turn, decoding to the first sentence and TTS, still shares the GPU with agent prefills. No arm holds the SLO at 24.
 - **SGLang's deficit was its missing host tier.** Without one it is the worst arm at every load; with HiCache, written through like vLLM's CPU tier, it matches vLLM: 1,822 ms at 8 agent sessions and 2,218 ms at 16 (on the W3 build), against the frozen box's 2,215 ms (on the W2 build).
 - **Preemptive generation off** changes nothing measurable (2,278 against 2,215 ms), and **more callers** cost what they cost alone and some: four callers beside 16 agent sessions reach 2,599 ms against 2,017 ms for four callers alone (their SLO 2,267 ms).
@@ -673,11 +673,11 @@ sample of the agents for its number; voice alone sets the SLO at 1,419 + 250 = 1
 | Median | 1,419 | 4,986 / 8,633 | 1,634 / 8,651 | 96% |
 
 - **Every round under the SLO with the PRs' values**, by 6 to 60 ms; frozen 2.5 to 4.0 s over. The agents' whole-call
-  tokens/s with the PRs' values were 95–103% of frozen's round by round, and their TTFT p50 moved by −1.2 to +1.9 s
+  tokens/s with the PRs' values were 95–103% of frozen's round by round, and their TTFT p50 moved by −1.2 to +1.8 s
   (frozen's 5.8–18.9 s across the rounds, p99 22–38 s).
 - **Less of a squeeze than the box's.** Two calls found KV short (the measured running share) 4–9% of the time beside
-  frozen and 2–7% beside the PRs' values, against the box's 17% in W5 and the forecast's 10% [modeled]; frozen preempted
-  29–75 agent requests a point, the PRs' values 31–78.
+  frozen and 2–7% beside the PRs' values, against the forecast's 17% for the box, on its measured costs, and 10% for this
+  card [modeled]; frozen preempted 29–75 agent requests a point, the PRs' values 31–78.
 
 **At vLLM's default 2,048/0**, the card's best stock cap in the probes, on rounds 1 and 2's samples: tuned vLLM, then
 the PRs' values at that cap (arm 8), the V2V p95 (ms) / the agents' tokens a second over the calls' first 240 s, with
@@ -748,8 +748,8 @@ priority 2 in flight, 48 prompt and 64 output tokens each, so that all 256 hold 
   frozen's, its median lower, as a steady stream of priority 0 first tokens holds their prefill back.
 
 **The host** (`bench_host.py`): Python's fixed workload 227 ms at the median (the box's 381); pinned host memory to the
-card 10.08 GB/s at the CPU tier's 32 KiB pages, 11.09 at 64 KiB, 12.28 at a 16-block page of 2,304 KiB and 12.32 in one
-copy (the box's 5.44, 6.03, 6.74, 6.76), and back to the host 10.61, 11.62, 12.80 and 12.86.
+card 10.08 GB/s at the CPU tier's 32 KiB pages, 11.09 at 64 KiB, 12.28 at 2,304 KiB (a 16-token block of all 36 layers)
+and 12.32 in one copy (the box's 5.44, 6.03, 6.74, 6.76), and back to the host 10.61, 11.62, 12.80 and 12.86.
 
 ## Failure drills
 

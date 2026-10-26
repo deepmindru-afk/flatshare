@@ -277,7 +277,7 @@ measured, so the host is not what the simulator misses there.
 ### On Google Colab
 
 The run of 2026-10-26 had an A100 SXM4 80 GB on a Colab runtime with high RAM: a container (Ubuntu 24.04, root, no
-systemd user manager) with 12 vCPUs of a 2.20 GHz Xeon (Cascade Lake), 167 GB of RAM, an 83 GB `/dev/shm`, driver
+systemd user manager) with 12 vCPUs of a 2.20 GHz Xeon (Cascade Lake), 167 GiB of RAM, an 82 GiB `/dev/shm`, driver
 580.82.07 and CUDA 13.0's toolkit. Colab's command-line client
 ([google-colab-cli](https://github.com/googlecolab/google-colab-cli), its `colab` command, signed in once) makes the
 runtime and reaches it:
